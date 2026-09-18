@@ -138,8 +138,8 @@ func TestOpenRunsInitialMigrationAndConfiguresSQLite(t *testing.T) {
 	if err := store.SQLDB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatalf("migration count: %v", err)
 	}
-	if migrationCount != 1 {
-		t.Fatalf("migration count = %d, want 1", migrationCount)
+	if migrationCount != 2 {
+		t.Fatalf("migration count = %d, want 2", migrationCount)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("close: %v", err)
@@ -153,8 +153,8 @@ func TestOpenRunsInitialMigrationAndConfiguresSQLite(t *testing.T) {
 	if err := reopened.SQLDB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatalf("reopen migration count: %v", err)
 	}
-	if migrationCount != 1 {
-		t.Fatalf("reopen migration count = %d, want 1", migrationCount)
+	if migrationCount != 2 {
+		t.Fatalf("reopen migration count = %d, want 2", migrationCount)
 	}
 }
 
@@ -217,6 +217,7 @@ func TestPersistenceAndSecureIDs(t *testing.T) {
 		ProviderID: provider.ID,
 		ListID:     list.ID,
 		Title:      "generated task",
+		Assignee:   "owner",
 		Priority:   domain.PriorityNormal,
 		SyncState:  domain.SyncStateLocal,
 	})
@@ -245,7 +246,7 @@ func TestPersistenceAndSecureIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get persisted task: %v", err)
 	}
-	if got.Title != task.Title || got.ProviderID != provider.ID {
+	if got.Title != task.Title || got.ProviderID != provider.ID || got.Assignee != task.Assignee {
 		t.Fatalf("persisted task = %#v", got)
 	}
 }

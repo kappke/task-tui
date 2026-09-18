@@ -114,6 +114,7 @@ func (m Mapper) MapTaskContext(ctx context.Context, input wireTask, listID domai
 		ProviderID:  m.ProviderID,
 		ListID:      listID,
 		RemoteID:    stringPointer(remoteID),
+		Assignee:    mapAssignee(input.Assignees),
 		Title:       input.Name,
 		Description: input.Description,
 		Status:      input.Status.Status,
@@ -297,4 +298,27 @@ func mapPriority(value string, orderIndex string) domain.Priority {
 	default:
 		return domain.PriorityNone
 	}
+}
+
+func mapAssignee(values []wireAssignee) string {
+	labels := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		label := strings.TrimSpace(value.Username)
+		if label == "" {
+			label = strings.TrimSpace(value.Name)
+		}
+		if label == "" {
+			label = strings.TrimSpace(value.ID.String())
+		}
+		if label == "" {
+			continue
+		}
+		if _, ok := seen[label]; ok {
+			continue
+		}
+		seen[label] = struct{}{}
+		labels = append(labels, label)
+	}
+	return strings.Join(labels, ", ")
 }

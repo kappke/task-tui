@@ -73,6 +73,9 @@ func (m *Model) ensureUI() {
 	if m.UI.ExpandedNodes == nil {
 		m.UI.ExpandedNodes = make(map[TreeNodeRef]bool)
 	}
+	if m.UI.CollapsedGroups == nil {
+		m.UI.CollapsedGroups = make(map[string]bool)
+	}
 	if len(m.KeyMap.Bindings) == 0 {
 		m.KeyMap = DefaultKeyMap()
 	}
@@ -185,8 +188,19 @@ func (m *Model) reconcileSelection(oldNode TreeNodeRef, oldTask TaskRef) {
 
 	rows := m.VisibleTasks()
 	if taskIndex := findTask(rows, oldTask); taskIndex >= 0 {
-		m.UI.TaskCursor = taskIndex
-		m.UI.SelectedTask = taskRef(rows[taskIndex])
+		m.selectTaskAt(taskIndex)
+		m.keepVisible()
+		return
+	}
+	if _, ok := m.taskRowForRef(oldTask); ok {
+		m.UI.SelectedTask = oldTask
+		groups := m.VisibleTaskGroups()
+		for index, group := range groups {
+			if findTask(group.Rows, oldTask) >= 0 {
+				m.focusTaskGroupHeader(groups, index, oldTask)
+				break
+			}
+		}
 		m.keepVisible()
 		return
 	}
@@ -354,6 +368,11 @@ func commandResultText(command AppCommand) string {
 		return "Task completion updated"
 	case CommandDeleteTask:
 		return "Task deleted"
+	case CommandGroup:
+		if command.GroupBy == TaskGroupNone {
+			return "Task grouping cleared"
+		}
+		return "Tasks grouped by " + string(command.GroupBy)
 	case CommandRefresh:
 		return "Refresh completed"
 	default:
@@ -432,6 +451,8 @@ func (m Model) updateBrowse(key KeyMsg, action Action) (Model, Cmd) {
 		m.scrollHorizontal(horizontalScrollStep)
 	case ActionSelect:
 		m.selectCurrent()
+	case ActionToggleGroup:
+		m.toggleTaskGroup()
 	case ActionQuit:
 		m.UI.Quitting = true
 		m.Status = Status{Level: StatusInfo, Text: "Quit requested"}
@@ -498,6 +519,10 @@ func (m *Model) moveCursor(delta int) {
 		m.UI.TaskCursor = 0
 		m.selectTaskAt(0)
 	} else {
+		if m.UI.GroupBy != TaskGroupNone {
+			m.moveGroupedCursor(delta)
+			return
+		}
 		rows := m.VisibleTasks()
 		if len(rows) == 0 {
 			m.Status = Status{Level: StatusWarning, Text: "No tasks in this view"}
@@ -506,6 +531,121 @@ func (m *Model) moveCursor(delta int) {
 		cursor := clamp(m.UI.TaskCursor+delta, 0, len(rows)-1)
 		m.UI.TaskCursor = cursor
 		m.UI.SelectedTask = taskRef(rows[cursor])
+	}
+}
+
+func (m *Model) moveGroupedCursor(delta int) {
+	groups := m.VisibleTaskGroups()
+	if len(groups) == 0 {
+		m.Status = Status{Level: StatusWarning, Text: "No tasks in this view"}
+		return
+	}
+
+	groupIndex := m.currentTaskGroupIndex(groups)
+	if groupIndex < 0 {
+		m.focusTaskGroupHeader(groups, 0, TaskRef{})
+		return
+	}
+
+	if m.UI.TaskHeaderSelected {
+		if delta > 0 {
+			if !groups[groupIndex].Collapsed && len(groups[groupIndex].Rows) > 0 {
+				m.selectTaskAt(m.taskGroupRowStart(groups, groupIndex))
+				return
+			}
+			if groupIndex+1 < len(groups) {
+				m.focusTaskGroupHeader(groups, groupIndex+1, TaskRef{})
+			}
+			return
+		}
+
+		if groupIndex > 0 {
+			previous := groupIndex - 1
+			if !groups[previous].Collapsed && len(groups[previous].Rows) > 0 {
+				m.selectTaskAt(m.taskGroupRowStart(groups, previous) + len(groups[previous].Rows) - 1)
+				return
+			}
+			m.focusTaskGroupHeader(groups, previous, TaskRef{})
+		}
+		return
+	}
+
+	if groups[groupIndex].Collapsed {
+		m.focusTaskGroupHeader(groups, groupIndex, m.UI.SelectedTask)
+		return
+	}
+	localIndex := findTask(groups[groupIndex].Rows, m.UI.SelectedTask)
+	if localIndex < 0 {
+		m.focusTaskGroupHeader(groups, groupIndex, TaskRef{})
+		return
+	}
+	if delta > 0 {
+		if localIndex+1 < len(groups[groupIndex].Rows) {
+			m.selectTaskAt(m.taskGroupRowStart(groups, groupIndex) + localIndex + 1)
+			return
+		}
+		if groupIndex+1 < len(groups) {
+			m.focusTaskGroupHeader(groups, groupIndex+1, TaskRef{})
+		}
+		return
+	}
+	if localIndex > 0 {
+		m.selectTaskAt(m.taskGroupRowStart(groups, groupIndex) + localIndex - 1)
+		return
+	}
+	m.focusTaskGroupHeader(groups, groupIndex, TaskRef{})
+}
+
+func (m Model) currentTaskGroupIndex(groups []TaskGroup) int {
+	if m.UI.TaskHeaderSelected {
+		for index, group := range groups {
+			if taskGroupStateKey(m.UI.GroupBy, group.Key) == m.UI.FocusedGroup {
+				return index
+			}
+		}
+		if m.UI.TaskGroupCursor >= 0 && m.UI.TaskGroupCursor < len(groups) {
+			return m.UI.TaskGroupCursor
+		}
+		return -1
+	}
+	if m.UI.SelectedTask == (TaskRef{}) {
+		return -1
+	}
+	for index, group := range groups {
+		for _, row := range group.Rows {
+			if taskRef(row) == m.UI.SelectedTask {
+				return index
+			}
+		}
+	}
+	return -1
+}
+
+func (m Model) taskGroupRowStart(groups []TaskGroup, target int) int {
+	start := 0
+	for index, group := range groups {
+		if index == target {
+			return start
+		}
+		if !group.Collapsed {
+			start += len(group.Rows)
+		}
+	}
+	return start
+}
+
+func (m *Model) focusTaskGroupHeader(groups []TaskGroup, index int, preserve TaskRef) {
+	if index < 0 || index >= len(groups) {
+		return
+	}
+	m.UI.TaskGroupCursor = index
+	m.UI.TaskHeaderSelected = true
+	m.UI.TaskHeaderTask = preserve
+	m.UI.FocusedGroup = taskGroupStateKey(m.UI.GroupBy, groups[index].Key)
+	m.UI.TaskCursor = -1
+	m.UI.TaskOffset = m.taskGroupRowStart(groups, index)
+	if preserve == (TaskRef{}) {
+		m.UI.SelectedTask = TaskRef{}
 	}
 }
 
@@ -527,17 +667,34 @@ func (m *Model) moveCursorToEdge(last bool) {
 		m.selectTaskAt(0)
 		return
 	}
+	if m.UI.GroupBy != TaskGroupNone {
+		groups := m.VisibleTaskGroups()
+		if len(groups) == 0 {
+			m.Status = Status{Level: StatusWarning, Text: "No tasks in this view"}
+			return
+		}
+		if !last {
+			m.focusTaskGroupHeader(groups, 0, TaskRef{})
+			return
+		}
+		lastGroup := len(groups) - 1
+		if groups[lastGroup].Collapsed || len(groups[lastGroup].Rows) == 0 {
+			m.focusTaskGroupHeader(groups, lastGroup, TaskRef{})
+			return
+		}
+		m.selectTaskAt(m.taskGroupRowStart(groups, lastGroup) + len(groups[lastGroup].Rows) - 1)
+		return
+	}
 	rows := m.VisibleTasks()
 	if len(rows) == 0 {
 		m.Status = Status{Level: StatusWarning, Text: "No tasks in this view"}
 		return
 	}
 	if last {
-		m.UI.TaskCursor = len(rows) - 1
-	} else {
-		m.UI.TaskCursor = 0
+		m.selectTaskAt(len(rows) - 1)
+		return
 	}
-	m.UI.SelectedTask = taskRef(rows[m.UI.TaskCursor])
+	m.selectTaskAt(0)
 }
 
 func (m *Model) previousPanel() {
@@ -562,6 +719,10 @@ func (m *Model) nextPanel() {
 
 func (m *Model) selectCurrent() {
 	if m.UI.Focus == PanelTasks {
+		if m.UI.TaskHeaderSelected {
+			m.toggleTaskGroup()
+			return
+		}
 		row, ok := m.selectedTask()
 		if !ok {
 			m.Status = Status{Level: StatusWarning, Text: "No task selected"}
@@ -656,7 +817,7 @@ func (m *Model) beginCommand() {
 	m.UI.Input = ""
 	m.UI.InputCursor = 0
 	m.UI.InputOrigin = ""
-	m.Status = Status{Level: StatusInfo, Text: "Command palette: create, edit, complete, delete, search, filter, refresh"}
+	m.Status = Status{Level: StatusInfo, Text: "Command palette: create, edit, complete, delete, search, filter, group, refresh"}
 }
 
 func (m Model) updateInput(key KeyMsg) (Model, Cmd) {
@@ -833,6 +994,38 @@ func (m Model) applyFilter(filter Filter, command AppCommand) (Model, Cmd) {
 	return m, m.emit(command)
 }
 
+func (m Model) applyGrouping(mode TaskGroupMode, command AppCommand) (Model, Cmd) {
+	if mode != TaskGroupNone && mode != TaskGroupStatus && mode != TaskGroupAssignee && mode != TaskGroupTasksSubtasks {
+		m.Status = Status{Level: StatusError, Text: "unknown task group " + string(mode)}
+		return m, nil
+	}
+	m.UI.Mode = ModeBrowse
+	m.UI.Input = ""
+	m.UI.InputCursor = 0
+	if m.UI.GroupBy != mode {
+		m.UI.FocusedGroup = ""
+		m.UI.TaskGroupCursor = 0
+		m.UI.TaskHeaderSelected = false
+		m.UI.TaskHeaderTask = TaskRef{}
+	}
+	m.UI.GroupBy = mode
+	m.UI.TaskOffset = 0
+	m.UI.TaskCursor = 0
+	m.UI.SelectedTask = TaskRef{}
+	m.UI.TaskGroupCursor = 0
+	m.UI.TaskHeaderSelected = false
+	m.UI.TaskHeaderTask = TaskRef{}
+	m.selectTaskAt(0)
+	m.keepVisible()
+	command.GroupBy = mode
+	if mode == TaskGroupNone {
+		m.Status = Status{Level: StatusInfo, Text: "Task grouping cleared"}
+	} else {
+		m.Status = Status{Level: StatusInfo, Text: "Tasks grouped by " + string(mode)}
+	}
+	return m, m.emit(command)
+}
+
 func (m Model) submitPalette() (Model, Cmd) {
 	command, err := ParseCommand(m.UI.Input)
 	if err != nil {
@@ -844,6 +1037,8 @@ func (m Model) submitPalette() (Model, Cmd) {
 		return m.applySearch(command.Query, command)
 	case CommandFilter:
 		return m.applyFilter(command.Filter, command)
+	case CommandGroup:
+		return m.applyGrouping(command.GroupBy, command)
 	case CommandCreateTask:
 		if command.Title == "" {
 			m.UI.Mode = ModeCreateTask
@@ -1063,13 +1258,32 @@ func taskProviderLabel(row TaskRow) string {
 
 func (m Model) selectedTask() (TaskRow, bool) {
 	rows := m.VisibleTasks()
-	if len(rows) == 0 {
+	if m.UI.TaskHeaderSelected {
+		if m.UI.SelectedTask == (TaskRef{}) {
+			return TaskRow{}, false
+		}
+		groups := m.VisibleTaskGroups()
+		groupIndex := m.currentTaskGroupIndex(groups)
+		if groupIndex < 0 || groupIndex >= len(groups) {
+			return TaskRow{}, false
+		}
+		for _, row := range groups[groupIndex].Rows {
+			if taskRef(row) == m.UI.SelectedTask {
+				return row, true
+			}
+		}
 		return TaskRow{}, false
 	}
 	if m.UI.SelectedTask != (TaskRef{}) {
 		if index := findTask(rows, m.UI.SelectedTask); index >= 0 {
 			return rows[index], true
 		}
+		if row, ok := m.taskRowForRef(m.UI.SelectedTask); ok {
+			return row, true
+		}
+	}
+	if len(rows) == 0 {
+		return TaskRow{}, false
 	}
 	if m.UI.TaskCursor < 0 || m.UI.TaskCursor >= len(rows) {
 		return TaskRow{}, false
@@ -1082,11 +1296,119 @@ func (m *Model) selectTaskAt(cursor int) {
 	if len(rows) == 0 {
 		m.UI.TaskCursor = 0
 		m.UI.SelectedTask = TaskRef{}
+		m.UI.TaskHeaderSelected = false
+		m.UI.TaskHeaderTask = TaskRef{}
 		return
 	}
 	cursor = clamp(cursor, 0, len(rows)-1)
 	m.UI.TaskCursor = cursor
 	m.UI.SelectedTask = taskRef(rows[cursor])
+	m.UI.TaskHeaderSelected = false
+	m.UI.TaskHeaderTask = TaskRef{}
+	m.UI.FocusedGroup = ""
+	if m.UI.GroupBy != TaskGroupNone {
+		groups := m.VisibleTaskGroups()
+		for index, group := range groups {
+			if findTask(group.Rows, m.UI.SelectedTask) >= 0 {
+				m.UI.TaskGroupCursor = index
+				break
+			}
+		}
+	}
+}
+
+func (m *Model) selectTaskRef(wanted TaskRef) bool {
+	rows := m.VisibleTasks()
+	if len(rows) == 0 {
+		m.UI.TaskCursor = 0
+		return false
+	}
+	if wanted != (TaskRef{}) {
+		if cursor := findTask(rows, wanted); cursor >= 0 {
+			m.selectTaskAt(cursor)
+			return true
+		}
+	}
+	m.selectTaskAt(0)
+	return false
+}
+
+func (m *Model) toggleTaskGroup() {
+	if m.UI.Focus != PanelTasks {
+		m.Status = Status{Level: StatusWarning, Text: "Focus the task panel to toggle a group"}
+		return
+	}
+	if m.UI.GroupBy == TaskGroupNone {
+		m.Status = Status{Level: StatusWarning, Text: "Enable task grouping before collapsing groups"}
+		return
+	}
+
+	groups := m.VisibleTaskGroups()
+	selected := m.UI.SelectedTask
+	groupIndex := -1
+	if m.UI.TaskHeaderSelected {
+		groupIndex = m.currentTaskGroupIndex(groups)
+		selected = m.UI.TaskHeaderTask
+		if selected == (TaskRef{}) {
+			selected = m.UI.SelectedTask
+		}
+	} else if selected == (TaskRef{}) {
+		if row, ok := m.selectedTask(); ok {
+			selected = taskRef(row)
+		}
+	}
+	if groupIndex < 0 {
+		for index, group := range groups {
+			if selected != (TaskRef{}) {
+				for _, row := range group.Rows {
+					if taskRef(row) == selected {
+						groupIndex = index
+						break
+					}
+				}
+			}
+			if groupIndex >= 0 {
+				break
+			}
+			if m.UI.FocusedGroup == taskGroupStateKey(m.UI.GroupBy, group.Key) {
+				groupIndex = index
+			}
+		}
+	}
+	if groupIndex < 0 {
+		m.Status = Status{Level: StatusWarning, Text: "Select a grouped task first"}
+		return
+	}
+
+	group := groups[groupIndex]
+	stateKey := taskGroupStateKey(m.UI.GroupBy, group.Key)
+	m.UI.CollapsedGroups = cloneCollapsed(m.UI.CollapsedGroups)
+	if group.Collapsed {
+		delete(m.UI.CollapsedGroups, stateKey)
+		desired := selected
+		if desired == (TaskRef{}) && len(group.Rows) > 0 {
+			desired = taskRef(group.Rows[0])
+		}
+		m.UI.TaskHeaderSelected = false
+		m.UI.TaskHeaderTask = TaskRef{}
+		m.UI.FocusedGroup = ""
+		m.selectTaskRef(desired)
+		m.Status = Status{Level: StatusInfo, Text: "Expanded group " + group.Label}
+		return
+	}
+
+	m.UI.CollapsedGroups[stateKey] = true
+	m.UI.TaskGroupCursor = groupIndex
+	m.UI.TaskHeaderSelected = true
+	m.UI.TaskHeaderTask = selected
+	m.UI.FocusedGroup = stateKey
+	// Keep SelectedTask intact so provider-scoped actions still target the same
+	// task while its group is hidden.
+	// A negative cursor lets the next j/k movement land on the first visible
+	// task instead of skipping it.
+	m.UI.TaskCursor = -1
+	m.UI.TaskOffset = 0
+	m.Status = Status{Level: StatusInfo, Text: "Collapsed group " + group.Label}
 }
 
 func taskRef(row TaskRow) TaskRef {
@@ -1124,7 +1446,18 @@ func (m *Model) keepVisible() {
 	}
 	treeViewport, taskViewport := m.panelViewports()
 	m.UI.TreeOffset = keepCursorVisible(m.UI.TreeCursor, m.UI.TreeOffset, treeViewport)
-	m.UI.TaskOffset = keepCursorVisible(m.UI.TaskCursor, m.UI.TaskOffset, taskViewport)
+	if m.UI.Focus == PanelTasks && m.UI.TaskHeaderSelected {
+		groups := m.VisibleTaskGroups()
+		groupIndex := m.currentTaskGroupIndex(groups)
+		if groupIndex >= 0 {
+			rows := flattenTaskGroups(groups)
+			m.UI.TaskOffset = clamp(m.taskGroupRowStart(groups, groupIndex), 0, maxInt(len(rows)-1, 0))
+		} else {
+			m.UI.TaskOffset = 0
+		}
+	} else {
+		m.UI.TaskOffset = keepCursorVisible(m.UI.TaskCursor, m.UI.TaskOffset, taskViewport)
+	}
 	m.UI.TreeHorizontalOffset = clamp(m.UI.TreeHorizontalOffset, 0, m.maxHorizontalOffset(PanelHierarchy))
 	m.UI.TaskHorizontalOffset = clamp(m.UI.TaskHorizontalOffset, 0, m.maxHorizontalOffset(PanelTasks))
 }

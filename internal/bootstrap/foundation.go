@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -203,6 +204,7 @@ func viewFromDomain(
 			ListID:          ListID(task.ListID),
 			RemoteID:        cloneString(task.RemoteID),
 			ParentTaskID:    cloneTaskID(task.ParentTaskID),
+			Assignee:        task.Assignee,
 			Title:           task.Title,
 			Description:     task.Description,
 			Status:          task.Status,
@@ -425,6 +427,9 @@ func pushedTask(original, result domain.Task) domain.Task {
 	}
 	if result.ParentTaskID == nil {
 		result.ParentTaskID = cloneDomainTaskID(original.ParentTaskID)
+	}
+	if result.Assignee == "" {
+		result.Assignee = original.Assignee
 	}
 	if result.CreatedAt.IsZero() {
 		result.CreatedAt = original.CreatedAt
@@ -851,6 +856,22 @@ func (u *foundationUIController) SetState(state UIState) {
 			u.model.UI.FilterActive = true
 		}
 	}
+	u.model.UI.CollapsedGroups = make(map[string]bool, len(state.CollapsedGroups))
+	for _, key := range state.CollapsedGroups {
+		if key = strings.TrimSpace(key); key != "" {
+			u.model.UI.CollapsedGroups[key] = true
+		}
+	}
+	u.model.UI.FocusedGroup = ""
+	u.model.UI.TaskGroupCursor = 0
+	u.model.UI.TaskHeaderSelected = false
+	u.model.UI.TaskHeaderTask = foundationtui.TaskRef{}
+	u.model.UI.GroupBy = foundationtui.TaskGroupNone
+	if strings.TrimSpace(state.GroupBy) != "" {
+		if group, err := foundationtui.ParseTaskGroupMode(state.GroupBy); err == nil {
+			u.model.UI.GroupBy = group
+		}
+	}
 }
 
 func (u *foundationUIController) Render(ctx context.Context, view View) error {
@@ -987,6 +1008,13 @@ func (u *foundationUIController) State() UIState {
 	if model.UI.FilterActive {
 		state.Filter = model.UI.Filter.String()
 	}
+	state.GroupBy = string(model.UI.GroupBy)
+	for key, collapsed := range model.UI.CollapsedGroups {
+		if collapsed && strings.TrimSpace(key) != "" {
+			state.CollapsedGroups = append(state.CollapsedGroups, key)
+		}
+	}
+	sort.Strings(state.CollapsedGroups)
 	return state
 }
 
@@ -1368,7 +1396,7 @@ func foundationUICommand(input foundationtui.AppCommand) (command.Command, bool,
 		return command.Command{Kind: command.KindRefresh, ProviderID: string(input.ProviderID)}, true, nil
 	case foundationtui.CommandQuit:
 		return command.Command{Kind: command.KindQuit}, true, nil
-	case foundationtui.CommandFilter, foundationtui.CommandHelp:
+	case foundationtui.CommandFilter, foundationtui.CommandGroup, foundationtui.CommandHelp:
 		// Filtering and help are presentation-local operations.
 		return command.Command{}, false, nil
 	default:
@@ -1444,6 +1472,7 @@ func foundationSnapshot(view View) foundationtui.Snapshot {
 			ListID:          domain.ListID(value.ListID),
 			RemoteID:        cloneString(value.RemoteID),
 			ParentTaskID:    parent,
+			Assignee:        value.Assignee,
 			Title:           value.Title,
 			Description:     value.Description,
 			Status:          value.Status,

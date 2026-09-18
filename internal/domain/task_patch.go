@@ -12,6 +12,7 @@ import (
 type TaskPatch struct {
 	ListID           *ListID    `json:"list_id,omitempty"`
 	ParentTaskID     *TaskID    `json:"parent_task_id,omitempty"`
+	Assignee         *string    `json:"assignee,omitempty"`
 	Title            *string    `json:"title,omitempty"`
 	Description      *string    `json:"description,omitempty"`
 	Status           *string    `json:"status,omitempty"`
@@ -29,6 +30,7 @@ type TaskPatch struct {
 type TaskPayload struct {
 	ListID       ListID     `json:"list_id"`
 	ParentTaskID *TaskID    `json:"parent_task_id,omitempty"`
+	Assignee     string     `json:"assignee,omitempty"`
 	Title        string     `json:"title"`
 	Description  string     `json:"description,omitempty"`
 	Status       string     `json:"status,omitempty"`
@@ -53,6 +55,7 @@ func NewTaskPayload(task Task) TaskPayload {
 	return TaskPayload{
 		ListID:       task.ListID,
 		ParentTaskID: task.ParentTaskID,
+		Assignee:     task.Assignee,
 		Title:        task.Title,
 		Description:  task.Description,
 		Status:       task.Status,
@@ -121,6 +124,9 @@ func (p TaskPatch) Apply(task Task) (Task, error) {
 	} else if p.ParentTaskID != nil {
 		parentID := *p.ParentTaskID
 		task.ParentTaskID = &parentID
+	}
+	if p.Assignee != nil {
+		task.Assignee = *p.Assignee
 	}
 	if p.Title != nil {
 		task.Title = *p.Title

@@ -16,6 +16,7 @@ const (
 	ActionScrollLeft    Action = "scroll_left"
 	ActionScrollRight   Action = "scroll_right"
 	ActionSelect        Action = "select"
+	ActionToggleGroup   Action = "toggle_group"
 	ActionFirst         Action = "first"
 	ActionLast          Action = "last"
 	ActionQuit          Action = "quit"
@@ -54,6 +55,7 @@ func DefaultKeyMap() KeyMap {
 		"tab":         ActionNextPanel,
 		"shift+tab":   ActionPreviousPanel,
 		"enter":       ActionSelect,
+		"space":       ActionToggleGroup,
 		"g":           ActionFirst,
 		"G":           ActionLast,
 		"q":           ActionQuit,
@@ -148,6 +150,8 @@ func isNamedKey(value string) bool {
 
 func normalizeKey(value string) string {
 	switch strings.ToLower(value) {
+	case " ":
+		return "space"
 	case "\r", "\n":
 		return "enter"
 	case "return":

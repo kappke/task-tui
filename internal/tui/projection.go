@@ -1,6 +1,9 @@
 package tui
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 type scopedID struct {
 	provider ProviderID
@@ -85,13 +88,14 @@ func (m Model) Nodes() []TreeNode {
 }
 
 // VisibleTasks returns the task rows for the active hierarchy/search/filter
-// view. Search rows are aggregated across providers.
+// view, arranged according to the active grouping mode. Search rows are
+// aggregated across providers.
 func (m Model) VisibleTasks() []TaskRow {
 	aggregate := m.UI.SearchActive
 	if m.UI.FilterActive && (m.UI.Filter.ProviderID != "" || m.UI.Filter.SpaceID != "" || m.UI.Filter.ListID != "") {
 		aggregate = true
 	}
-	return m.taskRows(aggregate)
+	return flattenTaskGroups(m.visibleTaskGroups(aggregate))
 }
 
 // CurrentTasks is an expressive alias for VisibleTasks.
@@ -101,7 +105,22 @@ func (m Model) CurrentTasks() []TaskRow {
 
 // SearchResults returns the locally computed aggregate search projection.
 func (m Model) SearchResults() []TaskRow {
-	return m.taskRows(true)
+	return flattenTaskGroups(m.visibleTaskGroups(true))
+}
+
+// VisibleTaskGroups returns the filtered task rows arranged according to the
+// active grouping mode. An empty grouping mode returns one unlabelled group.
+func (m Model) VisibleTaskGroups() []TaskGroup {
+	aggregate := m.UI.SearchActive
+	if m.UI.FilterActive && (m.UI.Filter.ProviderID != "" || m.UI.Filter.SpaceID != "" || m.UI.Filter.ListID != "") {
+		aggregate = true
+	}
+	return m.visibleTaskGroups(aggregate)
+}
+
+// GroupedTasks is an alias for VisibleTaskGroups.
+func (m Model) GroupedTasks() []TaskGroup {
+	return m.VisibleTaskGroups()
 }
 
 func (m Model) taskRows(aggregate bool) []TaskRow {
@@ -136,6 +155,7 @@ func (m Model) taskRows(aggregate bool) []TaskRow {
 			Task:         task,
 			ProviderID:   task.ProviderID,
 			ProviderName: displayProviderName(provider),
+			Assignee:     task.Assignee,
 			SpaceID:      list.SpaceID,
 			ListID:       task.ListID,
 			SearchResult: aggregate,
@@ -163,6 +183,180 @@ func (m Model) taskRows(aggregate bool) []TaskRow {
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+func (m Model) visibleTaskGroups(aggregate bool) []TaskGroup {
+	groups := groupTaskRows(m.taskRows(aggregate), m.UI.GroupBy)
+	if m.UI.GroupBy == TaskGroupNone {
+		return groups
+	}
+	for index := range groups {
+		groups[index].Collapsed = m.UI.CollapsedGroups[taskGroupStateKey(m.UI.GroupBy, groups[index].Key)]
+	}
+	return groups
+}
+
+func flattenTaskGroups(groups []TaskGroup) []TaskRow {
+	if len(groups) == 0 {
+		return nil
+	}
+	rows := make([]TaskRow, 0)
+	for _, group := range groups {
+		if group.Collapsed {
+			continue
+		}
+		rows = append(rows, group.Rows...)
+	}
+	return rows
+}
+
+func taskGroupStateKey(mode TaskGroupMode, key string) string {
+	if mode == TaskGroupNone || key == "" {
+		return ""
+	}
+	return string(mode) + ":" + key
+}
+
+func (m Model) taskRowForRef(wanted TaskRef) (TaskRow, bool) {
+	if wanted == (TaskRef{}) {
+		return TaskRow{}, false
+	}
+	for _, group := range m.VisibleTaskGroups() {
+		for _, row := range group.Rows {
+			if taskRef(row) == wanted {
+				return row, true
+			}
+		}
+	}
+	return TaskRow{}, false
+}
+
+func groupTaskRows(rows []TaskRow, mode TaskGroupMode) []TaskGroup {
+	if len(rows) == 0 {
+		return nil
+	}
+	if mode == TaskGroupNone {
+		return []TaskGroup{{Rows: append([]TaskRow(nil), rows...)}}
+	}
+
+	switch mode {
+	case TaskGroupStatus, TaskGroupAssignee:
+		groupsByKey := make(map[string]int, len(rows))
+		groups := make([]TaskGroup, 0, len(rows))
+		for _, row := range rows {
+			key, label := taskGroupValue(row, mode)
+			groupIndex, ok := groupsByKey[key]
+			if !ok {
+				groupIndex = len(groups)
+				groupsByKey[key] = groupIndex
+				groups = append(groups, TaskGroup{Key: key, Label: label})
+			}
+			groups[groupIndex].Rows = append(groups[groupIndex].Rows, row)
+		}
+		sort.SliceStable(groups, func(left, right int) bool {
+			return normalize(groups[left].Label) < normalize(groups[right].Label)
+		})
+		return groups
+	case TaskGroupTasksSubtasks:
+		return taskHierarchyGroups(rows)
+	default:
+		return []TaskGroup{{Rows: append([]TaskRow(nil), rows...)}}
+	}
+}
+
+func taskGroupValue(row TaskRow, mode TaskGroupMode) (key, label string) {
+	value := ""
+	switch mode {
+	case TaskGroupStatus:
+		value = strings.TrimSpace(row.Task.Status)
+		if value == "" {
+			value = "Unspecified"
+		}
+	case TaskGroupAssignee:
+		value = strings.TrimSpace(row.Assignee)
+		if value == "" {
+			value = strings.TrimSpace(row.Task.Assignee)
+		}
+		if value == "" {
+			value = "Unassigned"
+		}
+	default:
+		value = "Tasks"
+	}
+	return normalize(value), value
+}
+
+func taskHierarchyGroups(rows []TaskRow) []TaskGroup {
+	byRef := make(map[TaskRef]int, len(rows))
+	children := make(map[TaskRef][]int, len(rows))
+	for index, row := range rows {
+		byRef[taskRef(row)] = index
+	}
+
+	roots := make([]int, 0, len(rows))
+	for index, row := range rows {
+		parent, hasParent := taskParentRef(row)
+		if !hasParent {
+			roots = append(roots, index)
+			continue
+		}
+		if _, ok := byRef[parent]; !ok {
+			roots = append(roots, index)
+			continue
+		}
+		children[parent] = append(children[parent], index)
+	}
+
+	groups := make([]TaskGroup, 0, len(roots))
+	visited := make(map[int]bool, len(rows))
+	for _, root := range roots {
+		group := TaskGroup{
+			Key:   string(rows[root].ProviderID) + "/" + string(rows[root].Task.ID),
+			Label: taskTitle(rows[root]),
+		}
+		appendTaskTree(&group.Rows, root, 0, rows, children, visited)
+		groups = append(groups, group)
+	}
+	for index := range rows {
+		if visited[index] {
+			continue
+		}
+		group := TaskGroup{
+			Key:   string(rows[index].ProviderID) + "/" + string(rows[index].Task.ID),
+			Label: taskTitle(rows[index]),
+		}
+		appendTaskTree(&group.Rows, index, 0, rows, children, visited)
+		groups = append(groups, group)
+	}
+	return groups
+}
+
+func appendTaskTree(output *[]TaskRow, index, depth int, rows []TaskRow, children map[TaskRef][]int, visited map[int]bool) {
+	if visited[index] {
+		return
+	}
+	visited[index] = true
+	row := rows[index]
+	row.HierarchyDepth = depth
+	*output = append(*output, row)
+	for _, child := range children[taskRef(row)] {
+		appendTaskTree(output, child, depth+1, rows, children, visited)
+	}
+}
+
+func taskParentRef(row TaskRow) (TaskRef, bool) {
+	if row.Task.ParentTaskID == nil || *row.Task.ParentTaskID == "" {
+		return TaskRef{}, false
+	}
+	return TaskRef{ProviderID: row.Task.ProviderID, TaskID: *row.Task.ParentTaskID}, true
+}
+
+func taskTitle(row TaskRow) string {
+	title := strings.TrimSpace(row.Task.Title)
+	if title == "" {
+		return "(untitled task)"
+	}
+	return title
 }
 
 func (m Model) inSelectedScope(task Task, lists map[scopedID]List) bool {
@@ -257,6 +451,7 @@ func containsTaskText(row TaskRow, query string) bool {
 	values := []string{
 		row.Task.Title,
 		row.Task.Description,
+		row.Assignee,
 		row.ListName,
 		row.SpaceName,
 		row.ProviderName,

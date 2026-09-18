@@ -413,6 +413,7 @@ func (p *ClickUpProvider) mapTask(listID ListID, remote clickUpTask) Task {
 		ProviderID:      p.ID(),
 		ListID:          listID,
 		RemoteID:        &remoteID,
+		Assignee:        clickUpAssignee(remote.Assignees),
 		Title:           remote.Name,
 		Description:     remote.Description,
 		Status:          remote.Status.Status,
@@ -561,6 +562,32 @@ type clickUpTask struct {
 	Priority struct {
 		Priority string `json:"priority"`
 	} `json:"priority"`
+	Assignees []struct {
+		ID       string `json:"id"`
+		Username string `json:"username"`
+		Name     string `json:"name"`
+	} `json:"assignees"`
+}
+
+func clickUpAssignee(values []struct {
+	ID       string `json:"id"`
+	Username string `json:"username"`
+	Name     string `json:"name"`
+}) string {
+	labels := make([]string, 0, len(values))
+	for _, value := range values {
+		label := strings.TrimSpace(value.Username)
+		if label == "" {
+			label = strings.TrimSpace(value.Name)
+		}
+		if label == "" {
+			label = strings.TrimSpace(value.ID)
+		}
+		if label != "" {
+			labels = append(labels, label)
+		}
+	}
+	return strings.Join(labels, ", ")
 }
 
 func parseMillis(value string) time.Time {

@@ -150,6 +150,51 @@ func (m Model) treeLines(width int) []string {
 }
 
 func (m Model) taskLines(width int) []string {
+	lines := []string{fitAtOffset(m.taskHeading(), width, m.UI.TaskHorizontalOffset)}
+	groups := m.VisibleTaskGroups()
+	rows := flattenTaskGroups(groups)
+	if len(rows) == 0 && (m.UI.GroupBy == TaskGroupNone || len(groups) == 0) {
+		if m.UI.SearchActive {
+			return append(lines, fit("  (no local search results)", width))
+		}
+		return append(lines, fit("  (no tasks in this view)", width))
+	}
+	offset := 0
+	if len(rows) > 0 {
+		offset = clamp(m.UI.TaskOffset, 0, len(rows)-1)
+	}
+	if offset > 0 {
+		lines = append(lines, fit("  ...", width))
+	}
+	if m.UI.GroupBy == TaskGroupNone {
+		for index, row := range rows[offset:] {
+			lines = append(lines, m.taskRowLine(row, index+offset, width))
+		}
+		return lines
+	}
+
+	rowIndex := 0
+	for _, group := range groups {
+		if group.Collapsed {
+			lines = append(lines, fitAtOffset(m.taskGroupLine(group), width, m.UI.TaskHorizontalOffset))
+			continue
+		}
+		groupStart := rowIndex
+		groupEnd := groupStart + len(group.Rows)
+		rowIndex = groupEnd
+		if groupEnd <= offset {
+			continue
+		}
+		lines = append(lines, fitAtOffset(m.taskGroupLine(group), width, m.UI.TaskHorizontalOffset))
+		start := maxInt(offset-groupStart, 0)
+		for index, row := range group.Rows[start:] {
+			lines = append(lines, m.taskRowLine(row, groupStart+start+index, width))
+		}
+	}
+	return lines
+}
+
+func (m Model) taskHeading() string {
 	heading := "TASKS"
 	if m.UI.SearchActive {
 		heading += " | SEARCH " + quoteOrEmpty(m.UI.SearchQuery)
@@ -157,29 +202,45 @@ func (m Model) taskLines(width int) []string {
 	if m.UI.FilterActive {
 		heading += " | FILTER " + quoteOrEmpty(m.UI.Filter.String())
 	}
-	lines := []string{fitAtOffset(heading, width, m.UI.TaskHorizontalOffset)}
-	rows := m.VisibleTasks()
-	if len(rows) == 0 {
-		if m.UI.SearchActive {
-			return append(lines, fit("  (no local search results)", width))
-		}
-		return append(lines, fit("  (no tasks in this view)", width))
+	if m.UI.GroupBy != TaskGroupNone {
+		heading += " | GROUP " + string(m.UI.GroupBy)
 	}
-	offset := clamp(m.UI.TaskOffset, 0, len(rows)-1)
-	if offset > 0 {
-		lines = append(lines, fit("  ...", width))
+	return heading
+}
+
+func taskGroupHeading(mode TaskGroupMode, group TaskGroup) string {
+	label := safeText(group.Label)
+	if label == "" {
+		return ""
 	}
-	for index, row := range rows[offset:] {
-		actualIndex := index + offset
-		selected := actualIndex == m.UI.TaskCursor && m.UI.Focus == PanelTasks
-		marker := "  "
-		if selected {
-			marker = "> "
-		}
-		line := taskLineText(row, marker)
-		lines = append(lines, fitAtOffset(line, width, m.UI.TaskHorizontalOffset))
+	expansion := "[-]"
+	if group.Collapsed {
+		expansion = "[+]"
 	}
-	return lines
+	return fmt.Sprintf("%s %s (%d)", expansion, label, len(group.Rows))
+}
+
+func (m Model) taskGroupLine(group TaskGroup) string {
+	marker := "  "
+	if m.taskGroupSelected(group) {
+		marker = "> "
+	}
+	return marker + taskGroupHeading(m.UI.GroupBy, group)
+}
+
+func (m Model) taskGroupSelected(group TaskGroup) bool {
+	if m.UI.Focus != PanelTasks || !m.UI.TaskHeaderSelected {
+		return false
+	}
+	return m.UI.FocusedGroup == taskGroupStateKey(m.UI.GroupBy, group.Key)
+}
+
+func (m Model) taskRowLine(row TaskRow, index, width int) string {
+	marker := "  "
+	if index == m.UI.TaskCursor && m.UI.Focus == PanelTasks {
+		marker = "> "
+	}
+	return fitAtOffset(taskLineText(row, marker), width, m.UI.TaskHorizontalOffset)
 }
 
 func (m Model) detailLines(width int) []string {
@@ -213,6 +274,11 @@ func (m Model) detailLines(width int) []string {
 		location += "/" + string(row.ListID)
 	}
 	appendField("LOCATION", location)
+	assignee := safeText(task.Assignee)
+	if assignee == "" {
+		assignee = "(unassigned)"
+	}
+	appendField("ASSIGNEE", assignee)
 
 	status := safeText(task.Status)
 	if status == "" {
@@ -356,7 +422,7 @@ func (m Model) footerLine() string {
 	if m.UI.Mode == ModeDetail {
 		return "j/k or up/down scroll | g/G top/bottom | esc close | q quit"
 	}
-	return "j/k or up/down move | tab switch panel | h/l or left/right scroll | enter open | g/G first/last | n new | e edit | x complete | d delete | / search | f filter | : commands | r refresh | q quit"
+	return "j/k or up/down move | tab switch panel | h/l or left/right scroll | enter open/toggle group | space collapse/expand group | g/G first/last | n new | e edit | x complete | d delete | / search | f filter | : group/filter/commands | r refresh | q quit"
 }
 
 func (m Model) overallSync() SyncState {
@@ -465,7 +531,8 @@ func taskLineText(row TaskRow, marker string) string {
 	if row.Task.DueAt != nil {
 		metadata += "; due " + row.Task.DueAt.Format("2006-01-02")
 	}
-	return fmt.Sprintf("%s[%s] %s%s (%s)", marker, complete, title, location, metadata)
+	indent := strings.Repeat("  ", maxInt(row.HierarchyDepth, 0))
+	return fmt.Sprintf("%s%s[%s] %s%s (%s)", marker, indent, complete, title, location, metadata)
 }
 
 func (m Model) maxHorizontalOffset(panel Panel) int {
@@ -509,15 +576,12 @@ func (m Model) maxPanelLineWidth(panel Panel) int {
 		return maxWidth
 	}
 
-	heading := "TASKS"
-	if m.UI.SearchActive {
-		heading += " | SEARCH " + quoteOrEmpty(m.UI.SearchQuery)
+	maxWidth := runeCount(m.taskHeading())
+	groups := m.VisibleTaskGroups()
+	for _, group := range groups {
+		maxWidth = maxInt(maxWidth, runeCount(m.taskGroupLine(group)))
 	}
-	if m.UI.FilterActive {
-		heading += " | FILTER " + quoteOrEmpty(m.UI.Filter.String())
-	}
-	maxWidth := runeCount(heading)
-	for _, row := range m.VisibleTasks() {
+	for _, row := range flattenTaskGroups(groups) {
 		maxWidth = maxInt(maxWidth, runeCount(taskLineText(row, "  ")))
 	}
 	return maxWidth

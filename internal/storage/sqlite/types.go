@@ -94,6 +94,7 @@ type Task struct {
 	ListID          string
 	RemoteID        *string
 	ParentTaskID    *string
+	Assignee        string
 	Title           string
 	Description     string
 	Status          string

@@ -25,6 +25,10 @@ func TestMapperInjectsProviderAndLocalParentIdentity(t *testing.T) {
 		DateUpdated: "1700000001000",
 		DateDone:    wireStringPointer("1700000002000"),
 		Parent:      wireStringPointer("remote-parent"),
+		Assignees: []wireAssignee{
+			{ID: "42", Username: "alice"},
+			{ID: "43", Name: "Bob"},
+		},
 	}
 
 	task := mapper.MapTask(input, domain.ListID("local-list"))
@@ -42,6 +46,9 @@ func TestMapperInjectsProviderAndLocalParentIdentity(t *testing.T) {
 	}
 	if task.ParentTaskID == nil || *task.ParentTaskID != "local-parent" {
 		t.Fatalf("ParentTaskID = %v", task.ParentTaskID)
+	}
+	if task.Assignee != "alice, Bob" {
+		t.Fatalf("Assignee = %q, want %q", task.Assignee, "alice, Bob")
 	}
 	if task.Status != "vendor-custom" {
 		t.Fatalf("Status = %q", task.Status)

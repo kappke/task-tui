@@ -68,6 +68,35 @@ func TestFoundationUIRunsBubbleTeaOnInteractiveStreams(t *testing.T) {
 	}
 }
 
+func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
+	terminal := NewStreamTerminal(bytes.NewBuffer(nil), &bytes.Buffer{}, false)
+	ui, err := newFoundationUIController(terminal, foundationNoopHandler{}, nil, nil)
+	if err != nil {
+		t.Fatalf("newFoundationUIController() error = %v", err)
+	}
+	ui.model.UI.Focus = foundationtui.PanelTasks
+	ui.model.UI.GroupBy = foundationtui.TaskGroupStatus
+	ui.model.UI.CollapsedGroups = map[string]bool{
+		"status:done":    true,
+		"assignee:alice": true,
+		"status:open":    false,
+	}
+
+	state := ui.State()
+	if len(state.CollapsedGroups) != 2 || state.CollapsedGroups[0] != "assignee:alice" || state.CollapsedGroups[1] != "status:done" {
+		t.Fatalf("saved collapsed groups = %#v, want sorted active keys", state.CollapsedGroups)
+	}
+
+	ui.SetState(UIState{
+		Panel:           string(foundationtui.PanelTasks),
+		GroupBy:         string(foundationtui.TaskGroupStatus),
+		CollapsedGroups: []string{" status:done ", "status:done", "assignee:alice"},
+	})
+	if !ui.model.UI.CollapsedGroups["status:done"] || !ui.model.UI.CollapsedGroups["assignee:alice"] || len(ui.model.UI.CollapsedGroups) != 2 {
+		t.Fatalf("restored collapsed groups = %#v, want two unique keys", ui.model.UI.CollapsedGroups)
+	}
+}
+
 func TestFoundationHandlerPersistsLocalTaskThroughComposedGraph(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Database.Path = filepath.Join(t.TempDir(), "tasktui.db")

@@ -83,19 +83,26 @@ type tasksResponse struct {
 }
 
 type wireTask struct {
-	ID          wireString    `json:"id"`
-	Name        string        `json:"name"`
-	Description string        `json:"description"`
-	Status      wireStatus    `json:"status"`
-	Priority    *wirePriority `json:"priority"`
-	DueDate     *wireString   `json:"due_date"`
-	DateCreated wireString    `json:"date_created"`
-	DateUpdated wireString    `json:"date_updated"`
-	DateClosed  *wireString   `json:"date_closed"`
-	DateDone    *wireString   `json:"date_done"`
-	Parent      *wireString   `json:"parent"`
-	List        wireList      `json:"list"`
-	Lists       []wireList    `json:"lists"`
+	ID          wireString     `json:"id"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Status      wireStatus     `json:"status"`
+	Priority    *wirePriority  `json:"priority"`
+	DueDate     *wireString    `json:"due_date"`
+	DateCreated wireString     `json:"date_created"`
+	DateUpdated wireString     `json:"date_updated"`
+	DateClosed  *wireString    `json:"date_closed"`
+	DateDone    *wireString    `json:"date_done"`
+	Parent      *wireString    `json:"parent"`
+	Assignees   []wireAssignee `json:"assignees"`
+	List        wireList       `json:"list"`
+	Lists       []wireList     `json:"lists"`
+}
+
+type wireAssignee struct {
+	ID       wireString `json:"id"`
+	Username string     `json:"username"`
+	Name     string     `json:"name"`
 }
 
 type wireStatus struct {

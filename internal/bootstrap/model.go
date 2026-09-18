@@ -113,6 +113,7 @@ type Task struct {
 	ListID          ListID
 	RemoteID        *string
 	ParentTaskID    *TaskID
+	Assignee        string
 	Title           string
 	Description     string
 	Status          string
@@ -153,12 +154,14 @@ type SyncOperation struct {
 
 // UIState is presentation state persisted independently from domain entities.
 type UIState struct {
-	ProviderID string `json:"provider_id,omitempty"`
-	SpaceID    string `json:"space_id,omitempty"`
-	ListID     string `json:"list_id,omitempty"`
-	Panel      string `json:"panel,omitempty"`
-	Cursor     int    `json:"cursor,omitempty"`
-	Filter     string `json:"filter,omitempty"`
+	ProviderID      string   `json:"provider_id,omitempty"`
+	SpaceID         string   `json:"space_id,omitempty"`
+	ListID          string   `json:"list_id,omitempty"`
+	Panel           string   `json:"panel,omitempty"`
+	Cursor          int      `json:"cursor,omitempty"`
+	Filter          string   `json:"filter,omitempty"`
+	GroupBy         string   `json:"group_by,omitempty"`
+	CollapsedGroups []string `json:"collapsed_groups,omitempty"`
 }
 
 // View is the local snapshot supplied to the TUI. It is intentionally a

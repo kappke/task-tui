@@ -27,6 +27,7 @@ const (
 	CommandDeleteTask   CommandKind = "delete_task"
 	CommandSearch       CommandKind = "search_tasks"
 	CommandFilter       CommandKind = "filter_tasks"
+	CommandGroup        CommandKind = "group_tasks"
 	CommandRefresh      CommandKind = "refresh"
 	CommandQuit         CommandKind = "quit"
 	CommandHelp         CommandKind = "help"
@@ -55,6 +56,7 @@ type AppCommand struct {
 	DueAt       *time.Time
 	Query       string
 	Filter      Filter
+	GroupBy     TaskGroupMode
 	Completed   bool
 	Status      string
 	Raw         string
@@ -145,6 +147,17 @@ func ParseCommand(input string) (AppCommand, error) {
 			return AppCommand{}, err
 		}
 		command.Filter = filter
+	case "group", "groupby":
+		command.Kind = CommandGroup
+		modeInput := strings.TrimSpace(strings.Join(args, " "))
+		mode, err := ParseTaskGroupMode(modeInput)
+		if err != nil {
+			return AppCommand{}, err
+		}
+		command.GroupBy = mode
+	case "ungroup", "ungrouped":
+		command.Kind = CommandGroup
+		command.GroupBy = TaskGroupNone
 	case "refresh", "sync", "r":
 		command.Kind = CommandRefresh
 	case "quit", "exit", "q":
@@ -155,4 +168,28 @@ func ParseCommand(input string) (AppCommand, error) {
 		return AppCommand{}, fmt.Errorf("unknown command %q", fields[0])
 	}
 	return command, nil
+}
+
+// ParseTaskGroupMode accepts the command-palette names for the supported task
+// arrangements. "tasks" and "subtasks" both select the parent-child view.
+func ParseTaskGroupMode(input string) (TaskGroupMode, error) {
+	fields := strings.Fields(strings.ToLower(strings.TrimSpace(input)))
+	if len(fields) == 2 && fields[0] == "by" {
+		fields = fields[1:]
+	}
+	if len(fields) != 1 {
+		return TaskGroupNone, errors.New("group requires status, assignee, tasks, or none")
+	}
+	switch fields[0] {
+	case "none", "off", "clear", "ungroup":
+		return TaskGroupNone, nil
+	case "status", "statuses", "state":
+		return TaskGroupStatus, nil
+	case "assignee", "assignees", "owner":
+		return TaskGroupAssignee, nil
+	case "task", "tasks", "subtask", "subtasks", "hierarchy", "tasks/subtasks", "task/subtask", "tasks_subtasks":
+		return TaskGroupTasksSubtasks, nil
+	default:
+		return TaskGroupNone, fmt.Errorf("unknown task group %q", fields[0])
+	}
 }

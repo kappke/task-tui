@@ -190,7 +190,7 @@ func ValidateParentProvider(task Task, parent Task) error {
 }
 
 func taskPatchHasChanges(patch TaskPatch) bool {
-	return patch.ListID != nil || patch.ParentTaskID != nil || patch.Title != nil ||
+	return patch.ListID != nil || patch.ParentTaskID != nil || patch.Assignee != nil || patch.Title != nil ||
 		patch.Description != nil || patch.Status != nil || patch.Priority != nil ||
 		patch.DueAt != nil || patch.CompletedAt != nil || patch.ClearParentTask ||
 		patch.ClearDueAt || patch.ClearCompletedAt

@@ -9,7 +9,7 @@ import (
 )
 
 const taskSelect = `
-	SELECT id, provider_id, list_id, remote_id, parent_task_id, title, description,
+	SELECT id, provider_id, list_id, remote_id, parent_task_id, assignee, title, description,
 		status, priority, due_at, completed_at, sync_state, remote_updated_at,
 		is_deleted, deleted_at, created_at, updated_at
 	FROM tasks`
@@ -95,13 +95,14 @@ func (s *Store) upsertTask(ctx context.Context, task Task) (Task, error) {
 			return Task{}, fmt.Errorf("sqlite: upsert task %q: %w", task.ID, err)
 		}
 		if _, updateErr := s.db.ExecContext(ctx, `
-			UPDATE tasks SET list_id = ?, remote_id = ?, parent_task_id = ?, title = ?,
+			UPDATE tasks SET list_id = ?, remote_id = ?, parent_task_id = ?, assignee = ?, title = ?,
 				description = ?, status = ?, priority = ?, due_at = ?, completed_at = ?,
 				sync_state = ?, remote_updated_at = ?, is_deleted = ?, deleted_at = ?, updated_at = ?
 			WHERE provider_id = ? AND id = ?`,
 			task.ListID,
 			remoteIDValue(task.RemoteID),
 			task.ParentTaskID,
+			task.Assignee,
 			task.Title,
 			task.Description,
 			task.Status,
@@ -249,13 +250,14 @@ func (s *Store) createTaskWithQueue(ctx context.Context, task Task, intent *Sync
 func updateTaskTx(ctx context.Context, tx *sql.Tx, task Task) error {
 	result, err := tx.ExecContext(ctx, `
 		UPDATE tasks SET
-			list_id = ?, remote_id = ?, parent_task_id = ?, title = ?, description = ?,
+			list_id = ?, remote_id = ?, parent_task_id = ?, assignee = ?, title = ?, description = ?,
 			status = ?, priority = ?, due_at = ?, completed_at = ?, sync_state = ?,
 			remote_updated_at = ?, is_deleted = ?, deleted_at = ?, updated_at = ?
 		WHERE provider_id = ? AND id = ?`,
 		task.ListID,
 		remoteIDValue(task.RemoteID),
 		task.ParentTaskID,
+		task.Assignee,
 		task.Title,
 		task.Description,
 		task.Status,
@@ -279,15 +281,16 @@ func updateTaskTx(ctx context.Context, tx *sql.Tx, task Task) error {
 func (s *Store) insertTask(ctx context.Context, tx *sql.Tx, task Task) error {
 	_, err := execerFor(s.db, tx).ExecContext(ctx, `
 		INSERT INTO tasks (
-			id, provider_id, list_id, remote_id, parent_task_id, title, description,
+			id, provider_id, list_id, remote_id, parent_task_id, assignee, title, description,
 			status, priority, due_at, completed_at, sync_state, remote_updated_at,
 			is_deleted, deleted_at, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		task.ID,
 		task.ProviderID,
 		task.ListID,
 		remoteIDValue(task.RemoteID),
 		task.ParentTaskID,
+		task.Assignee,
 		task.Title,
 		task.Description,
 		task.Status,
@@ -362,7 +365,7 @@ func taskQuery(ctx context.Context, queryer queryer, query string, args ...any) 
 
 func (s *Store) searchTaskRecords(ctx context.Context, search TaskSearch) ([]TaskResult, error) {
 	query := `
-		SELECT t.id, t.provider_id, t.list_id, t.remote_id, t.parent_task_id, t.title,
+		SELECT t.id, t.provider_id, t.list_id, t.remote_id, t.parent_task_id, t.assignee, t.title,
 			t.description, t.status, t.priority, t.due_at, t.completed_at, t.sync_state,
 			t.remote_updated_at, t.is_deleted, t.deleted_at, t.created_at, t.updated_at,
 			l.id, l.provider_id, l.space_id, l.remote_id, l.name, l.sync_state,
@@ -592,6 +595,7 @@ func scanTask(row rowScanner) (Task, error) {
 		&task.ListID,
 		&remoteID,
 		&parentTaskID,
+		&task.Assignee,
 		&task.Title,
 		&task.Description,
 		&task.Status,
@@ -659,7 +663,7 @@ func scanTaskResult(row rowScanner) (TaskResult, error) {
 		prSync, prCursor, prError, prLastSync, prCreated, prUpdated        sql.NullString
 	)
 	if err := row.Scan(
-		&tr.ID, &tr.ProviderID, &tr.ListID, &trRemote, &trParent, &tr.Title,
+		&tr.ID, &tr.ProviderID, &tr.ListID, &trRemote, &trParent, &tr.Assignee, &tr.Title,
 		&tr.Description, &tr.Status, &tr.Priority, &trDue, &trCompleted, &trSync,
 		&trRemoteUpdated, &trDeletedFlag, &trDeleted, &trCreated, &trUpdated,
 		&lr.ID, &lr.ProviderID, &lr.SpaceID, &lrRemote, &lr.Name, &lrSync,

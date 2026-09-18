@@ -398,38 +398,64 @@ func (m *CharmModel) charmTreeLines(width int) []string {
 }
 
 func (m *CharmModel) charmTaskLines(width int) []string {
-	heading := "TASKS"
-	if m.core.UI.SearchActive {
-		heading += " | SEARCH " + quoteOrEmpty(m.core.UI.SearchQuery)
-	}
-	if m.core.UI.FilterActive {
-		heading += " | FILTER " + quoteOrEmpty(m.core.UI.Filter.String())
-	}
-	lines := []string{charmSectionStyle.Render(fitAtOffset(heading, width, m.core.UI.TaskHorizontalOffset))}
-	rows := m.core.VisibleTasks()
-	if len(rows) == 0 {
+	lines := []string{charmSectionStyle.Render(fitAtOffset(m.core.taskHeading(), width, m.core.UI.TaskHorizontalOffset))}
+	groups := m.core.VisibleTaskGroups()
+	rows := flattenTaskGroups(groups)
+	if len(rows) == 0 && (m.core.UI.GroupBy == TaskGroupNone || len(groups) == 0) {
 		if m.core.UI.SearchActive {
 			return append(lines, charmMutedStyle.Render(fitAtOffset("(no local search results)", width, m.core.UI.TaskHorizontalOffset)))
 		}
 		return append(lines, charmMutedStyle.Render(fitAtOffset("(no tasks in this view)", width, m.core.UI.TaskHorizontalOffset)))
 	}
-	offset := clamp(m.core.UI.TaskOffset, 0, len(rows)-1)
+	offset := 0
+	if len(rows) > 0 {
+		offset = clamp(m.core.UI.TaskOffset, 0, len(rows)-1)
+	}
 	if offset > 0 {
 		lines = append(lines, charmMutedStyle.Render("  ..."))
 	}
-	for index, row := range rows[offset:] {
-		actualIndex := index + offset
+	appendRow := func(row TaskRow, index int) {
+		selected := index == m.core.UI.TaskCursor && m.core.UI.Focus == PanelTasks
 		marker := "  "
-		selected := actualIndex == m.core.UI.TaskCursor && m.core.UI.Focus == PanelTasks
 		if selected {
 			marker = "> "
 		}
-		line := taskLineText(row, marker)
-		line = fitAtOffset(line, width, m.core.UI.TaskHorizontalOffset)
+		line := fitAtOffset(taskLineText(row, marker), width, m.core.UI.TaskHorizontalOffset)
 		if selected {
 			lines = append(lines, charmSelectedStyle.Render(line))
 		} else {
 			lines = append(lines, line)
+		}
+	}
+	if m.core.UI.GroupBy == TaskGroupNone {
+		for index, row := range rows[offset:] {
+			appendRow(row, index+offset)
+		}
+		return lines
+	}
+
+	rowIndex := 0
+	for _, group := range groups {
+		if group.Collapsed {
+			heading := fitAtOffset(m.core.taskGroupLine(group), width, m.core.UI.TaskHorizontalOffset)
+			if m.core.taskGroupSelected(group) {
+				lines = append(lines, charmSelectedStyle.Render(heading))
+			} else {
+				lines = append(lines, charmMutedStyle.Render(heading))
+			}
+			continue
+		}
+		groupStart := rowIndex
+		groupEnd := groupStart + len(group.Rows)
+		rowIndex = groupEnd
+		if groupEnd <= offset {
+			continue
+		}
+		heading := fitAtOffset(m.core.taskGroupLine(group), width, m.core.UI.TaskHorizontalOffset)
+		lines = append(lines, charmMutedStyle.Render(heading))
+		start := maxInt(offset-groupStart, 0)
+		for index, row := range group.Rows[start:] {
+			appendRow(row, groupStart+start+index)
 		}
 	}
 	return lines
@@ -506,7 +532,8 @@ func newCharmHelpKeyMap() charmHelpKeyMap {
 		bind([]string{"j", "k", "up", "down"}, "j/k", "move"),
 		bind([]string{"tab", "shift+tab"}, "tab", "panel"),
 		bind([]string{"h", "l", "left", "right"}, "h/l", "scroll"),
-		bind([]string{"enter"}, "enter", "open"),
+		bind([]string{"enter"}, "enter", "open/toggle"),
+		bind([]string{"space"}, "space", "group"),
 		bind([]string{"n", "e", "x", "d"}, "n/e/x/d", "task"),
 		bind([]string{"/"}, "/", "search"),
 		bind([]string{"f"}, "f", "filter"),

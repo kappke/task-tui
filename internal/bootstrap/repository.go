@@ -664,14 +664,14 @@ func (r *Repository) putTask(ctx context.Context, task Task, operation *SyncOper
 		return fmt.Errorf("begin put task: %w", err)
 	}
 	_, err = tx.ExecContext(ctx, `
-INSERT INTO tasks(id, provider_id, list_id, remote_id, parent_task_id, title, description, status, priority, due_at, completed_at, sync_state, remote_updated_at, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO tasks(id, provider_id, list_id, remote_id, parent_task_id, assignee, title, description, status, priority, due_at, completed_at, sync_state, remote_updated_at, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
- provider_id = excluded.provider_id, list_id = excluded.list_id, remote_id = excluded.remote_id,
- parent_task_id = excluded.parent_task_id, title = excluded.title, description = excluded.description,
+	provider_id = excluded.provider_id, list_id = excluded.list_id, remote_id = excluded.remote_id,
+	parent_task_id = excluded.parent_task_id, assignee = excluded.assignee, title = excluded.title, description = excluded.description,
  status = excluded.status, priority = excluded.priority, due_at = excluded.due_at, completed_at = excluded.completed_at,
  sync_state = excluded.sync_state, remote_updated_at = excluded.remote_updated_at, updated_at = excluded.updated_at`,
-		string(task.ID), string(task.ProviderID), string(task.ListID), nullableString(task.RemoteID), nullableTaskID(task.ParentTaskID), task.Title, task.Description, task.Status, task.Priority,
+		string(task.ID), string(task.ProviderID), string(task.ListID), nullableString(task.RemoteID), nullableTaskID(task.ParentTaskID), task.Assignee, task.Title, task.Description, task.Status, task.Priority,
 		nullableTime(task.DueAt), nullableTime(task.CompletedAt), string(task.SyncState), nullableTime(task.RemoteUpdatedAt), formatTime(created), formatTime(updated))
 	if err != nil {
 		rollback(tx, err)
@@ -769,7 +769,7 @@ func (r *Repository) listAllTasks(ctx context.Context) ([]Task, error) {
 	return r.listTasks(ctx, ` ORDER BY provider_id, list_id, created_at, id`)
 }
 
-const taskSelect = `SELECT id, provider_id, list_id, remote_id, parent_task_id, title, description, status, priority, due_at, completed_at, sync_state, remote_updated_at, created_at, updated_at FROM tasks`
+const taskSelect = `SELECT id, provider_id, list_id, remote_id, parent_task_id, assignee, title, description, status, priority, due_at, completed_at, sync_state, remote_updated_at, created_at, updated_at FROM tasks`
 
 func (r *Repository) listTasks(ctx context.Context, suffix string, args ...any) ([]Task, error) {
 	rows, err := r.db.QueryContext(ctx, taskSelect+suffix, args...)
@@ -960,7 +960,7 @@ func scanList(row scanner) (List, error) {
 func scanTask(row scanner) (Task, error) {
 	var task Task
 	var id, providerID, listID, remoteID, parentID, dueAt, completedAt, state, remoteUpdated, created, updated sql.NullString
-	if err := row.Scan(&id, &providerID, &listID, &remoteID, &parentID, &task.Title, &task.Description, &task.Status, &task.Priority, &dueAt, &completedAt, &state, &remoteUpdated, &created, &updated); err != nil {
+	if err := row.Scan(&id, &providerID, &listID, &remoteID, &parentID, &task.Assignee, &task.Title, &task.Description, &task.Status, &task.Priority, &dueAt, &completedAt, &state, &remoteUpdated, &created, &updated); err != nil {
 		return Task{}, err
 	}
 	task.ID = TaskID(id.String)

@@ -25,6 +25,7 @@ func TestDefaultKeyMap(t *testing.T) {
 		{key: "tab", action: ActionNextPanel},
 		{key: "shift+tab", action: ActionPreviousPanel},
 		{key: "enter", action: ActionSelect},
+		{key: "space", action: ActionToggleGroup},
 		{key: "g", action: ActionFirst},
 		{key: "G", action: ActionLast},
 		{key: "n", action: ActionCreate},
@@ -174,6 +175,186 @@ func TestFilterAndCommandPalette(t *testing.T) {
 	message, ok := command().(CommandMsg)
 	if !ok || message.Command.Kind != CommandRefresh || message.Command.ProviderID != "work" {
 		t.Fatalf("palette refresh command = %#v", message)
+	}
+}
+
+func TestTaskGroupingByStatusAssigneeAndHierarchy(t *testing.T) {
+	parentID := TaskID("parent")
+	snapshot := testSnapshot()
+	snapshot.Tasks = []Task{
+		{ID: "open-b", ProviderID: "work", ListID: "backend", Title: "Open B", Status: "open", Assignee: "Bob"},
+		{ID: "done", ProviderID: "work", ListID: "backend", Title: "Done", Status: "done", Assignee: "Alice"},
+		{ID: parentID, ProviderID: "work", ListID: "backend", Title: "Parent", Status: "open", Assignee: "Alice"},
+		{ID: "child", ProviderID: "work", ListID: "backend", ParentTaskID: &parentID, Title: "Child", Status: "open", Assignee: "Alice"},
+		{ID: "unassigned", ProviderID: "work", ListID: "backend", Title: "Unassigned", Status: "open"},
+	}
+	model := New(snapshot)
+
+	model.UI.GroupBy = TaskGroupStatus
+	statusGroups := model.VisibleTaskGroups()
+	if len(statusGroups) != 2 || statusGroups[0].Label != "done" || statusGroups[1].Label != "open" {
+		t.Fatalf("status groups = %#v, want done/open", statusGroups)
+	}
+	if got := model.VisibleTasks()[0].Task.ID; got != "done" {
+		t.Fatalf("status grouping first task = %q, want done", got)
+	}
+
+	model.UI.GroupBy = TaskGroupAssignee
+	assigneeGroups := model.VisibleTaskGroups()
+	if len(assigneeGroups) != 3 || assigneeGroups[0].Label != "Alice" || assigneeGroups[2].Label != "Unassigned" {
+		t.Fatalf("assignee groups = %#v, want Alice/Bob/Unassigned", assigneeGroups)
+	}
+
+	model.UI.GroupBy = TaskGroupTasksSubtasks
+	hierarchyGroups := model.VisibleTaskGroups()
+	if len(hierarchyGroups) != 4 {
+		t.Fatalf("hierarchy groups = %#v, want four roots", hierarchyGroups)
+	}
+	var hierarchy []TaskRow
+	for _, group := range hierarchyGroups {
+		hierarchy = append(hierarchy, group.Rows...)
+	}
+	if len(hierarchy) != 5 || hierarchy[2].Task.ID != parentID || hierarchy[3].Task.ID != "child" || hierarchy[3].HierarchyDepth != 1 {
+		t.Fatalf("hierarchy rows = %#v, want parent followed by indented child", hierarchy)
+	}
+}
+
+func TestTaskGroupingCommandPalette(t *testing.T) {
+	for input, want := range map[string]TaskGroupMode{
+		"group status":            TaskGroupStatus,
+		"group assignee":          TaskGroupAssignee,
+		"group tasks":             TaskGroupTasksSubtasks,
+		"group by tasks/subtasks": TaskGroupTasksSubtasks,
+		"ungroup":                 TaskGroupNone,
+	} {
+		command, err := ParseCommand(input)
+		if err != nil {
+			t.Fatalf("ParseCommand(%q): %v", input, err)
+		}
+		if command.Kind != CommandGroup || command.GroupBy != want {
+			t.Fatalf("ParseCommand(%q) = %#v, want group %q", input, command, want)
+		}
+	}
+
+	model := New(testSnapshot())
+	model, command := model.Update(KeyMsg{Key: ":"})
+	if command != nil {
+		t.Fatal("opening command palette emitted a command")
+	}
+	model, _ = typeInput(model, "group status")
+	model, command = model.Update(KeyMsg{Key: "enter"})
+	if command == nil || model.UI.GroupBy != TaskGroupStatus {
+		t.Fatalf("group submit: group=%q command=%v", model.UI.GroupBy, command)
+	}
+}
+
+func TestTaskGroupsCanBeCollapsedAndExpanded(t *testing.T) {
+	parentID := TaskID("parent")
+	snapshot := Snapshot{
+		Providers: []Provider{{ID: "work", Name: "Work", Type: ProviderTypeLocal, SyncState: SyncStateLocal}},
+		Spaces:    []Space{{ID: "space", ProviderID: "work", Name: "Space", SyncState: SyncStateLocal}},
+		Lists:     []List{{ID: "list", ProviderID: "work", SpaceID: "space", Name: "List", SyncState: SyncStateLocal}},
+		Tasks: []Task{
+			{ID: parentID, ProviderID: "work", ListID: "list", Title: "Parent", Status: "open", Assignee: "Alice"},
+			{ID: "child", ProviderID: "work", ListID: "list", ParentTaskID: &parentID, Title: "Child", Status: "open", Assignee: "Alice"},
+			{ID: "done", ProviderID: "work", ListID: "list", Title: "Done", Status: "done", Assignee: "Bob"},
+			{ID: "other", ProviderID: "work", ListID: "list", Title: "Other", Status: "open", Assignee: "Bob"},
+		},
+	}
+
+	tests := []struct {
+		name string
+		mode TaskGroupMode
+	}{
+		{name: "status", mode: TaskGroupStatus},
+		{name: "assignee", mode: TaskGroupAssignee},
+		{name: "tasks and subtasks", mode: TaskGroupTasksSubtasks},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			model := New(snapshot)
+			model.UI.Focus = PanelTasks
+			model.UI.GroupBy = test.mode
+			model.selectTaskAt(0)
+
+			groups := model.VisibleTaskGroups()
+			if len(groups) == 0 {
+				t.Fatal("grouping produced no groups")
+			}
+			selected := model.UI.SelectedTask
+			beforeRows := len(model.VisibleTasks())
+			collapsedRows := len(groups[0].Rows)
+
+			model, _ = model.Update(KeyMsg{Runes: []rune{' '}})
+			groups = model.VisibleTaskGroups()
+			if !groups[0].Collapsed {
+				t.Fatalf("first %s group was not collapsed: %#v", test.name, groups[0])
+			}
+			if got := len(model.VisibleTasks()); got != beforeRows-collapsedRows {
+				t.Fatalf("visible rows after collapse = %d, want %d", got, beforeRows-collapsedRows)
+			}
+			if model.UI.SelectedTask != selected {
+				t.Fatalf("selected task changed while collapsing: got %#v, want %#v", model.UI.SelectedTask, selected)
+			}
+			if _, ok := model.selectedTask(); !ok {
+				t.Fatal("selected task could not be resolved while its group was collapsed")
+			}
+			if view := model.View(); !strings.Contains(view, "[+]") {
+				t.Fatalf("collapsed group marker missing from view:\n%s", view)
+			}
+
+			model, command := model.Update(KeyMsg{Key: "x"})
+			completed := commandMessage(t, command)
+			if completed.TaskID != selected.TaskID || completed.ProviderID != selected.ProviderID {
+				t.Fatalf("collapsed task command = %#v, want task %#v", completed, selected)
+			}
+
+			model, _ = model.Update(KeyMsg{Key: "space"})
+			groups = model.VisibleTaskGroups()
+			if groups[0].Collapsed {
+				t.Fatalf("first %s group remained collapsed after toggle", test.name)
+			}
+			if len(model.VisibleTasks()) != beforeRows {
+				t.Fatalf("visible rows after expand = %d, want %d", len(model.VisibleTasks()), beforeRows)
+			}
+			if model.UI.SelectedTask != selected {
+				t.Fatalf("selected task changed while expanding: got %#v, want %#v", model.UI.SelectedTask, selected)
+			}
+		})
+	}
+}
+
+func TestCollapsedGroupHeadersCanBeSelectedAndExpanded(t *testing.T) {
+	snapshot := Snapshot{
+		Providers: []Provider{{ID: "work", Name: "Work", Type: ProviderTypeLocal, SyncState: SyncStateLocal}},
+		Spaces:    []Space{{ID: "space", ProviderID: "work", Name: "Space", SyncState: SyncStateLocal}},
+		Lists:     []List{{ID: "list", ProviderID: "work", SpaceID: "space", Name: "List", SyncState: SyncStateLocal}},
+		Tasks: []Task{
+			{ID: "first", ProviderID: "work", ListID: "list", Title: "First", Status: "done"},
+			{ID: "second", ProviderID: "work", ListID: "list", Title: "Second", Status: "open"},
+		},
+	}
+	model := New(snapshot)
+	model.UI.Focus = PanelTasks
+	model.UI.GroupBy = TaskGroupStatus
+	model.selectTaskAt(0)
+	groups := model.VisibleTaskGroups()
+	firstKey := taskGroupStateKey(TaskGroupStatus, groups[0].Key)
+
+	model, _ = model.Update(KeyMsg{Key: "space"})
+	model, _ = model.Update(KeyMsg{Key: "j"})
+	if !model.UI.TaskHeaderSelected || model.UI.FocusedGroup == firstKey {
+		t.Fatalf("down from collapsed header did not select the next header: %#v", model.UI)
+	}
+	model, _ = model.Update(KeyMsg{Key: "k"})
+	if !model.UI.TaskHeaderSelected || model.UI.FocusedGroup != firstKey {
+		t.Fatalf("up did not return to the collapsed header: %#v", model.UI)
+	}
+
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+	if model.VisibleTaskGroups()[0].Collapsed {
+		t.Fatal("enter did not expand the selected collapsed header")
 	}
 }
 

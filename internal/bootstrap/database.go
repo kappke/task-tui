@@ -204,6 +204,11 @@ CREATE INDEX idx_operations_provider_status ON sync_operations(provider_id, stat
 CREATE INDEX idx_operations_entity ON sync_operations(provider_id, entity_type, entity_id, created_at);
 `,
 	},
+	{
+		version: 2,
+		name:    "task_assignee",
+		sql:     `ALTER TABLE tasks ADD COLUMN assignee TEXT NOT NULL DEFAULT '';`,
+	},
 }
 
 // MigrateSQLite applies pending schema versions in a transaction. The

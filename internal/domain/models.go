@@ -56,6 +56,7 @@ type Task struct {
 	ListID          ListID     `json:"list_id"`
 	RemoteID        *string    `json:"remote_id,omitempty"`
 	ParentTaskID    *TaskID    `json:"parent_task_id,omitempty"`
+	Assignee        string     `json:"assignee,omitempty"`
 	Title           string     `json:"title"`
 	Description     string     `json:"description"`
 	Status          string     `json:"status"`

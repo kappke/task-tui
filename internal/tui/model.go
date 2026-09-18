@@ -105,14 +105,48 @@ type TaskRef struct {
 // rendering. It is intentionally a projection, not a replacement domain
 // object.
 type TaskRow struct {
-	Task         Task
-	ProviderID   ProviderID
-	ProviderName string
-	SpaceID      SpaceID
-	SpaceName    string
-	ListID       ListID
-	ListName     string
-	SearchResult bool
+	Task           Task
+	ProviderID     ProviderID
+	ProviderName   string
+	Assignee       string
+	SpaceID        SpaceID
+	SpaceName      string
+	ListID         ListID
+	ListName       string
+	SearchResult   bool
+	HierarchyDepth int
+}
+
+// TaskGroupMode controls how visible task rows are arranged for presentation.
+// Grouping never changes the underlying snapshot or task selection identity.
+type TaskGroupMode string
+
+const (
+	TaskGroupNone          TaskGroupMode = ""
+	TaskGroupStatus        TaskGroupMode = "status"
+	TaskGroupAssignee      TaskGroupMode = "assignee"
+	TaskGroupTasksSubtasks TaskGroupMode = "tasks_subtasks"
+)
+
+// GroupBy is a concise alias for callers that configure task grouping.
+type GroupBy = TaskGroupMode
+
+const (
+	GroupByNone          = TaskGroupNone
+	GroupByStatus        = TaskGroupStatus
+	GroupByAssignee      = TaskGroupAssignee
+	GroupByTasksSubtasks = TaskGroupTasksSubtasks
+)
+
+// TaskGroup is a presentation bucket. Rows retain their provider-scoped task
+// identities and can therefore continue to be selected and acted upon. A
+// collapsed group keeps its rows available for selection identity and actions,
+// but omits them from the visible task projection.
+type TaskGroup struct {
+	Key       string
+	Label     string
+	Rows      []TaskRow
+	Collapsed bool
 }
 
 // Panel is the focused navigation area.
@@ -155,6 +189,12 @@ type UIState struct {
 	SearchQuery             string
 	FilterActive            bool
 	Filter                  Filter
+	GroupBy                 TaskGroupMode
+	CollapsedGroups         map[string]bool
+	FocusedGroup            string
+	TaskGroupCursor         int
+	TaskHeaderSelected      bool
+	TaskHeaderTask          TaskRef
 	Input                   string
 	InputCursor             int
 	InputOrigin             string
@@ -229,11 +269,12 @@ func NewWithOptions(data Snapshot, options Options) Model {
 		KeyMap:  keyMap,
 		Options: options,
 		UI: UIState{
-			Focus:         PanelHierarchy,
-			Mode:          ModeBrowse,
-			ExpandedNodes: make(map[TreeNodeRef]bool),
-			Width:         100,
-			Height:        24,
+			Focus:           PanelHierarchy,
+			Mode:            ModeBrowse,
+			ExpandedNodes:   make(map[TreeNodeRef]bool),
+			CollapsedGroups: make(map[string]bool),
+			Width:           100,
+			Height:          24,
 		},
 	}
 	m.initializeSelection()
@@ -330,6 +371,17 @@ func cloneExpanded(in map[TreeNodeRef]bool) map[TreeNodeRef]bool {
 	out := make(map[TreeNodeRef]bool, len(in))
 	for ref, expanded := range in {
 		out[ref] = expanded
+	}
+	return out
+}
+
+func cloneCollapsed(in map[string]bool) map[string]bool {
+	if len(in) == 0 {
+		return make(map[string]bool)
+	}
+	out := make(map[string]bool, len(in))
+	for key, collapsed := range in {
+		out[key] = collapsed
 	}
 	return out
 }
