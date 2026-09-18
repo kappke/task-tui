@@ -128,6 +128,7 @@ type Mode string
 
 const (
 	ModeBrowse     Mode = "browse"
+	ModeDetail     Mode = "detail"
 	ModeSearch     Mode = "search"
 	ModeFilter     Mode = "filter"
 	ModeCommand    Mode = "command"
@@ -146,6 +147,7 @@ type UIState struct {
 	TaskOffset              int
 	TreeHorizontalOffset    int
 	TaskHorizontalOffset    int
+	DetailOffset            int
 	SelectedNode            TreeNodeRef
 	SelectedTask            TaskRef
 	ExpandedNodes           map[TreeNodeRef]bool

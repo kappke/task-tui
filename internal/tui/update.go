@@ -190,6 +190,10 @@ func (m *Model) reconcileSelection(oldNode TreeNodeRef, oldTask TaskRef) {
 		m.keepVisible()
 		return
 	}
+	if m.UI.Mode == ModeDetail {
+		m.UI.Mode = ModeBrowse
+		m.UI.DetailOffset = 0
+	}
 	m.selectTaskAt(m.UI.TaskCursor)
 	m.keepVisible()
 }
@@ -376,10 +380,33 @@ func (m Model) updateKey(key KeyMsg) (Model, Cmd) {
 		m.Status = Status{Level: StatusInfo, Text: "Quit requested"}
 		return m, m.emit(AppCommand{Kind: CommandQuit})
 	}
+	if m.UI.Mode == ModeDetail {
+		return m.updateDetail(key)
+	}
 	if m.UI.Mode != ModeBrowse {
 		return m.updateInput(key)
 	}
 	return m.updateBrowse(key, m.KeyMap.Action(keyName))
+}
+
+func (m Model) updateDetail(key KeyMsg) (Model, Cmd) {
+	switch m.KeyMap.Action(key.name()) {
+	case ActionMoveUp:
+		m.scrollDetail(-1)
+	case ActionMoveDown:
+		m.scrollDetail(1)
+	case ActionFirst:
+		m.UI.DetailOffset = 0
+	case ActionLast:
+		m.UI.DetailOffset = m.maxDetailOffset()
+	case ActionCancel:
+		m.closeDetail()
+	case ActionQuit:
+		m.UI.Quitting = true
+		m.Status = Status{Level: StatusInfo, Text: "Quit requested"}
+		return m, m.emit(AppCommand{Kind: CommandQuit})
+	}
+	return m, nil
 }
 
 func (m Model) updateBrowse(key KeyMsg, action Action) (Model, Cmd) {
@@ -535,9 +562,14 @@ func (m *Model) nextPanel() {
 
 func (m *Model) selectCurrent() {
 	if m.UI.Focus == PanelTasks {
-		if _, ok := m.selectedTask(); !ok {
+		row, ok := m.selectedTask()
+		if !ok {
 			m.Status = Status{Level: StatusWarning, Text: "No task selected"}
+			return
 		}
+		m.UI.Mode = ModeDetail
+		m.UI.DetailOffset = 0
+		m.Status = Status{Level: StatusInfo, Text: "Opened task details: " + row.Task.Title}
 		return
 	}
 	node, ok := m.currentNode()
@@ -967,6 +999,28 @@ func (m *Model) cancelBrowseView() {
 	}
 }
 
+func (m *Model) closeDetail() {
+	m.UI.Mode = ModeBrowse
+	m.UI.DetailOffset = 0
+	m.Status = Status{Level: StatusInfo, Text: "Closed task details"}
+}
+
+func (m *Model) scrollDetail(delta int) {
+	m.UI.DetailOffset = clamp(m.UI.DetailOffset+delta, 0, m.maxDetailOffset())
+}
+
+func (m Model) maxDetailOffset() int {
+	return maxInt(len(m.detailLines(maxInt(m.UI.Width, 1)))-m.detailViewportHeight(), 0)
+}
+
+func (m Model) detailViewportHeight() int {
+	height := m.UI.Height
+	if height < 1 {
+		height = 24
+	}
+	return maxInt(height-4, 1)
+}
+
 func (m Model) taskCommand(kind CommandKind) (AppCommand, bool) {
 	row, ok := m.selectedTask()
 	if !ok {
@@ -1064,6 +1118,10 @@ func findNode(nodes []TreeNode, wanted TreeNodeRef) int {
 }
 
 func (m *Model) keepVisible() {
+	if m.UI.Mode == ModeDetail {
+		m.UI.DetailOffset = clamp(m.UI.DetailOffset, 0, m.maxDetailOffset())
+		return
+	}
 	treeViewport, taskViewport := m.panelViewports()
 	m.UI.TreeOffset = keepCursorVisible(m.UI.TreeCursor, m.UI.TreeOffset, treeViewport)
 	m.UI.TaskOffset = keepCursorVisible(m.UI.TaskCursor, m.UI.TaskOffset, taskViewport)

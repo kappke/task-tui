@@ -84,6 +84,52 @@ func TestNavigationAndProviderScopedTaskSelection(t *testing.T) {
 	}
 }
 
+func TestTaskDetailViewOpensScrollsAndCloses(t *testing.T) {
+	snapshot := testSnapshot()
+	snapshot.Tasks[0].Description = strings.Repeat("This description explains the authentication regression and the required fix. ", 4)
+	model := New(snapshot)
+	model, _ = model.Update(KeyMsg{Key: "tab"})
+	model, command := model.Update(KeyMsg{Key: "enter"})
+	if command != nil || model.UI.Mode != ModeDetail {
+		t.Fatalf("open detail: mode=%q command=%v", model.UI.Mode, command)
+	}
+	view := model.View()
+	for _, value := range []string{"TASK DETAIL", "TITLE: Fix auth", "PROVIDER: Work (work)", "DESCRIPTION"} {
+		if !strings.Contains(view, value) {
+			t.Fatalf("detail view does not contain %q:\n%s", value, view)
+		}
+	}
+
+	model, _ = model.Update(WindowSizeMsg{Width: 50, Height: 8})
+	model, _ = model.Update(KeyMsg{Key: "j"})
+	if model.UI.DetailOffset == 0 {
+		t.Fatal("detail offset did not move down")
+	}
+	model, _ = model.Update(KeyMsg{Key: "G"})
+	if model.UI.DetailOffset != model.maxDetailOffset() {
+		t.Fatalf("detail offset = %d, want bottom %d", model.UI.DetailOffset, model.maxDetailOffset())
+	}
+	model, _ = model.Update(KeyMsg{Key: "esc"})
+	if model.UI.Mode != ModeBrowse || model.UI.DetailOffset != 0 {
+		t.Fatalf("close detail: mode=%q offset=%d", model.UI.Mode, model.UI.DetailOffset)
+	}
+}
+
+func TestTaskDetailClosesWhenSelectedTaskIsRemoved(t *testing.T) {
+	model := New(testSnapshot())
+	model, _ = model.Update(KeyMsg{Key: "tab"})
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+	model, _ = model.Update(TasksLoadedMsg{
+		ProviderID: "work",
+		ListID:     "backend",
+		Tasks:      []Task{testSnapshot().Tasks[1]},
+		Replace:    true,
+	})
+	if model.UI.Mode != ModeBrowse {
+		t.Fatalf("mode after selected task removal = %q, want %q", model.UI.Mode, ModeBrowse)
+	}
+}
+
 func TestSearchModeEmitsLocalSearchCommand(t *testing.T) {
 	model := New(testSnapshot())
 	model, command := model.Update(KeyMsg{Key: "/"})
@@ -279,6 +325,28 @@ func TestCharmModelUsesBubbleTeaMessagesAndRendersPanels(t *testing.T) {
 		if !strings.Contains(view, value) {
 			t.Fatalf("Charm view does not contain %q:\n%s", value, view)
 		}
+	}
+}
+
+func TestCharmModelRendersTaskDetails(t *testing.T) {
+	model := NewCharmModel(New(testSnapshot()), CharmOptions{})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = updated.(*CharmModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(*CharmModel)
+	if model.CoreModel().UI.Mode != ModeDetail {
+		t.Fatalf("mode = %q, want %q", model.CoreModel().UI.Mode, ModeDetail)
+	}
+	view := model.View()
+	for _, value := range []string{"TASK DETAIL", "DESCRIPTION", "fix auth regression; shared"} {
+		if !strings.Contains(view, value) {
+			t.Fatalf("detail view does not contain %q:\n%s", value, view)
+		}
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	model = updated.(*CharmModel)
+	if model.CoreModel().UI.Mode != ModeBrowse {
+		t.Fatalf("mode after escape = %q, want %q", model.CoreModel().UI.Mode, ModeBrowse)
 	}
 }
 

@@ -72,6 +72,9 @@ func (m Model) Render() string {
 }
 
 func (m Model) bodyLines(width, height int) []string {
+	if m.UI.Mode == ModeDetail {
+		return m.visibleDetailLines(width, height)
+	}
 	if width < 60 {
 		lines := m.treeLines(width)
 		lines = append(lines, fit("", width))
@@ -179,6 +182,136 @@ func (m Model) taskLines(width int) []string {
 	return lines
 }
 
+func (m Model) detailLines(width int) []string {
+	width = maxInt(width, 1)
+	lines := []string{fit("TASK DETAIL", width)}
+	row, ok := m.selectedTask()
+	if !ok {
+		return append(lines, fit("(no task selected)", width))
+	}
+
+	task := row.Task
+	title := safeText(task.Title)
+	if title == "" {
+		title = "(untitled task)"
+	}
+	appendField := func(label, value string) {
+		lines = append(lines, fit(label+": "+safeText(value), width))
+	}
+
+	lines = append(lines, "")
+	appendField("TITLE", title)
+	appendField("TASK ID", string(task.ID))
+	appendField("PROVIDER", taskProviderLabel(row))
+	location := safeText(row.SpaceName)
+	if location == "" {
+		location = string(row.SpaceID)
+	}
+	if row.ListName != "" {
+		location += "/" + safeText(row.ListName)
+	} else if row.ListID != "" {
+		location += "/" + string(row.ListID)
+	}
+	appendField("LOCATION", location)
+
+	status := safeText(task.Status)
+	if status == "" {
+		status = "(unspecified)"
+	}
+	appendField("STATUS", status)
+	priority := safeText(string(task.Priority))
+	if priority == "" {
+		priority = "(none)"
+	}
+	appendField("PRIORITY", priority)
+	due := "(none)"
+	if task.DueAt != nil {
+		due = task.DueAt.Format("2006-01-02 15:04 MST")
+	}
+	appendField("DUE", due)
+	appendField("SYNC", string(stateOr(task.SyncState, SyncStateUnknown)))
+	if !task.CreatedAt.IsZero() {
+		appendField("CREATED", task.CreatedAt.Format("2006-01-02 15:04 MST"))
+	}
+	if !task.UpdatedAt.IsZero() {
+		appendField("UPDATED", task.UpdatedAt.Format("2006-01-02 15:04 MST"))
+	}
+
+	lines = append(lines, "", fit("DESCRIPTION", width))
+	description := strings.TrimSpace(task.Description)
+	if description == "" {
+		lines = append(lines, fit("  (no description)", width))
+		return lines
+	}
+	for _, line := range wrapDetailText(description, maxInt(width-2, 1)) {
+		if line == "" {
+			lines = append(lines, fit("", width))
+			continue
+		}
+		lines = append(lines, fit("  "+line, width))
+	}
+	return lines
+}
+
+func (m Model) visibleDetailLines(width, height int) []string {
+	lines := m.detailLines(width)
+	height = maxInt(height, 1)
+	if len(lines) <= height {
+		return lines
+	}
+	offset := clamp(m.UI.DetailOffset, 0, len(lines)-height)
+	return lines[offset : offset+height]
+}
+
+func wrapDetailText(text string, width int) []string {
+	width = maxInt(width, 1)
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	paragraphs := strings.Split(text, "\n")
+	lines := make([]string, 0, len(paragraphs))
+	for _, paragraph := range paragraphs {
+		words := strings.Fields(paragraph)
+		if len(words) == 0 {
+			lines = append(lines, "")
+			continue
+		}
+
+		current := ""
+		for _, word := range words {
+			wordRunes := []rune(word)
+			for len(wordRunes) > width {
+				if current != "" {
+					lines = append(lines, current)
+					current = ""
+				}
+				lines = append(lines, string(wordRunes[:width]))
+				wordRunes = wordRunes[width:]
+			}
+			word = string(wordRunes)
+			if word == "" {
+				continue
+			}
+			if current == "" {
+				current = word
+				continue
+			}
+			if runeCount(current)+1+runeCount(word) <= width {
+				current += " " + word
+				continue
+			}
+			lines = append(lines, current)
+			current = word
+		}
+		if current != "" {
+			lines = append(lines, current)
+		}
+	}
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
+}
+
 func (m Model) modeLine(width int) string {
 	var prefix, suffix string
 	switch m.UI.Mode {
@@ -219,6 +352,9 @@ func (m Model) statusLine(width int) string {
 func (m Model) footerLine() string {
 	if m.UI.Quitting {
 		return "closing..."
+	}
+	if m.UI.Mode == ModeDetail {
+		return "j/k or up/down scroll | g/G top/bottom | esc close | q quit"
 	}
 	return "j/k or up/down move | tab switch panel | h/l or left/right scroll | enter open | g/G first/last | n new | e edit | x complete | d delete | / search | f filter | : commands | r refresh | q quit"
 }

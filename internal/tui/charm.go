@@ -281,6 +281,10 @@ func charmKeyMessage(msg tea.KeyMsg) KeyMsg {
 }
 
 func (m *CharmModel) charmBody(width, height int) string {
+	if m.core.UI.Mode == ModeDetail {
+		lines := m.core.visibleDetailLines(width, height)
+		return m.clipBody(strings.Join(lines, "\n"), width, height)
+	}
 	if width < 72 {
 		treeHeight := height / 2
 		if treeHeight < 3 {
@@ -482,7 +486,11 @@ func (m *CharmModel) charmStatusLine(width int) string {
 func (m *CharmModel) charmFooter(width int) string {
 	helpModel := m.help
 	helpModel.Width = width
-	return fit(helpModel.View(m.helpKeys), width)
+	helpKeys := m.helpKeys
+	if m.core.UI.Mode == ModeDetail {
+		helpKeys = newCharmDetailHelpKeyMap()
+	}
+	return fit(helpModel.View(helpKeys), width)
 }
 
 type charmHelpKeyMap struct {
@@ -514,6 +522,19 @@ func newCharmHelpKeyMap() charmHelpKeyMap {
 		},
 	}
 	return charmHelpKeyMap{short: short, full: full}
+}
+
+func newCharmDetailHelpKeyMap() charmHelpKeyMap {
+	bind := func(keys []string, helpKey, description string) key.Binding {
+		return key.NewBinding(key.WithKeys(keys...), key.WithHelp(helpKey, description))
+	}
+	short := []key.Binding{
+		bind([]string{"j", "k", "up", "down"}, "j/k", "scroll"),
+		bind([]string{"g", "G"}, "g/G", "top/bottom"),
+		bind([]string{"esc"}, "esc", "close"),
+		bind([]string{"q", "ctrl+c"}, "q", "quit"),
+	}
+	return charmHelpKeyMap{short: short, full: [][]key.Binding{short}}
 }
 
 func (k charmHelpKeyMap) ShortHelp() []key.Binding { return k.short }
