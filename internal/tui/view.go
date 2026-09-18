@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -150,7 +151,10 @@ func (m Model) treeLines(width int) []string {
 }
 
 func (m Model) taskLines(width int) []string {
-	lines := []string{fitAtOffset(m.taskHeading(), width, m.UI.TaskHorizontalOffset)}
+	lines := []string{
+		fitAtOffset(m.taskHeading(), width, m.UI.TaskHorizontalOffset),
+		fitAtOffset(taskTableHeaderLine(width), width, m.UI.TaskHorizontalOffset),
+	}
 	groups := m.VisibleTaskGroups()
 	rows := flattenTaskGroups(groups)
 	if len(rows) == 0 && (m.UI.GroupBy == TaskGroupNone || len(groups) == 0) {
@@ -213,6 +217,9 @@ func taskGroupHeading(mode TaskGroupMode, group TaskGroup) string {
 	if label == "" {
 		return ""
 	}
+	if mode == TaskGroupStatus {
+		label = displayTaskStatus(label)
+	}
 	expansion := "[-]"
 	if group.Collapsed {
 		expansion = "[+]"
@@ -240,7 +247,7 @@ func (m Model) taskRowLine(row TaskRow, index, width int) string {
 	if index == m.UI.TaskCursor && m.UI.Focus == PanelTasks {
 		marker = "> "
 	}
-	return fitAtOffset(taskLineText(row, marker), width, m.UI.TaskHorizontalOffset)
+	return fitAtOffset(taskTableLine(row, marker, taskTableLayoutFor(width)), width, m.UI.TaskHorizontalOffset)
 }
 
 func (m Model) detailLines(width int) []string {
@@ -284,12 +291,14 @@ func (m Model) detailLines(width int) []string {
 	if status == "" {
 		status = "(unspecified)"
 	}
-	appendField("STATUS", status)
+	appendField("STATUS", displayTaskStatus(status))
 	priority := safeText(string(task.Priority))
 	if priority == "" {
 		priority = "(none)"
 	}
 	appendField("PRIORITY", priority)
+	appendField("TIME ESTIMATE", formatTaskDuration(task.TimeEstimate))
+	appendField("TIME TRACKED", formatTaskDuration(task.TimeTracked))
 	due := "(none)"
 	if task.DueAt != nil {
 		due = task.DueAt.Format("2006-01-02 15:04 MST")
@@ -507,32 +516,136 @@ func fitAtOffset(value string, width, offset int) string {
 	return visible + strings.Repeat(" ", width-runeCount(visible))
 }
 
-func taskLineText(row TaskRow, marker string) string {
-	complete := " "
+type taskTableLayout struct {
+	Name      int
+	Status    int
+	Assignees int
+	Priority  int
+	Estimate  int
+	Tracked   int
+	Due       int
+}
+
+const taskTableGap = "  "
+
+func taskTableLayoutFor(width int) taskTableLayout {
+	columns := taskTableLayout{
+		Name:      40,
+		Status:    12,
+		Assignees: 18,
+		Priority:  10,
+		Estimate:  14,
+		Tracked:   13,
+		Due:       12,
+	}
+	if width > 0 {
+		baseWidth := 2 + columns.Name + columns.Status + columns.Assignees + columns.Priority + columns.Estimate + columns.Tracked + columns.Due + runeCount(taskTableGap)*6
+		if width > baseWidth {
+			columns.Name += width - baseWidth
+		}
+	}
+	return columns
+}
+
+func taskTableHeaderLine(width int) string {
+	columns := taskTableLayoutFor(width)
+	return taskTableCell("  "+"TASK", 2+columns.Name) + taskTableGap +
+		taskTableCell("STATUS", columns.Status) + taskTableGap +
+		taskTableCell("ASSIGNEES", columns.Assignees) + taskTableGap +
+		taskTableCell("PRIORITY", columns.Priority) + taskTableGap +
+		taskTableCell("TIME ESTIMATE", columns.Estimate) + taskTableGap +
+		taskTableCell("TIME TRACKED", columns.Tracked) + taskTableGap +
+		taskTableCell("DUE DATE", columns.Due)
+}
+
+func taskTableLine(row TaskRow, marker string, columns taskTableLayout) string {
+	completion := "  "
 	if isTaskComplete(row.Task) {
-		complete = "x"
+		completion = "x "
 	}
-	title := safeText(row.Task.Title)
-	if title == "" {
-		title = "(untitled task)"
+	name := completion + strings.Repeat("  ", maxInt(row.HierarchyDepth, 0)) + taskTitle(row)
+	return marker + taskTableCell(name, columns.Name) + taskTableGap +
+		taskTableCell(displayTaskStatus(row.Task.Status), columns.Status) + taskTableGap +
+		taskTableCell(taskAssigneeLabel(row), columns.Assignees) + taskTableGap +
+		taskTableCell(displayTaskPriority(row.Task.Priority), columns.Priority) + taskTableGap +
+		taskTableCell(formatTaskDuration(row.Task.TimeEstimate), columns.Estimate) + taskTableGap +
+		taskTableCell(formatTaskDuration(row.Task.TimeTracked), columns.Tracked) + taskTableGap +
+		taskTableCell(formatTaskDueDate(row.Task.DueAt), columns.Due)
+}
+
+func taskTableCell(value string, width int) string {
+	return fit(safeText(value), width)
+}
+
+func taskAssigneeLabel(row TaskRow) string {
+	value := strings.TrimSpace(row.Assignee)
+	if value == "" {
+		value = strings.TrimSpace(row.Task.Assignee)
 	}
-	location := ""
-	if row.SpaceName != "" || row.ListName != "" {
-		location = " @ " + safeText(row.SpaceName) + "/" + safeText(row.ListName)
+	if value == "" {
+		return "(UNASSIGNED)"
 	}
-	status := safeText(row.Task.Status)
-	if status == "" {
-		status = "unspecified"
+	return value
+}
+
+func displayTaskStatus(value string) string {
+	value = strings.TrimSpace(safeText(value))
+	if value == "" {
+		return "(UNSPECIFIED)"
 	}
-	metadata := status
-	if row.Task.Priority != "" {
-		metadata += "; priority " + safeText(string(row.Task.Priority))
+	return strings.ToUpper(value)
+}
+
+func displayTaskPriority(value Priority) string {
+	priority := strings.TrimSpace(string(value))
+	if priority == "" || strings.EqualFold(priority, string(PriorityNone)) {
+		return "-"
 	}
-	if row.Task.DueAt != nil {
-		metadata += "; due " + row.Task.DueAt.Format("2006-01-02")
+	return strings.ToUpper(priority)
+}
+
+func formatTaskDuration(value *time.Duration) string {
+	if value == nil {
+		return "-"
 	}
-	indent := strings.Repeat("  ", maxInt(row.HierarchyDepth, 0))
-	return fmt.Sprintf("%s%s[%s] %s%s (%s)", marker, indent, complete, title, location, metadata)
+	if *value <= 0 {
+		return "0m"
+	}
+	remaining := *value
+	days := remaining / (24 * time.Hour)
+	remaining %= 24 * time.Hour
+	hours := remaining / time.Hour
+	remaining %= time.Hour
+	minutes := remaining / time.Minute
+	seconds := remaining % time.Minute / time.Second
+	parts := make([]string, 0, 3)
+	if days > 0 {
+		parts = append(parts, fmt.Sprintf("%dd", days))
+	}
+	if hours > 0 {
+		parts = append(parts, fmt.Sprintf("%dh", hours))
+	}
+	if minutes > 0 {
+		parts = append(parts, fmt.Sprintf("%dm", minutes))
+	}
+	if len(parts) == 0 && seconds > 0 {
+		parts = append(parts, fmt.Sprintf("%ds", seconds))
+	}
+	if len(parts) == 0 {
+		return "<1m"
+	}
+	return strings.Join(parts, " ")
+}
+
+func formatTaskDueDate(value *time.Time) string {
+	if value == nil {
+		return "-"
+	}
+	return value.Format("2006-01-02")
+}
+
+func taskLineText(row TaskRow, marker string) string {
+	return taskTableLine(row, marker, taskTableLayoutFor(0))
 }
 
 func (m Model) maxHorizontalOffset(panel Panel) int {

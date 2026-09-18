@@ -209,6 +209,8 @@ func viewFromDomain(
 			Description:     task.Description,
 			Status:          task.Status,
 			Priority:        string(task.Priority),
+			TimeEstimate:    cloneDuration(task.TimeEstimate),
+			TimeTracked:     cloneDuration(task.TimeTracked),
 			DueAt:           cloneTime(task.DueAt),
 			CompletedAt:     cloneTime(task.CompletedAt),
 			SyncState:       SyncState(task.SyncState),
@@ -237,6 +239,14 @@ func cloneTaskID(value *domain.TaskID) *TaskID {
 }
 
 func cloneTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneDuration(value *time.Duration) *time.Duration {
 	if value == nil {
 		return nil
 	}
@@ -1477,6 +1487,8 @@ func foundationSnapshot(view View) foundationtui.Snapshot {
 			Description:     value.Description,
 			Status:          value.Status,
 			Priority:        domain.Priority(value.Priority),
+			TimeEstimate:    cloneDuration(value.TimeEstimate),
+			TimeTracked:     cloneDuration(value.TimeTracked),
 			DueAt:           cloneTime(value.DueAt),
 			CompletedAt:     cloneTime(value.CompletedAt),
 			SyncState:       domain.SyncState(value.SyncState),

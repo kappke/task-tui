@@ -334,10 +334,20 @@ func cloneTask(in Task) Task {
 	out := in
 	out.RemoteID = cloneString(in.RemoteID)
 	out.ParentTaskID = cloneTaskID(in.ParentTaskID)
+	out.TimeEstimate = cloneDuration(in.TimeEstimate)
+	out.TimeTracked = cloneDuration(in.TimeTracked)
 	out.DueAt = cloneTime(in.DueAt)
 	out.CompletedAt = cloneTime(in.CompletedAt)
 	out.RemoteUpdatedAt = cloneTime(in.RemoteUpdatedAt)
 	return out
+}
+
+func cloneDuration(value *time.Duration) *time.Duration {
+	if value == nil {
+		return nil
+	}
+	out := *value
+	return &out
 }
 
 func cloneTaskID(value *TaskID) *TaskID {

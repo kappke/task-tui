@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -429,6 +430,35 @@ func TestRenderIsPureAndSearchRowsOmitProviderAndSyncStatus(t *testing.T) {
 		if strings.Contains(view, value) {
 			t.Fatalf("view still contains removed presentation field %q:\n%s", value, view)
 		}
+	}
+}
+
+func TestTaskTableRendersMetadataAndUppercasesStatus(t *testing.T) {
+	snapshot := testSnapshot()
+	estimate := 90 * time.Minute
+	tracked := 45 * time.Minute
+	due := time.Date(2026, time.September, 18, 0, 0, 0, 0, time.UTC)
+	snapshot.Tasks[0].Title = "A task title that is intentionally much longer than the name column"
+	snapshot.Tasks[0].Status = "open"
+	snapshot.Tasks[0].Assignee = "alice, Bob"
+	snapshot.Tasks[0].Priority = PriorityHigh
+	snapshot.Tasks[0].TimeEstimate = &estimate
+	snapshot.Tasks[0].TimeTracked = &tracked
+	snapshot.Tasks[0].DueAt = &due
+	model := New(snapshot)
+	model, _ = model.Update(WindowSizeMsg{Width: 230, Height: 20})
+
+	view := model.View()
+	for _, value := range []string{
+		"TASK", "STATUS", "ASSIGNEES", "PRIORITY", "TIME ESTIMATE", "TIME TRACKED", "DUE DATE",
+		"OPEN", "alice, Bob", "HIGH", "1h 30m", "45m", "2026-09-18", "~",
+	} {
+		if !strings.Contains(view, value) {
+			t.Fatalf("task table does not contain %q:\n%s", value, view)
+		}
+	}
+	if strings.Contains(view, " status ") || strings.Contains(view, "(open)") {
+		t.Fatalf("task status was not rendered as an uppercase table value:\n%s", view)
 	}
 }
 

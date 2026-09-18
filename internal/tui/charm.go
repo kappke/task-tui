@@ -53,10 +53,16 @@ var (
 				Bold(true).
 				Foreground(lipgloss.Color("#FFFFFF")).
 				Background(charmAccent)
-	charmMutedStyle = lipgloss.NewStyle().Foreground(charmMuted)
-	charmGoodStyle  = lipgloss.NewStyle().Foreground(charmGood)
-	charmWarnStyle  = lipgloss.NewStyle().Foreground(charmWarn)
-	charmErrorStyle = lipgloss.NewStyle().Foreground(charmError)
+	charmMutedStyle        = lipgloss.NewStyle().Foreground(charmMuted)
+	charmAccentStyle       = lipgloss.NewStyle().Foreground(charmAccent)
+	charmGoodStyle         = lipgloss.NewStyle().Foreground(charmGood)
+	charmWarnStyle         = lipgloss.NewStyle().Foreground(charmWarn)
+	charmErrorStyle        = lipgloss.NewStyle().Foreground(charmError)
+	charmTableHeaderStyle  = lipgloss.NewStyle().Bold(true).Foreground(charmMuted)
+	charmSelectedTaskStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Background(charmAccent)
 )
 
 // NewCharmModel creates a Bubble Tea model from an already available cached
@@ -398,7 +404,10 @@ func (m *CharmModel) charmTreeLines(width int) []string {
 }
 
 func (m *CharmModel) charmTaskLines(width int) []string {
-	lines := []string{charmSectionStyle.Render(fitAtOffset(m.core.taskHeading(), width, m.core.UI.TaskHorizontalOffset))}
+	lines := []string{
+		charmSectionStyle.Render(fitAtOffset(m.core.taskHeading(), width, m.core.UI.TaskHorizontalOffset)),
+		charmTableHeaderStyle.Render(fitAtOffset(taskTableHeaderLine(width), width, m.core.UI.TaskHorizontalOffset)),
+	}
 	groups := m.core.VisibleTaskGroups()
 	rows := flattenTaskGroups(groups)
 	if len(rows) == 0 && (m.core.UI.GroupBy == TaskGroupNone || len(groups) == 0) {
@@ -415,17 +424,12 @@ func (m *CharmModel) charmTaskLines(width int) []string {
 		lines = append(lines, charmMutedStyle.Render("  ..."))
 	}
 	appendRow := func(row TaskRow, index int) {
-		selected := index == m.core.UI.TaskCursor && m.core.UI.Focus == PanelTasks
 		marker := "  "
+		selected := index == m.core.UI.TaskCursor && m.core.UI.Focus == PanelTasks
 		if selected {
 			marker = "> "
 		}
-		line := fitAtOffset(taskLineText(row, marker), width, m.core.UI.TaskHorizontalOffset)
-		if selected {
-			lines = append(lines, charmSelectedStyle.Render(line))
-		} else {
-			lines = append(lines, line)
-		}
+		lines = append(lines, m.charmTaskRowLine(row, marker, width, selected))
 	}
 	if m.core.UI.GroupBy == TaskGroupNone {
 		for index, row := range rows[offset:] {
@@ -459,6 +463,52 @@ func (m *CharmModel) charmTaskLines(width int) []string {
 		}
 	}
 	return lines
+}
+
+func (m *CharmModel) charmTaskRowLine(row TaskRow, marker string, width int, selected bool) string {
+	columns := taskTableLayoutFor(width)
+	fullLine := taskTableLine(row, marker, columns)
+	offset := clamp(m.core.UI.TaskHorizontalOffset, 0, runeCount(fullLine))
+	line := fitAtOffset(fullLine, width, offset)
+	line = colorTaskStatusCell(line, row.Task.Status, offset, marker, columns)
+	if selected {
+		return charmSelectedTaskStyle.Render(line)
+	}
+	return line
+}
+
+func colorTaskStatusCell(line, status string, offset int, marker string, columns taskTableLayout) string {
+	if line == "" {
+		return line
+	}
+	statusStart := runeCount(marker) + columns.Name + runeCount(taskTableGap)
+	statusEnd := statusStart + columns.Status
+	start := statusStart - offset
+	end := statusEnd - offset
+	visible := []rune(line)
+	if end <= 0 || start >= len(visible) {
+		return line
+	}
+	start = clamp(start, 0, len(visible))
+	end = clamp(end, start, len(visible))
+	if start == end {
+		return line
+	}
+	styled := taskStatusStyle(status).Render(string(visible[start:end]))
+	return string(visible[:start]) + styled + string(visible[end:])
+}
+
+func taskStatusStyle(status string) lipgloss.Style {
+	switch normalize(status) {
+	case "done", "complete", "completed", "closed":
+		return charmGoodStyle
+	case "blocked", "cancelled", "canceled":
+		return charmErrorStyle
+	case "in progress", "in_progress", "doing":
+		return charmWarnStyle
+	default:
+		return charmAccentStyle
+	}
 }
 
 func (m *CharmModel) charmModeLine(width int) string {

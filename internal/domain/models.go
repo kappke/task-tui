@@ -51,22 +51,24 @@ type List struct {
 
 // Task is the common task representation shared by all providers.
 type Task struct {
-	ID              TaskID     `json:"id"`
-	ProviderID      ProviderID `json:"provider_id"`
-	ListID          ListID     `json:"list_id"`
-	RemoteID        *string    `json:"remote_id,omitempty"`
-	ParentTaskID    *TaskID    `json:"parent_task_id,omitempty"`
-	Assignee        string     `json:"assignee,omitempty"`
-	Title           string     `json:"title"`
-	Description     string     `json:"description"`
-	Status          string     `json:"status"`
-	Priority        Priority   `json:"priority"`
-	DueAt           *time.Time `json:"due_at,omitempty"`
-	CompletedAt     *time.Time `json:"completed_at,omitempty"`
-	SyncState       SyncState  `json:"sync_state"`
-	RemoteUpdatedAt *time.Time `json:"remote_updated_at,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID              TaskID         `json:"id"`
+	ProviderID      ProviderID     `json:"provider_id"`
+	ListID          ListID         `json:"list_id"`
+	RemoteID        *string        `json:"remote_id,omitempty"`
+	ParentTaskID    *TaskID        `json:"parent_task_id,omitempty"`
+	Assignee        string         `json:"assignee,omitempty"`
+	Title           string         `json:"title"`
+	Description     string         `json:"description"`
+	Status          string         `json:"status"`
+	Priority        Priority       `json:"priority"`
+	TimeEstimate    *time.Duration `json:"time_estimate,omitempty"`
+	TimeTracked     *time.Duration `json:"time_tracked,omitempty"`
+	DueAt           *time.Time     `json:"due_at,omitempty"`
+	CompletedAt     *time.Time     `json:"completed_at,omitempty"`
+	SyncState       SyncState      `json:"sync_state"`
+	RemoteUpdatedAt *time.Time     `json:"remote_updated_at,omitempty"`
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
 }
 
 // ProviderMetadata stores provider-specific values without adding provider

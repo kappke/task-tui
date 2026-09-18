@@ -15,16 +15,18 @@ func TestMapperInjectsProviderAndLocalParentIdentity(t *testing.T) {
 		},
 	})
 	input := wireTask{
-		ID:          "remote-task",
-		Name:        "Implement adapter",
-		Description: "details",
-		Status:      wireStatus{Status: "vendor-custom", Color: "#123456", Type: "custom"},
-		Priority:    &wirePriority{Priority: "high", Color: "#ff0000", OrderIndex: "2"},
-		DueDate:     wireStringPointer("1710000000123"),
-		DateCreated: "1700000000000",
-		DateUpdated: "1700000001000",
-		DateDone:    wireStringPointer("1700000002000"),
-		Parent:      wireStringPointer("remote-parent"),
+		ID:           "remote-task",
+		Name:         "Implement adapter",
+		Description:  "details",
+		Status:       wireStatus{Status: "vendor-custom", Color: "#123456", Type: "custom"},
+		Priority:     &wirePriority{Priority: "high", Color: "#ff0000", OrderIndex: "2"},
+		DueDate:      wireStringPointer("1710000000123"),
+		DateCreated:  "1700000000000",
+		DateUpdated:  "1700000001000",
+		DateDone:     wireStringPointer("1700000002000"),
+		Parent:       wireStringPointer("remote-parent"),
+		TimeEstimate: wireStringPointer("5400000"),
+		TimeSpent:    wireStringPointer("2700000"),
 		Assignees: []wireAssignee{
 			{ID: "42", Username: "alice"},
 			{ID: "43", Name: "Bob"},
@@ -62,6 +64,12 @@ func TestMapperInjectsProviderAndLocalParentIdentity(t *testing.T) {
 	}
 	if task.Priority != domain.PriorityHigh {
 		t.Fatalf("Priority = %q", task.Priority)
+	}
+	if task.TimeEstimate == nil || *task.TimeEstimate != 90*time.Minute {
+		t.Fatalf("TimeEstimate = %v, want 1h30m", task.TimeEstimate)
+	}
+	if task.TimeTracked == nil || *task.TimeTracked != 45*time.Minute {
+		t.Fatalf("TimeTracked = %v, want 45m", task.TimeTracked)
 	}
 }
 

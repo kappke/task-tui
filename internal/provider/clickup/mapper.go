@@ -110,16 +110,18 @@ func (m Mapper) MapTask(input wireTask, listID domain.ListID) domain.Task {
 func (m Mapper) MapTaskContext(ctx context.Context, input wireTask, listID domain.ListID) domain.Task {
 	remoteID := input.ID.String()
 	output := domain.Task{
-		ID:          domain.TaskID(remoteID),
-		ProviderID:  m.ProviderID,
-		ListID:      listID,
-		RemoteID:    stringPointer(remoteID),
-		Assignee:    mapAssignee(input.Assignees),
-		Title:       input.Name,
-		Description: input.Description,
-		Status:      input.Status.Status,
-		Priority:    domain.PriorityNone,
-		SyncState:   domain.SyncStateSynced,
+		ID:           domain.TaskID(remoteID),
+		ProviderID:   m.ProviderID,
+		ListID:       listID,
+		RemoteID:     stringPointer(remoteID),
+		Assignee:     mapAssignee(input.Assignees),
+		Title:        input.Name,
+		Description:  input.Description,
+		Status:       input.Status.Status,
+		Priority:     domain.PriorityNone,
+		TimeEstimate: parseDurationMillis(input.TimeEstimate),
+		TimeTracked:  parseDurationMillis(input.TimeSpent),
+		SyncState:    domain.SyncStateSynced,
 	}
 
 	if createdAt, ok := parseMillis(input.DateCreated); ok {
@@ -259,6 +261,20 @@ func parseOptionalMillis(value *wireString) (time.Time, bool) {
 	}
 	return parseMillis(*value)
 }
+
+func parseDurationMillis(value *wireString) *time.Duration {
+	if value == nil {
+		return nil
+	}
+	parsed, err := strconv.ParseInt(strings.TrimSpace(value.String()), 10, 64)
+	if err != nil || parsed < 0 || parsed > maxDurationMillis {
+		return nil
+	}
+	duration := time.Duration(parsed) * time.Millisecond
+	return &duration
+}
+
+const maxDurationMillis = int64(1<<63-1) / int64(time.Millisecond)
 
 func parseMillis(value wireString) (time.Time, bool) {
 	parsed, err := strconv.ParseInt(strings.TrimSpace(value.String()), 10, 64)

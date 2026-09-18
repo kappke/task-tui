@@ -245,6 +245,13 @@ func nullableTime(value *time.Time) any {
 	return formatTime(*value)
 }
 
+func nullableDuration(value *time.Duration) any {
+	if value == nil {
+		return nil
+	}
+	return value.Milliseconds()
+}
+
 func scanNullableTime(value sql.NullString) (*time.Time, error) {
 	if !value.Valid || value.String == "" {
 		return nil, nil
@@ -255,3 +262,16 @@ func scanNullableTime(value sql.NullString) (*time.Time, error) {
 	}
 	return &parsed, nil
 }
+
+func scanNullableDuration(value sql.NullInt64) (*time.Duration, error) {
+	if !value.Valid {
+		return nil, nil
+	}
+	if value.Int64 < 0 || value.Int64 > maxDurationMillis {
+		return nil, errors.New("duration must be non-negative")
+	}
+	duration := time.Duration(value.Int64) * time.Millisecond
+	return &duration, nil
+}
+
+const maxDurationMillis = int64(1<<63-1) / int64(time.Millisecond)

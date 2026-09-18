@@ -10,7 +10,7 @@ import (
 
 const taskSelect = `
 	SELECT id, provider_id, list_id, remote_id, parent_task_id, assignee, title, description,
-		status, priority, due_at, completed_at, sync_state, remote_updated_at,
+		status, priority, time_estimate_ms, time_tracked_ms, due_at, completed_at, sync_state, remote_updated_at,
 		is_deleted, deleted_at, created_at, updated_at
 	FROM tasks`
 
@@ -96,7 +96,7 @@ func (s *Store) upsertTask(ctx context.Context, task Task) (Task, error) {
 		}
 		if _, updateErr := s.db.ExecContext(ctx, `
 			UPDATE tasks SET list_id = ?, remote_id = ?, parent_task_id = ?, assignee = ?, title = ?,
-				description = ?, status = ?, priority = ?, due_at = ?, completed_at = ?,
+				description = ?, status = ?, priority = ?, time_estimate_ms = ?, time_tracked_ms = ?, due_at = ?, completed_at = ?,
 				sync_state = ?, remote_updated_at = ?, is_deleted = ?, deleted_at = ?, updated_at = ?
 			WHERE provider_id = ? AND id = ?`,
 			task.ListID,
@@ -107,6 +107,8 @@ func (s *Store) upsertTask(ctx context.Context, task Task) (Task, error) {
 			task.Description,
 			task.Status,
 			task.Priority,
+			nullableDuration(task.TimeEstimate),
+			nullableDuration(task.TimeTracked),
 			nullableTime(task.DueAt),
 			nullableTime(task.CompletedAt),
 			task.SyncState,
@@ -251,7 +253,7 @@ func updateTaskTx(ctx context.Context, tx *sql.Tx, task Task) error {
 	result, err := tx.ExecContext(ctx, `
 		UPDATE tasks SET
 			list_id = ?, remote_id = ?, parent_task_id = ?, assignee = ?, title = ?, description = ?,
-			status = ?, priority = ?, due_at = ?, completed_at = ?, sync_state = ?,
+			status = ?, priority = ?, time_estimate_ms = ?, time_tracked_ms = ?, due_at = ?, completed_at = ?, sync_state = ?,
 			remote_updated_at = ?, is_deleted = ?, deleted_at = ?, updated_at = ?
 		WHERE provider_id = ? AND id = ?`,
 		task.ListID,
@@ -262,6 +264,8 @@ func updateTaskTx(ctx context.Context, tx *sql.Tx, task Task) error {
 		task.Description,
 		task.Status,
 		task.Priority,
+		nullableDuration(task.TimeEstimate),
+		nullableDuration(task.TimeTracked),
 		nullableTime(task.DueAt),
 		nullableTime(task.CompletedAt),
 		task.SyncState,
@@ -282,9 +286,9 @@ func (s *Store) insertTask(ctx context.Context, tx *sql.Tx, task Task) error {
 	_, err := execerFor(s.db, tx).ExecContext(ctx, `
 		INSERT INTO tasks (
 			id, provider_id, list_id, remote_id, parent_task_id, assignee, title, description,
-			status, priority, due_at, completed_at, sync_state, remote_updated_at,
+			status, priority, time_estimate_ms, time_tracked_ms, due_at, completed_at, sync_state, remote_updated_at,
 			is_deleted, deleted_at, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		task.ID,
 		task.ProviderID,
 		task.ListID,
@@ -295,6 +299,8 @@ func (s *Store) insertTask(ctx context.Context, tx *sql.Tx, task Task) error {
 		task.Description,
 		task.Status,
 		task.Priority,
+		nullableDuration(task.TimeEstimate),
+		nullableDuration(task.TimeTracked),
 		nullableTime(task.DueAt),
 		nullableTime(task.CompletedAt),
 		task.SyncState,
@@ -366,7 +372,7 @@ func taskQuery(ctx context.Context, queryer queryer, query string, args ...any) 
 func (s *Store) searchTaskRecords(ctx context.Context, search TaskSearch) ([]TaskResult, error) {
 	query := `
 		SELECT t.id, t.provider_id, t.list_id, t.remote_id, t.parent_task_id, t.assignee, t.title,
-			t.description, t.status, t.priority, t.due_at, t.completed_at, t.sync_state,
+			t.description, t.status, t.priority, t.time_estimate_ms, t.time_tracked_ms, t.due_at, t.completed_at, t.sync_state,
 			t.remote_updated_at, t.is_deleted, t.deleted_at, t.created_at, t.updated_at,
 			l.id, l.provider_id, l.space_id, l.remote_id, l.name, l.sync_state,
 			l.remote_updated_at, l.is_deleted, l.deleted_at, l.created_at, l.updated_at,
@@ -585,6 +591,7 @@ func scanTask(row rowScanner) (Task, error) {
 		task                                           Task
 		remoteID, parentTaskID                         sql.NullString
 		dueAt, completedAt, remoteUpdatedAt, deletedAt sql.NullString
+		timeEstimate, timeTracked                      sql.NullInt64
 		syncState                                      string
 		isDeleted                                      int
 		createdAt, updatedAt                           sql.NullString
@@ -600,6 +607,8 @@ func scanTask(row rowScanner) (Task, error) {
 		&task.Description,
 		&task.Status,
 		&task.Priority,
+		&timeEstimate,
+		&timeTracked,
 		&dueAt,
 		&completedAt,
 		&syncState,
@@ -625,6 +634,12 @@ func scanTask(row rowScanner) (Task, error) {
 	if task.RemoteUpdatedAt, err = scanNullableTime(remoteUpdatedAt); err != nil {
 		return Task{}, fmt.Errorf("remote updated timestamp: %w", err)
 	}
+	if task.TimeEstimate, err = scanNullableDuration(timeEstimate); err != nil {
+		return Task{}, fmt.Errorf("time estimate: %w", err)
+	}
+	if task.TimeTracked, err = scanNullableDuration(timeTracked); err != nil {
+		return Task{}, fmt.Errorf("time tracked: %w", err)
+	}
 	if task.DeletedAt, err = scanNullableTime(deletedAt); err != nil {
 		return Task{}, fmt.Errorf("deleted timestamp: %w", err)
 	}
@@ -647,6 +662,7 @@ func scanTaskResult(row rowScanner) (TaskResult, error) {
 	)
 	var (
 		trRemote, trParent, trDue, trCompleted, trRemoteUpdated, trDeleted sql.NullString
+		trTimeEstimate, trTimeTracked                                      sql.NullInt64
 		trSync                                                             string
 		trDeletedFlag                                                      int
 		trCreated, trUpdated                                               sql.NullString
@@ -664,7 +680,7 @@ func scanTaskResult(row rowScanner) (TaskResult, error) {
 	)
 	if err := row.Scan(
 		&tr.ID, &tr.ProviderID, &tr.ListID, &trRemote, &trParent, &tr.Assignee, &tr.Title,
-		&tr.Description, &tr.Status, &tr.Priority, &trDue, &trCompleted, &trSync,
+		&tr.Description, &tr.Status, &tr.Priority, &trTimeEstimate, &trTimeTracked, &trDue, &trCompleted, &trSync,
 		&trRemoteUpdated, &trDeletedFlag, &trDeleted, &trCreated, &trUpdated,
 		&lr.ID, &lr.ProviderID, &lr.SpaceID, &lrRemote, &lr.Name, &lrSync,
 		&lrRemoteUpdated, &lrDeletedFlag, &lrDeleted, &lrCreated, &lrUpdated,
@@ -688,6 +704,12 @@ func scanTaskResult(row rowScanner) (TaskResult, error) {
 		return TaskResult{}, err
 	}
 	if tr.RemoteUpdatedAt, err = scanNullableTime(trRemoteUpdated); err != nil {
+		return TaskResult{}, err
+	}
+	if tr.TimeEstimate, err = scanNullableDuration(trTimeEstimate); err != nil {
+		return TaskResult{}, err
+	}
+	if tr.TimeTracked, err = scanNullableDuration(trTimeTracked); err != nil {
 		return TaskResult{}, err
 	}
 	if tr.DeletedAt, err = scanNullableTime(trDeleted); err != nil {

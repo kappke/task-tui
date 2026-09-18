@@ -1515,7 +1515,7 @@ func (m Model) panelViewports() (tree, tasks int) {
 	}
 	if width >= 72 {
 		visible := panelItemViewport(bodyHeight)
-		return visible, visible
+		return visible, taskPanelItemViewport(bodyHeight)
 	}
 
 	treeHeight := bodyHeight / 2
@@ -1526,12 +1526,17 @@ func (m Model) panelViewports() (tree, tasks int) {
 		treeHeight = maxInt(bodyHeight-1, 1)
 	}
 	taskHeight := maxInt(bodyHeight-treeHeight, 1)
-	return panelItemViewport(treeHeight), panelItemViewport(taskHeight)
+	return panelItemViewport(treeHeight), taskPanelItemViewport(taskHeight)
 }
 
 func panelItemViewport(panelHeight int) int {
 	// Leave room for the panel border, heading, and the scroll marker.
 	return maxInt(panelHeight-4, 1)
+}
+
+func taskPanelItemViewport(panelHeight int) int {
+	// Task panels reserve an additional line for the table column headings.
+	return maxInt(panelItemViewport(panelHeight)-1, 1)
 }
 
 func clamp(value, low, high int) int {

@@ -418,6 +418,8 @@ func (p *ClickUpProvider) mapTask(listID ListID, remote clickUpTask) Task {
 		Description:     remote.Description,
 		Status:          remote.Status.Status,
 		Priority:        remote.Priority.Priority,
+		TimeEstimate:    parseTaskDuration(remote.TimeEstimate),
+		TimeTracked:     parseTaskDuration(remote.TimeSpent),
 		DueAt:           parseMillisPtr(remote.DueDate),
 		SyncState:       SyncStateSynced,
 		RemoteUpdatedAt: parseMillisPtr(remote.DateUpdated),
@@ -562,7 +564,9 @@ type clickUpTask struct {
 	Priority struct {
 		Priority string `json:"priority"`
 	} `json:"priority"`
-	Assignees []struct {
+	TimeEstimate string `json:"time_estimate"`
+	TimeSpent    string `json:"time_spent"`
+	Assignees    []struct {
 		ID       string `json:"id"`
 		Username string `json:"username"`
 		Name     string `json:"name"`
@@ -609,6 +613,20 @@ func parseMillisPtr(value string) *time.Time {
 	parsed := time.UnixMilli(millis).UTC()
 	return &parsed
 }
+
+func parseTaskDuration(value string) *time.Duration {
+	if value == "" {
+		return nil
+	}
+	millis, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || millis < 0 || millis > maxDurationMillis {
+		return nil
+	}
+	duration := time.Duration(millis) * time.Millisecond
+	return &duration
+}
+
+const maxDurationMillis = int64(1<<63-1) / int64(time.Millisecond)
 
 func ctxErr(ctx context.Context) error {
 	if ctx == nil {

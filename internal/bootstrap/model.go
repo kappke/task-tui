@@ -118,6 +118,8 @@ type Task struct {
 	Description     string
 	Status          string
 	Priority        string
+	TimeEstimate    *time.Duration
+	TimeTracked     *time.Duration
 	DueAt           *time.Time
 	CompletedAt     *time.Time
 	SyncState       SyncState

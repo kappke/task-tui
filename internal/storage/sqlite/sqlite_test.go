@@ -138,8 +138,8 @@ func TestOpenRunsInitialMigrationAndConfiguresSQLite(t *testing.T) {
 	if err := store.SQLDB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatalf("migration count: %v", err)
 	}
-	if migrationCount != 2 {
-		t.Fatalf("migration count = %d, want 2", migrationCount)
+	if migrationCount != 3 {
+		t.Fatalf("migration count = %d, want 3", migrationCount)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("close: %v", err)
@@ -153,8 +153,8 @@ func TestOpenRunsInitialMigrationAndConfiguresSQLite(t *testing.T) {
 	if err := reopened.SQLDB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatalf("reopen migration count: %v", err)
 	}
-	if migrationCount != 2 {
-		t.Fatalf("reopen migration count = %d, want 2", migrationCount)
+	if migrationCount != 3 {
+		t.Fatalf("reopen migration count = %d, want 3", migrationCount)
 	}
 }
 
@@ -665,6 +665,36 @@ func TestReleasedQueueOperationIsImmediatelyClaimable(t *testing.T) {
 	reclaimed, err := store.Claim(context.Background(), h.provider.ID)
 	if err != nil || reclaimed.ID != claimed.ID {
 		t.Fatalf("reclaimed operation = %#v, %v", reclaimed, err)
+	}
+}
+
+func TestTaskTimeTrackingRoundTrips(t *testing.T) {
+	store := openTestStore(t)
+	h := createHierarchy(t, store, "time-tracking")
+	estimate := 90 * time.Minute
+	tracked := 45 * time.Minute
+	h.task.TimeEstimate = &estimate
+	h.task.TimeTracked = &tracked
+	updated, err := store.UpdateTask(context.Background(), h.task)
+	if err != nil {
+		t.Fatalf("update task with time tracking: %v", err)
+	}
+	if updated.TimeEstimate == nil || *updated.TimeEstimate != estimate {
+		t.Fatalf("updated estimate = %v, want %v", updated.TimeEstimate, estimate)
+	}
+	if updated.TimeTracked == nil || *updated.TimeTracked != tracked {
+		t.Fatalf("updated tracked time = %v, want %v", updated.TimeTracked, tracked)
+	}
+
+	loaded, err := store.GetTask(context.Background(), h.task.ID)
+	if err != nil {
+		t.Fatalf("reload task with time tracking: %v", err)
+	}
+	if loaded.TimeEstimate == nil || *loaded.TimeEstimate != estimate {
+		t.Fatalf("loaded estimate = %v, want %v", loaded.TimeEstimate, estimate)
+	}
+	if loaded.TimeTracked == nil || *loaded.TimeTracked != tracked {
+		t.Fatalf("loaded tracked time = %v, want %v", loaded.TimeTracked, tracked)
 	}
 }
 

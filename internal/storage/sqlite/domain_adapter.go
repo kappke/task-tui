@@ -615,6 +615,8 @@ func taskRecord(task domain.Task) (Task, error) {
 		Description:     task.Description,
 		Status:          task.Status,
 		Priority:        task.Priority.String(),
+		TimeEstimate:    copyDurationPointer(task.TimeEstimate),
+		TimeTracked:     copyDurationPointer(task.TimeTracked),
 		DueAt:           task.DueAt,
 		CompletedAt:     task.CompletedAt,
 		SyncState:       SyncState(task.SyncState),
@@ -663,6 +665,8 @@ func domainTask(task Task) domain.Task {
 		Description:     task.Description,
 		Status:          task.Status,
 		Priority:        domain.Priority(task.Priority),
+		TimeEstimate:    copyDurationPointer(task.TimeEstimate),
+		TimeTracked:     copyDurationPointer(task.TimeTracked),
 		DueAt:           task.DueAt,
 		CompletedAt:     task.CompletedAt,
 		SyncState:       domain.SyncState(task.SyncState),
@@ -673,6 +677,14 @@ func domainTask(task Task) domain.Task {
 }
 
 func copyStringPointer(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func copyDurationPointer(value *time.Duration) *time.Duration {
 	if value == nil {
 		return nil
 	}
