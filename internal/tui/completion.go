@@ -11,6 +11,7 @@ var commandNames = []string{
 	"filter",
 	"group",
 	"ungroup",
+	"provider",
 	"refresh",
 	"task",
 	"space",
@@ -55,8 +56,23 @@ func (m Model) commandCompletion() (prefix string, candidates []string, start, e
 		if len(before) == 1 || (len(before) == 2 && normalize(before[1]) == "by") {
 			candidates = matchingCompletions(groupNames, fragment)
 		}
+	case "provider":
+		if len(before) == 1 {
+			candidates = matchingCompletions(m.providerCommandNames(), fragment)
+		} else if len(before) == 2 && (normalize(before[1]) == "switch" || normalize(before[1]) == "select") {
+			candidates = matchingCompletions(m.providerCommandNames(), fragment)
+		}
 	}
 	return prefix, candidates, start, cursor
+}
+
+func (m Model) providerCommandNames() []string {
+	providers := m.allProviders()
+	names := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		names = append(names, string(provider.ID))
+	}
+	return names
 }
 
 func matchingCompletions(values []string, fragment string) []string {

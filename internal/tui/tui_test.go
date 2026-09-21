@@ -92,24 +92,19 @@ func TestNavigationAndProviderScopedTaskSelection(t *testing.T) {
 func TestSwitchingToTasksLoadsTheHighlightedList(t *testing.T) {
 	model := New(testSnapshot())
 	model, _ = model.Update(KeyMsg{Key: "tab"})
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "provider personal")
+	model, _ = model.Update(KeyMsg{Key: "enter"})
 	model, _ = model.Update(KeyMsg{Key: "shift+tab"})
-	model, command := model.Update(KeyMsg{Key: "G"})
+	model, command := model.Update(KeyMsg{Key: "tab"})
 	if command == nil {
-		t.Fatal("moving to the second list did not request its tasks")
+		t.Fatal("switching to the personal task panel did not request its tasks")
 	}
 	message := commandMessage(t, command)
 	if message.Kind != CommandLoadCached || message.ProviderID != "personal" || message.ListID != "today" {
 		t.Fatalf("navigation load command = %#v, want personal/today", message)
 	}
 
-	model, command = model.Update(KeyMsg{Key: "tab"})
-	if model.UI.Focus != PanelTasks || command == nil {
-		t.Fatalf("switch to tasks: focus=%q command=%v", model.UI.Focus, command)
-	}
-	message = commandMessage(t, command)
-	if message.Kind != CommandLoadCached || message.ProviderID != "personal" || message.ListID != "today" {
-		t.Fatalf("list load command = %#v, want personal/today", message)
-	}
 }
 
 func TestTaskDetailViewOpensScrollsAndCloses(t *testing.T) {
@@ -199,6 +194,9 @@ func TestSearchStaysWithinSelectedList(t *testing.T) {
 
 func TestFilterAndCommandPalette(t *testing.T) {
 	model := New(testSnapshot())
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "provider personal")
+	model, _ = model.Update(KeyMsg{Key: "enter"})
 	model, _ = model.Update(KeyMsg{Key: "f"})
 	model, _ = typeInput(model, "status:open provider:personal")
 	model, command := model.Update(KeyMsg{Key: "enter"})
@@ -214,8 +212,49 @@ func TestFilterAndCommandPalette(t *testing.T) {
 	model, _ = typeInput(model, "refresh")
 	model, command = model.Update(KeyMsg{Key: "enter"})
 	message, ok := command().(CommandMsg)
-	if !ok || message.Command.Kind != CommandRefresh || message.Command.ProviderID != "work" {
+	if !ok || message.Command.Kind != CommandRefresh || message.Command.ProviderID != "personal" {
 		t.Fatalf("palette refresh command = %#v", message)
+	}
+}
+
+func TestOnlyActiveProviderIsDisplayed(t *testing.T) {
+	model := New(testSnapshot())
+	if model.UI.ActiveProviderID != "work" {
+		t.Fatalf("active provider = %q, want work", model.UI.ActiveProviderID)
+	}
+	if nodes := model.TreeNodes(); len(nodes) == 0 || nodes[0].ProviderID != "work" {
+		t.Fatalf("hierarchy = %#v, want work provider only", nodes)
+	}
+	for _, row := range model.VisibleTasks() {
+		if row.ProviderID != "work" {
+			t.Fatalf("visible task = %#v, belongs to inactive provider", row)
+		}
+	}
+}
+
+func TestProviderSwitchCommandPalette(t *testing.T) {
+	for _, input := range []string{"provider personal", "provider switch personal"} {
+		command, err := ParseCommand(input)
+		if err != nil {
+			t.Fatalf("ParseCommand(%q): %v", input, err)
+		}
+		if command.Kind != CommandSwitchProvider || command.ProviderID != "personal" {
+			t.Fatalf("ParseCommand(%q) = %#v, want personal provider switch", input, command)
+		}
+	}
+
+	model := New(testSnapshot())
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "provider personal")
+	model, command := model.Update(KeyMsg{Key: "enter"})
+	if command != nil || model.UI.ActiveProviderID != "personal" {
+		t.Fatalf("provider switch: active=%q command=%v", model.UI.ActiveProviderID, command)
+	}
+	if nodes := model.TreeNodes(); len(nodes) == 0 || nodes[0].ProviderID != "personal" {
+		t.Fatalf("switched hierarchy = %#v, want personal provider only", nodes)
+	}
+	if rows := model.VisibleTasks(); len(rows) == 0 || rows[0].ProviderID != "personal" {
+		t.Fatalf("switched tasks = %#v, want personal tasks only", rows)
 	}
 }
 
@@ -546,8 +585,8 @@ func TestExpandAndCollapseAllHierarchyNodes(t *testing.T) {
 	model, _ = model.Update(KeyMsg{Key: "-"})
 
 	nodes := model.TreeNodes()
-	if len(nodes) != 2 {
-		t.Fatalf("collapsed hierarchy nodes = %d, want two providers", len(nodes))
+	if len(nodes) != 1 {
+		t.Fatalf("collapsed hierarchy nodes = %d, want one provider", len(nodes))
 	}
 	for _, node := range nodes {
 		if node.Ref.Kind != TreeNodeProvider || node.Expanded {
@@ -560,8 +599,8 @@ func TestExpandAndCollapseAllHierarchyNodes(t *testing.T) {
 
 	model, _ = model.Update(KeyMsg{Key: "+"})
 	nodes = model.TreeNodes()
-	if len(nodes) != 6 {
-		t.Fatalf("expanded hierarchy nodes = %d, want providers, spaces, and lists", len(nodes))
+	if len(nodes) != 3 {
+		t.Fatalf("expanded hierarchy nodes = %d, want provider, space, and list", len(nodes))
 	}
 	for _, node := range nodes {
 		if node.Ref.Kind != TreeNodeProvider && node.Ref.Kind != TreeNodeSpace {
@@ -883,10 +922,13 @@ func TestCharmModelUsesBubbleTeaMessagesAndRendersPanels(t *testing.T) {
 	}
 
 	view := model.View()
-	for _, value := range []string{"TASK MANAGER", "SPACES / LISTS", "TASKS", "LIST Backend", "Work", "Personal"} {
+	for _, value := range []string{"TASK MANAGER", "SPACES / LISTS", "TASKS", "LIST Backend", "Work"} {
 		if !strings.Contains(view, value) {
 			t.Fatalf("Charm view does not contain %q:\n%s", value, view)
 		}
+	}
+	if strings.Contains(view, "Personal") {
+		t.Fatalf("Charm view contains inactive provider:\n%s", view)
 	}
 }
 

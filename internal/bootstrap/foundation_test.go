@@ -40,8 +40,8 @@ func TestBuildUsesFoundationGraphAndRendersCachedProviders(t *testing.T) {
 	if err := runtime.Run(context.Background()); err != nil {
 		t.Fatalf("Runtime.Run() error = %v", err)
 	}
-	if !strings.Contains(output.String(), "ClickUp") || !strings.Contains(output.String(), "Local") {
-		t.Fatalf("initial frame does not contain both providers: %q", output.String())
+	if !strings.Contains(output.String(), "ClickUp") || strings.Contains(output.String(), "Local") {
+		t.Fatalf("initial frame does not contain only the active provider: %q", output.String())
 	}
 	if count := strings.Count(output.String(), "TASK MANAGER"); count != 1 {
 		t.Fatalf("headless render count = %d, want one frame", count)

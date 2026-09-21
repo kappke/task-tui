@@ -82,6 +82,7 @@ func (m *Model) ensureUI() {
 }
 
 func (m *Model) initializeSelection() {
+	m.ensureActiveProvider()
 	m.UI.ExpandedNodes = cloneExpanded(m.UI.ExpandedNodes)
 	for _, provider := range m.viewProviders() {
 		providerRef := TreeNodeRef{Kind: TreeNodeProvider, ProviderID: provider.ID}
@@ -122,6 +123,20 @@ func (m *Model) initializeSelection() {
 	m.keepVisible()
 }
 
+func (m *Model) ensureActiveProvider() {
+	providers := m.allProviders()
+	for _, provider := range providers {
+		if provider.ID == m.UI.ActiveProviderID {
+			return
+		}
+	}
+	if len(providers) > 0 {
+		m.UI.ActiveProviderID = providers[0].ID
+		return
+	}
+	m.UI.ActiveProviderID = ""
+}
+
 func firstListIndex(nodes []TreeNode) int {
 	for index, node := range nodes {
 		if node.Ref.Kind == TreeNodeList {
@@ -136,6 +151,7 @@ func (m *Model) applySnapshot(data Snapshot) Model {
 	oldTask := m.UI.SelectedTask
 	hadLists := len(m.Data.Lists) > 0
 	m.Data = cloneSnapshot(data)
+	m.ensureActiveProvider()
 	m.UI.ExpandedNodes = cloneExpanded(m.UI.ExpandedNodes)
 	m.initializeExpansion()
 	m.reconcileSelection(oldNode, oldTask)
@@ -1226,6 +1242,8 @@ func (m Model) submitPalette() (Model, Cmd) {
 		return m, nil
 	}
 	switch command.Kind {
+	case CommandSwitchProvider:
+		return m.switchProvider(command.ProviderID)
 	case CommandSearch:
 		return m.applySearch(command.Query, command)
 	case CommandFilter:
@@ -1281,6 +1299,32 @@ func (m Model) submitPalette() (Model, Cmd) {
 		m.Status = Status{Level: StatusError, Text: "Unsupported command"}
 		return m, nil
 	}
+}
+
+func (m Model) switchProvider(requested ProviderID) (Model, Cmd) {
+	requested = ProviderID(strings.TrimSpace(string(requested)))
+	for _, provider := range m.allProviders() {
+		if normalize(string(provider.ID)) != normalize(string(requested)) && normalize(displayProviderName(provider)) != normalize(string(requested)) {
+			continue
+		}
+		m.UI.ActiveProviderID = provider.ID
+		m.UI.Mode = ModeBrowse
+		m.UI.Input = ""
+		m.UI.InputCursor = 0
+		m.UI.SearchActive = false
+		m.UI.SearchQuery = ""
+		m.UI.FilterActive = false
+		m.UI.Filter = Filter{}
+		m.UI.SelectedNode = TreeNodeRef{}
+		m.UI.SelectedTask = TaskRef{}
+		m.UI.TreeCursor = 0
+		m.UI.TaskCursor = 0
+		m.initializeSelection()
+		m.Status = Status{Level: StatusInfo, Text: "Switched to provider " + displayProviderName(provider)}
+		return m, nil
+	}
+	m.Status = Status{Level: StatusError, Text: "Unknown provider " + string(requested)}
+	return m, nil
 }
 
 func (m Model) submitCreate() (Model, Cmd) {

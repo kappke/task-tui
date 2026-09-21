@@ -143,6 +143,9 @@ func (m Model) taskRows(aggregate bool) []TaskRow {
 
 	rows := make([]TaskRow, 0, len(m.Data.Tasks))
 	for _, task := range m.Data.Tasks {
+		if m.UI.ActiveProviderID != "" && task.ProviderID != m.UI.ActiveProviderID {
+			continue
+		}
 		if !aggregate && !m.inSelectedScope(task, lists) {
 			continue
 		}
@@ -577,6 +580,18 @@ func displayProviderName(provider Provider) string {
 }
 
 func (m Model) viewProviders() []Provider {
+	providers := m.allProviders()
+	if m.UI.ActiveProviderID != "" {
+		for _, provider := range providers {
+			if provider.ID == m.UI.ActiveProviderID {
+				return []Provider{provider}
+			}
+		}
+	}
+	return providers
+}
+
+func (m Model) allProviders() []Provider {
 	providers := append([]Provider(nil), m.Data.Providers...)
 	seen := make(map[ProviderID]bool, len(providers))
 	for _, provider := range providers {

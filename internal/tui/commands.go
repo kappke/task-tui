@@ -20,19 +20,20 @@ type Cmd func() Message
 type CommandKind string
 
 const (
-	CommandLoadCached   CommandKind = "load_cached"
-	CommandCreateSpace  CommandKind = "create_space"
-	CommandCreateList   CommandKind = "create_list"
-	CommandCreateTask   CommandKind = "create_task"
-	CommandUpdateTask   CommandKind = "update_task"
-	CommandCompleteTask CommandKind = "complete_task"
-	CommandDeleteTask   CommandKind = "delete_task"
-	CommandSearch       CommandKind = "search_tasks"
-	CommandFilter       CommandKind = "filter_tasks"
-	CommandGroup        CommandKind = "group_tasks"
-	CommandRefresh      CommandKind = "refresh"
-	CommandQuit         CommandKind = "quit"
-	CommandHelp         CommandKind = "help"
+	CommandLoadCached     CommandKind = "load_cached"
+	CommandCreateSpace    CommandKind = "create_space"
+	CommandCreateList     CommandKind = "create_list"
+	CommandCreateTask     CommandKind = "create_task"
+	CommandUpdateTask     CommandKind = "update_task"
+	CommandCompleteTask   CommandKind = "complete_task"
+	CommandDeleteTask     CommandKind = "delete_task"
+	CommandSearch         CommandKind = "search_tasks"
+	CommandFilter         CommandKind = "filter_tasks"
+	CommandGroup          CommandKind = "group_tasks"
+	CommandSwitchProvider CommandKind = "switch_provider"
+	CommandRefresh        CommandKind = "refresh"
+	CommandQuit           CommandKind = "quit"
+	CommandHelp           CommandKind = "help"
 )
 
 // Short aliases make command construction pleasant for small adapters while
@@ -136,6 +137,15 @@ func ParseCommand(input string) (AppCommand, error) {
 		}
 		command.Title = strings.TrimSpace(strings.Join(args[1:], " "))
 		return command, nil
+	}
+	if name == "provider" {
+		if len(args) > 0 && (normalize(args[0]) == "switch" || normalize(args[0]) == "select") {
+			args = args[1:]
+		}
+		if len(args) != 1 || strings.TrimSpace(args[0]) == "" {
+			return AppCommand{}, errors.New("provider command requires a provider id or name")
+		}
+		return AppCommand{Kind: CommandSwitchProvider, ProviderID: ProviderID(args[0]), Raw: raw}, nil
 	}
 
 	command := AppCommand{Raw: raw}

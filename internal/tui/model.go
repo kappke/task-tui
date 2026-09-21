@@ -177,6 +177,7 @@ const (
 type UIState struct {
 	Focus                   Panel
 	Mode                    Mode
+	ActiveProviderID        ProviderID
 	TreeCursor              int
 	TaskCursor              int
 	TreeOffset              int
