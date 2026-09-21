@@ -147,6 +147,45 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 	}
 }
 
+func TestFoundationUILoadsTheRequestedListInsteadOfPersistedList(t *testing.T) {
+	oldView := View{Tasks: []Task{{ID: "old-task", ProviderID: "work", ListID: "old-list", Title: "Old"}}}
+	newView := View{Tasks: []Task{{ID: "new-task", ProviderID: "work", ListID: "new-list", Title: "New"}}}
+	loaderCalls := 0
+	listLoaderCalls := 0
+	ui, err := newFoundationUIControllerWithListLoader(
+		NewStreamTerminal(bytes.NewBuffer(nil), &bytes.Buffer{}, false),
+		foundationNoopHandler{},
+		func(context.Context) (View, error) {
+			loaderCalls++
+			return oldView, nil
+		},
+		func(_ context.Context, providerID ProviderID, listID ListID) (View, error) {
+			listLoaderCalls++
+			if providerID != "work" || listID != "new-list" {
+				t.Fatalf("requested list scope = %s/%s", providerID, listID)
+			}
+			return newView, nil
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("newFoundationUIControllerWithListLoader() error = %v", err)
+	}
+
+	message := ui.teaCommand(context.Background(), foundationtui.AppCommand{
+		Kind:       foundationtui.CommandLoadCached,
+		ProviderID: "work",
+		ListID:     "new-list",
+	})()
+	snapshot, ok := message.(foundationtui.SnapshotMsg)
+	if !ok || len(snapshot.Data.Tasks) != 1 || snapshot.Data.Tasks[0].ID != "new-task" {
+		t.Fatalf("loaded message = %#v, want new-list task", message)
+	}
+	if loaderCalls != 0 || listLoaderCalls != 1 {
+		t.Fatalf("loader calls = generic %d, scoped %d", loaderCalls, listLoaderCalls)
+	}
+}
+
 func TestFoundationHandlerPersistsLocalTaskThroughComposedGraph(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Database.Path = filepath.Join(t.TempDir(), "tasktui.db")

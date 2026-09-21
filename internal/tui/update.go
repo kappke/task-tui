@@ -447,6 +447,7 @@ func (m Model) updateBrowse(key KeyMsg, action Action) (Model, Cmd) {
 	if action == ActionNone && key.name() == "" {
 		return m, nil
 	}
+	previousNode := m.UI.SelectedNode
 	switch action {
 	case ActionMoveUp:
 		m.moveCursor(-1)
@@ -459,7 +460,7 @@ func (m Model) updateBrowse(key KeyMsg, action Action) (Model, Cmd) {
 	case ActionPreviousPanel:
 		m.previousPanel()
 	case ActionNextPanel:
-		m.nextPanel()
+		return m, m.nextPanel()
 	case ActionScrollLeft:
 		m.scrollHorizontal(-horizontalScrollStep)
 	case ActionScrollRight:
@@ -521,6 +522,14 @@ func (m Model) updateBrowse(key KeyMsg, action Action) (Model, Cmd) {
 		m.cancelBrowseView()
 	}
 	m.keepVisible()
+	if m.UI.Focus == PanelHierarchy && previousNode != m.UI.SelectedNode {
+		switch action {
+		case ActionMoveUp, ActionMoveDown, ActionFirst, ActionLast:
+			if command := m.loadSelectedList(); command != nil {
+				return m, command
+			}
+		}
+	}
 	return m, nil
 }
 
@@ -731,14 +740,28 @@ func (m *Model) previousPanel() {
 	m.Status = Status{Level: StatusInfo, Text: "Focus: tasks"}
 }
 
-func (m *Model) nextPanel() {
+func (m *Model) nextPanel() Cmd {
 	if m.UI.Focus == PanelHierarchy {
 		m.UI.Focus = PanelTasks
 		m.Status = Status{Level: StatusInfo, Text: "Focus: tasks"}
-		return
+		return m.loadSelectedList()
 	}
 	m.UI.Focus = PanelHierarchy
 	m.Status = Status{Level: StatusInfo, Text: "Focus: hierarchy"}
+	return nil
+}
+
+func (m *Model) loadSelectedList() Cmd {
+	list, ok := m.selectedList()
+	if !ok {
+		return nil
+	}
+	return m.emit(AppCommand{
+		Kind:       CommandLoadCached,
+		ProviderID: list.ProviderID,
+		SpaceID:    list.SpaceID,
+		ListID:     list.ID,
+	})
 }
 
 func (m *Model) selectCurrent() Cmd {
@@ -1272,10 +1295,14 @@ func creationPrompt(kind CommandKind) string {
 }
 
 func modeForCreation(kind CommandKind) Mode {
-	if kind == CommandCreateSpace {
+	switch kind {
+	case CommandCreateSpace:
 		return ModeCreateSpace
+	case CommandCreateTask:
+		return ModeCreateTask
+	default:
+		return ModeCreateList
 	}
-	return ModeCreateList
 }
 
 func (m Model) submitHierarchyCreate(kind CommandKind, title string) (Model, Cmd) {

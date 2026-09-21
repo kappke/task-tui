@@ -35,6 +35,12 @@ type foundationDataStore struct {
 	store *sqlite.Store
 }
 
+type foundationTaskScope struct {
+	providerID ProviderID
+	spaceID    SpaceID
+	listID     ListID
+}
+
 var _ DataStore = (*foundationDataStore)(nil)
 
 func newFoundationDataStore(store *sqlite.Store) *foundationDataStore {
@@ -61,13 +67,17 @@ func (s *foundationDataStore) Snapshot(ctx context.Context) (View, error) {
 		providers[index].SyncError = errorText(state.Error)
 		providers[index].LastSyncAt = state.LastSyncAt
 	}
-	spaces := make([]domain.Space, 0)
-	lists := make([]domain.List, 0)
-	tasks := make([]domain.Task, 0)
 	uiState, err := s.LoadUIState(ctx)
 	if err != nil {
 		return View{}, err
 	}
+	return s.snapshotWithTaskScope(ctx, providers, uiState.ProviderID, uiState.ListID)
+}
+
+func (s *foundationDataStore) snapshotWithTaskScope(ctx context.Context, providers []domain.Provider, providerID, listID string) (View, error) {
+	spaces := make([]domain.Space, 0)
+	lists := make([]domain.List, 0)
+	tasks := make([]domain.Task, 0)
 	for _, provider := range providers {
 		providerSpaces, err := s.store.ListSpaces(ctx, provider.ID)
 		if err != nil {
@@ -80,9 +90,9 @@ func (s *foundationDataStore) Snapshot(ctx context.Context) (View, error) {
 		}
 		lists = append(lists, providerLists...)
 		var providerTasks []domain.Task
-		if uiState.ListID != "" && uiState.ProviderID == provider.ID.String() {
-			providerTasks, err = s.store.ListTasksByListPage(ctx, provider.ID, domain.ListID(uiState.ListID), foundationTaskPageSize, 0)
-		} else if uiState.ListID == "" {
+		if listID != "" && providerID == provider.ID.String() {
+			providerTasks, err = s.store.ListTasksByListPage(ctx, provider.ID, domain.ListID(listID), foundationTaskPageSize, 0)
+		} else if listID == "" {
 			providerTasks, err = s.store.ListTasksByProviderPage(ctx, provider.ID, foundationTaskPageSize, 0)
 		}
 		if err != nil {
@@ -91,6 +101,29 @@ func (s *foundationDataStore) Snapshot(ctx context.Context) (View, error) {
 		tasks = append(tasks, providerTasks...)
 	}
 	return viewFromDomain(providers, spaces, lists, tasks), nil
+}
+
+func (s *foundationDataStore) SnapshotForList(ctx context.Context, providerID ProviderID, listID ListID) (View, error) {
+	if s == nil || s.store == nil {
+		return View{}, errors.New("snapshot list data: store unavailable")
+	}
+	if ctx == nil {
+		return View{}, errors.New("snapshot list data: nil context")
+	}
+	providers, err := s.store.ListProviders(ctx)
+	if err != nil {
+		return View{}, fmt.Errorf("list providers: %w", err)
+	}
+	for index := range providers {
+		state, err := s.store.GetProviderSyncState(ctx, providers[index].ID.String())
+		if err != nil {
+			return View{}, fmt.Errorf("load sync state for provider %s: %w", providers[index].ID, err)
+		}
+		providers[index].SyncState = domain.SyncState(state.State)
+		providers[index].SyncError = errorText(state.Error)
+		providers[index].LastSyncAt = state.LastSyncAt
+	}
+	return s.snapshotWithTaskScope(ctx, providers, string(providerID), string(listID))
 }
 
 func errorText(value *string) string {
@@ -1152,6 +1185,7 @@ type foundationUIController struct {
 	terminal Terminal
 	handler  command.Handler
 	load     ViewLoader
+	loadList func(context.Context, ProviderID, ListID) (View, error)
 	events   <-chan foundationsync.Event
 
 	mu          sync.RWMutex
@@ -1161,9 +1195,10 @@ type foundationUIController struct {
 	eventCancel context.CancelFunc
 	eventDone   chan struct{}
 
-	program *tea.Program
-	charm   *foundationtui.CharmModel
-	running bool
+	program    *tea.Program
+	charm      *foundationtui.CharmModel
+	running    bool
+	activeList *foundationTaskScope
 
 	headlessRendered bool
 }
@@ -1185,6 +1220,15 @@ func newFoundationUIController(terminal Terminal, handler command.Handler, load 
 		model:     foundationtui.New(foundationtui.Snapshot{}),
 		accepting: true,
 	}, nil
+}
+
+func newFoundationUIControllerWithListLoader(terminal Terminal, handler command.Handler, load ViewLoader, loadList func(context.Context, ProviderID, ListID) (View, error), events <-chan foundationsync.Event) (*foundationUIController, error) {
+	u, err := newFoundationUIController(terminal, handler, load, events)
+	if err != nil {
+		return nil, err
+	}
+	u.loadList = loadList
+	return u, nil
 }
 
 func (u *foundationUIController) Initialize(ctx context.Context) error {
@@ -1436,7 +1480,16 @@ func (u *foundationUIController) reload(ctx context.Context) error {
 	if u.load == nil {
 		return nil
 	}
-	view, err := u.load(ctx)
+	u.mu.RLock()
+	activeList := u.activeList
+	u.mu.RUnlock()
+	var view View
+	var err error
+	if activeList != nil && u.loadList != nil {
+		view, err = u.loadList(ctx, activeList.providerID, activeList.listID)
+	} else {
+		view, err = u.load(ctx)
+	}
 	if err != nil {
 		return err
 	}
@@ -1535,7 +1588,16 @@ func (u *foundationUIController) teaCommand(ctx context.Context, input foundatio
 			if u.load == nil {
 				return nil
 			}
-			view, err := u.load(ctx)
+			var view View
+			var err error
+			if input.ListID != "" && u.loadList != nil {
+				u.mu.Lock()
+				u.activeList = &foundationTaskScope{providerID: ProviderID(input.ProviderID), spaceID: SpaceID(input.SpaceID), listID: ListID(input.ListID)}
+				u.mu.Unlock()
+				view, err = u.loadList(ctx, ProviderID(input.ProviderID), ListID(input.ListID))
+			} else {
+				view, err = u.load(ctx)
+			}
 			if err != nil {
 				return foundationtui.ErrorMsg{Err: err, Text: SafeErrorText(err)}
 			}
@@ -1999,8 +2061,10 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal, lo
 	}
 	syncController := newFoundationSyncController(engine, cfg.Sync.Enabled)
 	handler := newFoundationHandler(service, syncController)
-	ui, err := newFoundationUIController(terminal, handler, func(ctx context.Context) (View, error) {
+	ui, err := newFoundationUIControllerWithListLoader(terminal, handler, func(ctx context.Context) (View, error) {
 		return newFoundationDataStore(store).Snapshot(ctx)
+	}, func(ctx context.Context, providerID ProviderID, listID ListID) (View, error) {
+		return newFoundationDataStore(store).SnapshotForList(ctx, providerID, listID)
 	}, syncController.Events())
 	if err != nil {
 		closeStore()

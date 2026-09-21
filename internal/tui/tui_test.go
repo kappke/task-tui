@@ -89,6 +89,29 @@ func TestNavigationAndProviderScopedTaskSelection(t *testing.T) {
 	}
 }
 
+func TestSwitchingToTasksLoadsTheHighlightedList(t *testing.T) {
+	model := New(testSnapshot())
+	model, _ = model.Update(KeyMsg{Key: "tab"})
+	model, _ = model.Update(KeyMsg{Key: "shift+tab"})
+	model, command := model.Update(KeyMsg{Key: "G"})
+	if command == nil {
+		t.Fatal("moving to the second list did not request its tasks")
+	}
+	message := commandMessage(t, command)
+	if message.Kind != CommandLoadCached || message.ProviderID != "personal" || message.ListID != "today" {
+		t.Fatalf("navigation load command = %#v, want personal/today", message)
+	}
+
+	model, command = model.Update(KeyMsg{Key: "tab"})
+	if model.UI.Focus != PanelTasks || command == nil {
+		t.Fatalf("switch to tasks: focus=%q command=%v", model.UI.Focus, command)
+	}
+	message = commandMessage(t, command)
+	if message.Kind != CommandLoadCached || message.ProviderID != "personal" || message.ListID != "today" {
+		t.Fatalf("list load command = %#v, want personal/today", message)
+	}
+}
+
 func TestTaskDetailViewOpensScrollsAndCloses(t *testing.T) {
 	snapshot := testSnapshot()
 	snapshot.Tasks[0].Description = strings.Repeat("This description explains the authentication regression and the required fix. ", 4)
@@ -310,6 +333,19 @@ func TestEmptyHierarchyPaletteUsesTheRequestedCreationMode(t *testing.T) {
 	model, command = model.Update(KeyMsg{Key: "enter"})
 	if command != nil || model.UI.Mode != ModeCreateList {
 		t.Fatalf("list input mode = %q, command=%v", model.UI.Mode, command)
+	}
+}
+
+func TestTaskCreatePaletteUsesTaskCreationMode(t *testing.T) {
+	model := New(testSnapshot())
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "task create")
+	model, command := model.Update(KeyMsg{Key: "enter"})
+	if command != nil || model.UI.Mode != ModeCreateTask {
+		t.Fatalf("task input mode = %q, command=%v, want %q", model.UI.Mode, command, ModeCreateTask)
+	}
+	if !strings.Contains(model.View(), "NEW TASK") {
+		t.Fatalf("task creation prompt does not identify a new task:\n%s", model.View())
 	}
 }
 
@@ -847,7 +883,7 @@ func TestCharmModelUsesBubbleTeaMessagesAndRendersPanels(t *testing.T) {
 	}
 
 	view := model.View()
-	for _, value := range []string{"TASK MANAGER", "SPACES / LISTS", "TASKS", "Work", "Personal"} {
+	for _, value := range []string{"TASK MANAGER", "SPACES / LISTS", "TASKS", "LIST Backend", "Work", "Personal"} {
 		if !strings.Contains(view, value) {
 			t.Fatalf("Charm view does not contain %q:\n%s", value, view)
 		}

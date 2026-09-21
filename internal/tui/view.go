@@ -214,6 +214,9 @@ func (m Model) taskLines(width int) []string {
 
 func (m Model) taskHeading() string {
 	heading := "TASKS"
+	if list, ok := m.selectedList(); ok {
+		heading += " | LIST " + safeText(list.Name)
+	}
 	if m.UI.SearchActive {
 		heading += " | SEARCH " + quoteOrEmpty(m.UI.SearchQuery)
 	}
