@@ -563,11 +563,7 @@ func taskTableHeaderLine(width int) string {
 }
 
 func taskTableLine(row TaskRow, marker string, columns taskTableLayout) string {
-	completion := "  "
-	if isTaskComplete(row.Task) {
-		completion = "x "
-	}
-	name := completion + strings.Repeat("  ", maxInt(row.HierarchyDepth, 0)) + taskTitle(row)
+	name := "  " + strings.Repeat("  ", maxInt(row.HierarchyDepth, 0)) + taskTitle(row)
 	return marker + taskTableCell(name, columns.Name) + taskTableGap +
 		taskTableCell(displayTaskStatus(row.Task.Status), columns.Status) + taskTableGap +
 		taskTableCell(taskAssigneeLabel(row), columns.Assignees) + taskTableGap +
