@@ -88,10 +88,9 @@ func (m Model) Nodes() []TreeNode {
 }
 
 // VisibleTasks returns the task rows for the active hierarchy/search/filter
-// view, arranged according to the active grouping mode. Search rows are
-// aggregated across providers.
+// view, arranged according to the active grouping mode.
 func (m Model) VisibleTasks() []TaskRow {
-	aggregate := m.UI.SearchActive
+	aggregate := false
 	if m.UI.FilterActive && (m.UI.Filter.ProviderID != "" || m.UI.Filter.SpaceID != "" || m.UI.Filter.ListID != "") {
 		aggregate = true
 	}
@@ -103,15 +102,16 @@ func (m Model) CurrentTasks() []TaskRow {
 	return m.VisibleTasks()
 }
 
-// SearchResults returns the locally computed aggregate search projection.
+// SearchResults returns the locally computed search projection for the
+// currently selected hierarchy scope.
 func (m Model) SearchResults() []TaskRow {
-	return flattenTaskGroups(m.visibleTaskGroups(true))
+	return flattenTaskGroups(m.visibleTaskGroups(false))
 }
 
 // VisibleTaskGroups returns the filtered task rows arranged according to the
 // active grouping mode. An empty grouping mode returns one unlabelled group.
 func (m Model) VisibleTaskGroups() []TaskGroup {
-	aggregate := m.UI.SearchActive
+	aggregate := false
 	if m.UI.FilterActive && (m.UI.Filter.ProviderID != "" || m.UI.Filter.SpaceID != "" || m.UI.Filter.ListID != "") {
 		aggregate = true
 	}
@@ -158,7 +158,7 @@ func (m Model) taskRows(aggregate bool) []TaskRow {
 			Assignee:     task.Assignee,
 			SpaceID:      list.SpaceID,
 			ListID:       task.ListID,
-			SearchResult: aggregate,
+			SearchResult: m.UI.SearchActive,
 		}
 		if listOK {
 			row.ListName = list.Name

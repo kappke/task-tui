@@ -160,6 +160,20 @@ func TestSearchModeEmitsLocalSearchCommand(t *testing.T) {
 	}
 }
 
+func TestSearchStaysWithinSelectedList(t *testing.T) {
+	model := New(testSnapshot())
+	model.UI.SearchActive = true
+	model.UI.SearchQuery = "shared"
+
+	rows := model.SearchResults()
+	if len(rows) != 1 {
+		t.Fatalf("search rows = %#v, want one result from the selected list", rows)
+	}
+	if rows[0].ProviderID != "work" || rows[0].ListID != "backend" {
+		t.Fatalf("search row = %#v, want work/backend result", rows[0])
+	}
+}
+
 func TestFilterAndCommandPalette(t *testing.T) {
 	model := New(testSnapshot())
 	model, _ = model.Update(KeyMsg{Key: "f"})
@@ -543,10 +557,11 @@ func TestRenderIsPureAndSearchRowsOmitProviderAndSyncStatus(t *testing.T) {
 	if !reflect.DeepEqual(model, before) {
 		t.Fatal("View mutated model state")
 	}
-	for _, value := range []string{"Shared work task", "Shared personal task"} {
-		if !strings.Contains(view, value) {
-			t.Fatalf("view does not contain %q:\n%s", value, view)
-		}
+	if !strings.Contains(view, "Fix auth") {
+		t.Fatalf("view does not contain the matching task from the selected list:\n%s", view)
+	}
+	if strings.Contains(view, "Shared work task") || strings.Contains(view, "Shared personal task") {
+		t.Fatalf("view contains a task from another list:\n%s", view)
 	}
 	for _, value := range []string{"Work|work", "Personal|personal", "<work>", "<personal>", "pending", "failed"} {
 		if strings.Contains(view, value) {
