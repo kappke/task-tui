@@ -10,6 +10,8 @@ type scopedID struct {
 	id       string
 }
 
+const SearchResultLimit = 100
+
 // TreeNodes returns the visible hierarchy in stable snapshot order.
 func (m Model) TreeNodes() []TreeNode {
 	providers := m.viewProviders()
@@ -181,6 +183,9 @@ func (m Model) taskRows(aggregate bool) []TaskRow {
 			continue
 		}
 		rows = append(rows, row)
+		if m.UI.SearchActive && len(rows) >= SearchResultLimit {
+			break
+		}
 	}
 	return rows
 }

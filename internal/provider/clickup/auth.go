@@ -2,7 +2,7 @@ package clickup
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"os"
 )
 
@@ -24,7 +24,7 @@ func (f TokenSourceFunc) Token(ctx context.Context) (string, error) {
 func TokenFromEnv() (string, error) {
 	token := os.Getenv(TokenEnvVar)
 	if token == "" {
-		return "", errors.New("CLICKUP_API_TOKEN is not set")
+		return "", fmt.Errorf("%w: %s is not set", ErrMissingTokenSource, TokenEnvVar)
 	}
 	return token, nil
 }

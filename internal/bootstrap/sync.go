@@ -216,6 +216,8 @@ func (e *SyncEngine) Running() bool {
 func (e *SyncEngine) runWorker(ctx context.Context, worker *syncWorker) {
 	ticker := time.NewTicker(e.interval)
 	defer ticker.Stop()
+	logContext(ctx, e.logger, slog.LevelDebug, "sync worker started", "provider_id", worker.provider.ID(), "interval", e.interval)
+	defer logContext(context.Background(), e.logger, slog.LevelDebug, "sync worker stopped", "provider_id", worker.provider.ID())
 	for {
 		err := e.runCycle(ctx, worker.provider)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
@@ -231,6 +233,8 @@ func (e *SyncEngine) runWorker(ctx context.Context, worker *syncWorker) {
 }
 
 func (e *SyncEngine) runCycle(ctx context.Context, provider Provider) error {
+	started := e.now()
+	logContext(ctx, e.logger, slog.LevelDebug, "sync cycle started", "provider_id", provider.ID())
 	if err := e.push(ctx, provider); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
@@ -240,6 +244,7 @@ func (e *SyncEngine) runCycle(ctx context.Context, provider Provider) error {
 		cancel()
 		return err
 	}
+	logContext(ctx, e.logger, slog.LevelDebug, "sync push completed", "provider_id", provider.ID())
 	if err := e.pull(ctx, provider); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
@@ -249,10 +254,12 @@ func (e *SyncEngine) runCycle(ctx context.Context, provider Provider) error {
 		cancel()
 		return err
 	}
+	logContext(ctx, e.logger, slog.LevelDebug, "sync pull completed", "provider_id", provider.ID())
 	now := e.now().UTC()
 	if err := e.repo.SetProviderSyncState(ctx, provider.ID(), &now, nil); err != nil {
 		return fmt.Errorf("record provider %s sync: %w", provider.ID(), err)
 	}
+	logContext(ctx, e.logger, slog.LevelInfo, "sync cycle completed", "provider_id", provider.ID(), "duration", time.Since(started))
 	return nil
 }
 
@@ -291,6 +298,7 @@ func (e *SyncEngine) push(ctx context.Context, provider Provider) error {
 		if err := e.repo.Complete(ctx, operation.ID, operation.ProviderID); err != nil {
 			return fmt.Errorf("complete operation %s: %w", operation.ID, err)
 		}
+		logContext(ctx, e.logger, slog.LevelDebug, "sync operation completed", "provider_id", provider.ID(), "operation_id", operation.ID, "operation", operation.Operation)
 	}
 }
 

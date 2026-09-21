@@ -30,6 +30,8 @@ type TaskQueryRepository interface {
 	FilterTasks(ctx context.Context, filter TaskFilter) ([]TaskSearchResult, error)
 }
 
+const DefaultSearchLimit = 100
+
 // FoundationReaderAdapter adapts the foundation repository read contracts to
 // the app's distinct entity-reader names. It only delegates to local stores.
 type FoundationReaderAdapter struct {
@@ -71,7 +73,7 @@ func (a FoundationReaderAdapter) SearchTasks(ctx context.Context, query string) 
 	if a.Queries == nil {
 		return nil, ErrQueryUnavailable
 	}
-	return a.Queries.Search(ctx, repositorypkg.TaskFilter{Query: query})
+	return a.Queries.Search(ctx, repositorypkg.TaskFilter{Query: query, Limit: DefaultSearchLimit})
 }
 
 func (a FoundationReaderAdapter) FilterTasks(ctx context.Context, filter TaskFilter) ([]TaskSearchResult, error) {

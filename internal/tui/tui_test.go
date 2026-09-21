@@ -264,6 +264,67 @@ func TestCommandCompletionScrollsThroughOverflowingOptions(t *testing.T) {
 	}
 }
 
+func TestEmptyHierarchyCommandFlowEmitsProviderScopedCreationCommands(t *testing.T) {
+	model := New(Snapshot{Providers: []Provider{{ID: "local", Name: "Local", Type: ProviderTypeLocal}}})
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "space create Personal")
+	model, command := model.Update(KeyMsg{Key: "enter"})
+	space := commandMessage(t, command)
+	if space.Kind != CommandCreateSpace || space.ProviderID != "local" || space.Title != "Personal" {
+		t.Fatalf("space command = %#v", space)
+	}
+
+	model.Data.Spaces = []Space{{ID: "personal", ProviderID: "local", Name: "Personal"}}
+	model.UI.SelectedNode = TreeNodeRef{Kind: TreeNodeSpace, ProviderID: "local", SpaceID: "personal"}
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "list create Today")
+	model, command = model.Update(KeyMsg{Key: "enter"})
+	list := commandMessage(t, command)
+	if list.Kind != CommandCreateList || list.ProviderID != "local" || list.SpaceID != "personal" || list.Title != "Today" {
+		t.Fatalf("list command = %#v", list)
+	}
+
+	model = New(Snapshot{Providers: []Provider{{ID: "local", Name: "Local", Type: ProviderTypeLocal}}, Spaces: []Space{{ID: "personal", ProviderID: "local", Name: "Personal"}}})
+	model, _ = model.Update(NewSnapshotMsg(Snapshot{
+		Providers: model.Data.Providers,
+		Spaces:    model.Data.Spaces,
+		Lists:     []List{{ID: "today", ProviderID: "local", SpaceID: "personal", Name: "Today"}},
+	}))
+	if model.UI.SelectedNode.Kind != TreeNodeList || model.UI.SelectedNode.ListID != "today" {
+		t.Fatalf("selection after first list reload = %#v, want today list", model.UI.SelectedNode)
+	}
+}
+
+func TestEmptyHierarchyPaletteUsesTheRequestedCreationMode(t *testing.T) {
+	model := New(Snapshot{Providers: []Provider{{ID: "local", Name: "Local", Type: ProviderTypeLocal}}})
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "space create")
+	model, command := model.Update(KeyMsg{Key: "enter"})
+	if command != nil || model.UI.Mode != ModeCreateSpace {
+		t.Fatalf("space input mode = %q, command=%v", model.UI.Mode, command)
+	}
+
+	model, _ = model.Update(KeyMsg{Key: "esc"})
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "list create")
+	model, command = model.Update(KeyMsg{Key: "enter"})
+	if command != nil || model.UI.Mode != ModeCreateList {
+		t.Fatalf("list input mode = %q, command=%v", model.UI.Mode, command)
+	}
+}
+
+func TestOpeningListEmitsScopedLocalLoad(t *testing.T) {
+	model := New(testSnapshot())
+	model, command := model.Update(KeyMsg{Key: "enter"})
+	if command == nil {
+		t.Fatal("opening list did not request local page")
+	}
+	message := commandMessage(t, command)
+	if message.Kind != CommandLoadCached || message.ProviderID != "work" || message.SpaceID != "engineering" || message.ListID != "backend" {
+		t.Fatalf("load command = %#v", message)
+	}
+}
+
 func TestTaskGroupingByStatusAssigneeAndHierarchy(t *testing.T) {
 	parentID := TaskID("parent")
 	snapshot := testSnapshot()

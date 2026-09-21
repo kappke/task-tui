@@ -40,8 +40,8 @@ func TestMapperInjectsProviderAndLocalParentIdentity(t *testing.T) {
 	if task.ListID != "local-list" {
 		t.Fatalf("ListID = %q", task.ListID)
 	}
-	if task.ID != "remote-task" {
-		t.Fatalf("ID = %q", task.ID)
+	if task.ID == "" || task.ID == "remote-task" {
+		t.Fatalf("ID = %q, want independent local identity", task.ID)
 	}
 	if task.RemoteID == nil || *task.RemoteID != "remote-task" {
 		t.Fatalf("RemoteID = %v", task.RemoteID)
@@ -70,6 +70,41 @@ func TestMapperInjectsProviderAndLocalParentIdentity(t *testing.T) {
 	}
 	if task.TimeTracked == nil || *task.TimeTracked != 45*time.Minute {
 		t.Fatalf("TimeTracked = %v, want 45m", task.TimeTracked)
+	}
+}
+
+func TestMapperResolvesOutOfOrderParentsWithLocalIdentities(t *testing.T) {
+	mapper := NewMapper(MapperConfig{ProviderID: "clickup-work"})
+	tasks := mapper.MapTasks([]wireTask{
+		{ID: "child", Parent: wireStringPointer("parent")},
+		{ID: "parent"},
+	}, domain.ListID("local-list"))
+	if len(tasks) != 2 {
+		t.Fatalf("mapped tasks = %d, want 2", len(tasks))
+	}
+	if tasks[0].ID == "child" || tasks[1].ID == "parent" || tasks[0].ID == tasks[1].ID {
+		t.Fatalf("task identities = %q, %q", tasks[0].ID, tasks[1].ID)
+	}
+	if tasks[0].ParentTaskID == nil || *tasks[0].ParentTaskID != tasks[1].ID {
+		t.Fatalf("parent = %v, want %q", tasks[0].ParentTaskID, tasks[1].ID)
+	}
+}
+
+func TestMapperUsesIndependentHierarchyIdentitiesPerProvider(t *testing.T) {
+	inputSpace := wireSpace{ID: "same", Name: "Engineering"}
+	inputList := wireList{ID: "same", Name: "Backend"}
+	inputTask := wireTask{ID: "same", Name: "Task"}
+	first := NewMapper(MapperConfig{ProviderID: "clickup-work"})
+	second := NewMapper(MapperConfig{ProviderID: "clickup-personal"})
+	spaceA, spaceB := first.MapSpace(inputSpace), second.MapSpace(inputSpace)
+	listA, listB := first.MapList(inputList, spaceA.ID), second.MapList(inputList, spaceB.ID)
+	taskA := first.MapTask(inputTask, listA.ID)
+	taskB := second.MapTask(inputTask, listB.ID)
+	if spaceA.ID == spaceB.ID || listA.ID == listB.ID || taskA.ID == taskB.ID {
+		t.Fatal("identities must not be derived from shared remote IDs")
+	}
+	if *spaceA.RemoteID != *spaceB.RemoteID || *listA.RemoteID != *listB.RemoteID || *taskA.RemoteID != *taskB.RemoteID {
+		t.Fatal("remote identities were not retained")
 	}
 }
 

@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"sync"
@@ -79,12 +80,15 @@ func (q *testQueue) MarkAttempt(_ context.Context, operationID OperationID, at t
 	return errors.New("operation not found")
 }
 
-func (q *testQueue) Complete(_ context.Context, operationID OperationID, at time.Time) error {
+func (q *testQueue) Complete(_ context.Context, providerID ProviderID, operationID OperationID, leaseOwner string, at time.Time) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for _, item := range q.ops {
 		if item.operation.ID != operationID {
 			continue
+		}
+		if item.operation.ProviderID != providerID || item.operation.LeaseOwner != leaseOwner {
+			return errors.New("invalid lease")
 		}
 		item.operation.Status = OperationCompleted
 		item.operation.CompletedAt = &at
@@ -94,12 +98,15 @@ func (q *testQueue) Complete(_ context.Context, operationID OperationID, at time
 	return errors.New("operation not found")
 }
 
-func (q *testQueue) Fail(_ context.Context, operationID OperationID, failure Failure) error {
+func (q *testQueue) Fail(_ context.Context, providerID ProviderID, operationID OperationID, leaseOwner string, failure Failure) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for _, item := range q.ops {
 		if item.operation.ID != operationID {
 			continue
+		}
+		if item.operation.ProviderID != providerID || item.operation.LeaseOwner != leaseOwner {
+			return errors.New("invalid lease")
 		}
 		item.operation.Status = OperationFailed
 		item.operation.Error = failure.Error()
@@ -113,12 +120,15 @@ func (q *testQueue) Fail(_ context.Context, operationID OperationID, failure Fai
 	return errors.New("operation not found")
 }
 
-func (q *testQueue) Release(_ context.Context, operationID OperationID) error {
+func (q *testQueue) Release(_ context.Context, providerID ProviderID, operationID OperationID, leaseOwner string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for _, item := range q.ops {
 		if item.operation.ID != operationID {
 			continue
+		}
+		if item.operation.ProviderID != providerID || item.operation.LeaseOwner != leaseOwner {
+			return errors.New("invalid lease")
 		}
 		item.operation.Status = OperationPending
 		q.released = append(q.released, operationID)
@@ -634,6 +644,23 @@ func TestThreeWayMergeRetainsLocalAndPersistsProviderScopedConflict(t *testing.T
 	}
 }
 
+func TestThreeWayMergeWithMissingBaseDoesNotAssumeLocalBase(t *testing.T) {
+	result, err := MergeFields(MergeInput{
+		ProviderID: "work",
+		EntityType: EntityTask,
+		EntityID:   "task-1",
+		Base:       nil,
+		Local:      map[string]any{"title": "local"},
+		Remote:     map[string]any{"title": "remote"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State != SyncStateConflict || len(result.Conflicts) != 1 {
+		t.Fatalf("missing-base merge = %+v, want one conflict", result)
+	}
+}
+
 type foundationTestQueue struct {
 	operation domain.SyncOperation
 	claimed   bool
@@ -649,6 +676,7 @@ func (q *foundationTestQueue) Claim(_ context.Context, providerID domain.Provide
 	q.claimed = true
 	q.operation.Status = domain.SyncStatusSyncing
 	q.operation.Attempts++
+	q.operation.LeaseOwner = "foundation-worker"
 	return q.operation, nil
 }
 
@@ -661,9 +689,32 @@ func (q *foundationTestQueue) Complete(_ context.Context, operationID domain.Ope
 	return nil
 }
 
+func (q *foundationTestQueue) CompleteForProviderWithLease(_ context.Context, providerID domain.ProviderID, operationID domain.OperationID, leaseOwner string) error {
+	if providerID != q.operation.ProviderID || leaseOwner != q.operation.LeaseOwner {
+		return errors.New("unexpected lease")
+	}
+	return q.Complete(context.Background(), operationID)
+}
+
 func (q *foundationTestQueue) Retry(context.Context, domain.OperationID, error) error { return nil }
 
 func (q *foundationTestQueue) Fail(context.Context, domain.OperationID, error) error { return nil }
+
+func (q *foundationTestQueue) FailForProviderWithLease(context.Context, domain.ProviderID, domain.OperationID, string, error) error {
+	return nil
+}
+
+func (q *foundationTestQueue) RetryForProviderWithLease(context.Context, domain.ProviderID, domain.OperationID, string, error) error {
+	return nil
+}
+
+func (q *foundationTestQueue) RetryAtForProviderWithLease(context.Context, domain.ProviderID, domain.OperationID, string, time.Time, error) error {
+	return nil
+}
+
+func (q *foundationTestQueue) ReleaseForProviderWithLease(context.Context, domain.ProviderID, domain.OperationID, string) error {
+	return nil
+}
 
 func (q *foundationTestQueue) RequeueStale(context.Context, domain.ProviderID, time.Time) (int, error) {
 	return 0, nil
@@ -679,6 +730,8 @@ func (q *foundationTestQueue) PendingCount(context.Context, domain.ProviderID) (
 type foundationTestProvider struct {
 	id      domain.ProviderID
 	created int
+	remote  string
+	updated []domain.Task
 }
 
 func (p *foundationTestProvider) ID() domain.ProviderID { return p.id }
@@ -707,10 +760,14 @@ func (p *foundationTestProvider) FetchTask(context.Context, domain.TaskID) (doma
 
 func (p *foundationTestProvider) CreateTask(_ context.Context, task domain.Task) (domain.Task, error) {
 	p.created++
+	if p.remote != "" {
+		task.RemoteID = &p.remote
+	}
 	return task, nil
 }
 
 func (p *foundationTestProvider) UpdateTask(_ context.Context, task domain.Task) (domain.Task, error) {
+	p.updated = append(p.updated, task)
 	return task, nil
 }
 
@@ -739,5 +796,23 @@ func TestNewWorkerAcceptsFoundationQueueAndProviderContracts(t *testing.T) {
 	}
 	if provider.created != 1 || !queue.complete || queue.operation.Attempts != 1 {
 		t.Fatalf("foundation adapter state: created=%d complete=%v operation=%+v", provider.created, queue.complete, queue.operation)
+	}
+}
+
+func TestFoundationProviderPropagatesCreatedRemoteIdentity(t *testing.T) {
+	provider := &foundationTestProvider{id: "work", remote: "remote-task-1"}
+	adapted := AdaptProvider(provider).(*FoundationProvider)
+	payload, err := json.Marshal(domain.Task{ID: "task-1", ProviderID: "work", ListID: "list-1", Title: "task", Status: "open", Priority: domain.PriorityNormal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adapted.Push(context.Background(), Operation{ID: "create", ProviderID: "work", EntityType: EntityTask, EntityID: "task-1", Operation: OperationCreate, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapted.Push(context.Background(), Operation{ID: "update", ProviderID: "work", EntityType: EntityTask, EntityID: "task-1", Operation: OperationUpdate, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.updated) != 1 || provider.updated[0].RemoteID == nil || *provider.updated[0].RemoteID != "remote-task-1" {
+		t.Fatalf("updated task remote identity = %+v, want remote-task-1", provider.updated)
 	}
 }

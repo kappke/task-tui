@@ -416,6 +416,12 @@ func (m Model) modeLine(width int) string {
 	case ModeCreateTask:
 		prefix = "NEW TASK"
 		suffix = " enter submit | esc cancel"
+	case ModeCreateSpace:
+		prefix = "NEW SPACE"
+		suffix = " enter submit | esc cancel"
+	case ModeCreateList:
+		prefix = "NEW LIST"
+		suffix = " enter submit | esc cancel"
 	case ModeEditTask:
 		prefix = "EDIT TASK"
 		suffix = " enter submit | esc cancel"

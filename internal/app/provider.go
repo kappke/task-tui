@@ -57,7 +57,11 @@ func NewRegistry(providers ...Provider) *Registry {
 	r := &Registry{providers: make(map[ProviderID]Provider, len(providers))}
 	for _, provider := range providers {
 		if provider != nil && provider.ID() != "" {
-			r.providers[provider.ID()] = provider
+			id := provider.ID()
+			if _, exists := r.providers[id]; exists {
+				panic(fmt.Sprintf("new provider registry: duplicate provider ID %s", id))
+			}
+			r.providers[id] = provider
 		}
 	}
 	return r

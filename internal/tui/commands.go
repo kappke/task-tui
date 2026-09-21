@@ -21,6 +21,8 @@ type CommandKind string
 
 const (
 	CommandLoadCached   CommandKind = "load_cached"
+	CommandCreateSpace  CommandKind = "create_space"
+	CommandCreateList   CommandKind = "create_list"
 	CommandCreateTask   CommandKind = "create_task"
 	CommandUpdateTask   CommandKind = "update_task"
 	CommandCompleteTask CommandKind = "complete_task"
@@ -37,6 +39,8 @@ const (
 // retaining the explicit MVP names above.
 const (
 	CommandCreate   = CommandCreateTask
+	CommandSpace    = CommandCreateSpace
+	CommandList     = CommandCreateList
 	CommandEdit     = CommandUpdateTask
 	CommandComplete = CommandCompleteTask
 	CommandDelete   = CommandDeleteTask
@@ -119,6 +123,19 @@ func ParseCommand(input string) (AppCommand, error) {
 		}
 		name = normalize(args[0])
 		args = args[1:]
+	}
+	if name == "space" || name == "list" {
+		if len(args) == 0 || (normalize(args[0]) != "create" && normalize(args[0]) != "new") {
+			return AppCommand{}, fmt.Errorf("%s command requires create", name)
+		}
+		command := AppCommand{Raw: raw}
+		if name == "space" {
+			command.Kind = CommandCreateSpace
+		} else {
+			command.Kind = CommandCreateList
+		}
+		command.Title = strings.TrimSpace(strings.Join(args[1:], " "))
+		return command, nil
 	}
 
 	command := AppCommand{Raw: raw}

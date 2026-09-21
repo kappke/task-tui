@@ -149,17 +149,23 @@ func operationRecord(operation domain.SyncOperation) (SyncOperation, error) {
 }
 
 func domainOperation(operation SyncOperation) domain.SyncOperation {
+	leaseOwner := ""
+	if operation.LeaseOwner != nil {
+		leaseOwner = *operation.LeaseOwner
+	}
 	result := domain.SyncOperation{
-		ID:            domain.OperationID(operation.ID),
-		ProviderID:    domain.ProviderID(operation.ProviderID),
-		EntityType:    domain.EntityType(operation.EntityType),
-		EntityID:      operation.EntityID,
-		Operation:     domain.OperationType(operation.Operation),
-		Payload:       append([]byte(nil), operation.Payload...),
-		Attempts:      operation.Attempts,
-		Status:        domain.SyncStatus(operation.Status),
-		CreatedAt:     operation.CreatedAt,
-		LastAttemptAt: operation.LastAttemptAt,
+		ID:             domain.OperationID(operation.ID),
+		ProviderID:     domain.ProviderID(operation.ProviderID),
+		EntityType:     domain.EntityType(operation.EntityType),
+		EntityID:       operation.EntityID,
+		Operation:      domain.OperationType(operation.Operation),
+		Payload:        append([]byte(nil), operation.Payload...),
+		Attempts:       operation.Attempts,
+		Status:         domain.SyncStatus(operation.Status),
+		CreatedAt:      operation.CreatedAt,
+		LastAttemptAt:  operation.LastAttemptAt,
+		LeaseOwner:     leaseOwner,
+		LeaseExpiresAt: operation.LeaseExpiresAt,
 	}
 	if operation.Error != nil {
 		result.Error = *operation.Error
@@ -236,12 +242,34 @@ func (s *Store) Complete(ctx context.Context, operationID domain.OperationID) er
 	return s.completeOperation(ctx, operation.ProviderID, operation.ID, s.workerID)
 }
 
+func (s *Store) CompleteForProvider(ctx context.Context, providerID domain.ProviderID, operationID domain.OperationID) error {
+	return s.completeOperation(ctx, providerID.String(), operationID.String(), s.workerID)
+}
+
+func (s *Store) CompleteForProviderWithLease(ctx context.Context, providerID domain.ProviderID, operationID domain.OperationID, leaseOwner string) error {
+	if err := validateLeaseOwner(leaseOwner); err != nil {
+		return err
+	}
+	return s.completeOperation(ctx, providerID.String(), operationID.String(), leaseOwner)
+}
+
 func (s *Store) Retry(ctx context.Context, operationID domain.OperationID, cause error) error {
 	operation, err := s.getOperationByID(ctx, operationID.String())
 	if err != nil {
 		return adaptError(err, false)
 	}
 	return s.retryOperation(ctx, operation.ProviderID, operation.ID, s.workerID, time.Now().UTC(), cause)
+}
+
+func (s *Store) RetryForProvider(ctx context.Context, providerID domain.ProviderID, operationID domain.OperationID, cause error) error {
+	return s.retryOperation(ctx, providerID.String(), operationID.String(), s.workerID, time.Now().UTC(), cause)
+}
+
+func (s *Store) RetryForProviderWithLease(ctx context.Context, providerID domain.ProviderID, operationID domain.OperationID, leaseOwner string, cause error) error {
+	if err := validateLeaseOwner(leaseOwner); err != nil {
+		return err
+	}
+	return s.retryOperation(ctx, providerID.String(), operationID.String(), leaseOwner, time.Now().UTC(), cause)
 }
 
 func (s *Store) RetryAt(ctx context.Context, operationID domain.OperationID, nextAttemptAt time.Time, cause error) error {
@@ -252,6 +280,17 @@ func (s *Store) RetryAt(ctx context.Context, operationID domain.OperationID, nex
 	return s.retryOperation(ctx, operation.ProviderID, operation.ID, s.workerID, nextAttemptAt.UTC(), cause)
 }
 
+func (s *Store) RetryAtForProvider(ctx context.Context, providerID domain.ProviderID, operationID domain.OperationID, nextAttemptAt time.Time, cause error) error {
+	return s.retryOperation(ctx, providerID.String(), operationID.String(), s.workerID, nextAttemptAt.UTC(), cause)
+}
+
+func (s *Store) RetryAtForProviderWithLease(ctx context.Context, providerID domain.ProviderID, operationID domain.OperationID, leaseOwner string, nextAttemptAt time.Time, cause error) error {
+	if err := validateLeaseOwner(leaseOwner); err != nil {
+		return err
+	}
+	return s.retryOperation(ctx, providerID.String(), operationID.String(), leaseOwner, nextAttemptAt.UTC(), cause)
+}
+
 func (s *Store) Release(ctx context.Context, operationID domain.OperationID) error {
 	operation, err := s.getOperationByID(ctx, operationID.String())
 	if err != nil {
@@ -260,12 +299,41 @@ func (s *Store) Release(ctx context.Context, operationID domain.OperationID) err
 	return s.releaseOperation(ctx, operation.ProviderID, operation.ID, s.workerID)
 }
 
+func (s *Store) ReleaseForProvider(ctx context.Context, providerID domain.ProviderID, operationID domain.OperationID) error {
+	return s.releaseOperation(ctx, providerID.String(), operationID.String(), s.workerID)
+}
+
+func (s *Store) ReleaseForProviderWithLease(ctx context.Context, providerID domain.ProviderID, operationID domain.OperationID, leaseOwner string) error {
+	if err := validateLeaseOwner(leaseOwner); err != nil {
+		return err
+	}
+	return s.releaseOperation(ctx, providerID.String(), operationID.String(), leaseOwner)
+}
+
 func (s *Store) Fail(ctx context.Context, operationID domain.OperationID, cause error) error {
 	operation, err := s.getOperationByID(ctx, operationID.String())
 	if err != nil {
 		return adaptError(err, false)
 	}
 	return s.failOperation(ctx, operation.ProviderID, operation.ID, s.workerID, cause)
+}
+
+func (s *Store) FailForProvider(ctx context.Context, providerID domain.ProviderID, operationID domain.OperationID, cause error) error {
+	return s.failOperation(ctx, providerID.String(), operationID.String(), s.workerID, cause)
+}
+
+func (s *Store) FailForProviderWithLease(ctx context.Context, providerID domain.ProviderID, operationID domain.OperationID, leaseOwner string, cause error) error {
+	if err := validateLeaseOwner(leaseOwner); err != nil {
+		return err
+	}
+	return s.failOperation(ctx, providerID.String(), operationID.String(), leaseOwner, cause)
+}
+
+func validateLeaseOwner(leaseOwner string) error {
+	if leaseOwner == "" {
+		return errors.New("sqlite: lease owner is required")
+	}
+	return nil
 }
 
 func (s *Store) RequeueStale(ctx context.Context, providerID domain.ProviderID, before time.Time) (int, error) {
@@ -284,12 +352,24 @@ func (s *Store) UpdateProviderSyncState(ctx context.Context, providerID domain.P
 	if err := state.Validate(); err != nil {
 		return err
 	}
+	existing, err := s.getProviderSyncState(ctx, providerID.String())
+	if err != nil {
+		return adaptError(err, false)
+	}
+	if cursor == nil {
+		cursor = copyStringPointer(existing.Cursor)
+	}
+	if lastSyncAt == nil {
+		lastSyncAt = cloneTime(existing.LastSyncAt)
+	}
 	var message *string
 	if syncErr != nil {
 		value := syncErr.Error()
 		message = &value
+	} else if state != domain.SyncStateSynced {
+		message = copyStringPointer(existing.Error)
 	}
-	_, err := s.setProviderSyncState(ctx, ProviderSyncState{
+	_, err = s.setProviderSyncState(ctx, ProviderSyncState{
 		ProviderID: providerID.String(),
 		State:      SyncState(state),
 		Cursor:     cursor,
@@ -402,6 +482,14 @@ func syncBaseRecord(base domain.SyncBase) (SyncBase, error) {
 	if base.EntityType.IsZero() || base.EntityID == "" {
 		return SyncBase{}, fmt.Errorf("%w: sync base entity identity is required", domain.ErrInvalidID)
 	}
+	capturedAt := base.CapturedAt
+	if capturedAt.IsZero() {
+		capturedAt = base.CreatedAt
+	}
+	createdAt := base.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = capturedAt
+	}
 	return SyncBase{
 		ProviderID:      base.ProviderID.String(),
 		EntityType:      EntityType(base.EntityType),
@@ -410,7 +498,9 @@ func syncBaseRecord(base domain.SyncBase) (SyncBase, error) {
 		SyncState:       SyncState(base.SyncState),
 		RemoteUpdatedAt: base.RemoteUpdatedAt,
 		Payload:         append([]byte(nil), base.Payload...),
-		CapturedAt:      base.CreatedAt,
+		RemoteVersion:   copyStringPointer(base.RemoteVersion),
+		CapturedAt:      capturedAt,
+		CreatedAt:       createdAt,
 		UpdatedAt:       base.UpdatedAt,
 	}, nil
 }
@@ -424,8 +514,10 @@ func domainSyncBase(base SyncBase) domain.SyncBase {
 		SyncState:       domain.SyncState(base.SyncState),
 		RemoteUpdatedAt: base.RemoteUpdatedAt,
 		Payload:         append(json.RawMessage(nil), base.Payload...),
-		CreatedAt:       base.CapturedAt,
+		CreatedAt:       base.CreatedAt,
 		UpdatedAt:       base.UpdatedAt,
+		CapturedAt:      base.CapturedAt,
+		RemoteVersion:   copyStringPointer(base.RemoteVersion),
 	}
 }
 

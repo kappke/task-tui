@@ -138,8 +138,8 @@ func TestOpenRunsInitialMigrationAndConfiguresSQLite(t *testing.T) {
 	if err := store.SQLDB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatalf("migration count: %v", err)
 	}
-	if migrationCount != 3 {
-		t.Fatalf("migration count = %d, want 3", migrationCount)
+	if migrationCount != 6 {
+		t.Fatalf("migration count = %d, want 6", migrationCount)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("close: %v", err)
@@ -153,8 +153,8 @@ func TestOpenRunsInitialMigrationAndConfiguresSQLite(t *testing.T) {
 	if err := reopened.SQLDB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatalf("reopen migration count: %v", err)
 	}
-	if migrationCount != 3 {
-		t.Fatalf("reopen migration count = %d, want 3", migrationCount)
+	if migrationCount != 6 {
+		t.Fatalf("reopen migration count = %d, want 6", migrationCount)
 	}
 }
 
@@ -422,6 +422,39 @@ func TestTaskMutationAndQueueAreAtomic(t *testing.T) {
 	}
 }
 
+func TestRemoteTaskCreationUsesThePersistedTaskIDInItsQueue(t *testing.T) {
+	store := openTestStore(t)
+	h := createHierarchy(t, store, "remote-create")
+	task, err := store.ApplyTaskMutation(context.Background(), repository.TaskMutation{
+		Task: domain.Task{
+			ProviderID: h.provider.ID,
+			ListID:     h.list.ID,
+			Title:      "remote task",
+		},
+		Operation: domain.OperationTypeCreate,
+		Payload:   json.RawMessage(`{"title":"remote task"}`),
+	})
+	if err != nil {
+		t.Fatalf("create task mutation: %v", err)
+	}
+	if task.ID.IsZero() {
+		t.Fatal("created task has no ID")
+	}
+	var entityID string
+	if err := store.SQLDB().QueryRow(
+		"SELECT entity_id FROM sync_operations WHERE provider_id = ? AND entity_type = 'task' AND operation = 'create'",
+		h.provider.ID,
+	).Scan(&entityID); err != nil {
+		t.Fatalf("load queued task: %v", err)
+	}
+	if entityID != task.ID.String() {
+		t.Fatalf("queued entity ID = %q, persisted task ID = %q", entityID, task.ID)
+	}
+	if _, err := store.GetTask(context.Background(), task.ID); err != nil {
+		t.Fatalf("load created task: %v", err)
+	}
+}
+
 func TestSearchAndFilterUseJoinedProviderScopedData(t *testing.T) {
 	store := openTestStore(t)
 	h := createHierarchy(t, store, "search-a")
@@ -477,6 +510,70 @@ func TestSearchAndFilterUseJoinedProviderScopedData(t *testing.T) {
 	}
 	if len(injection) != 0 {
 		t.Fatalf("search injection returned %d rows", len(injection))
+	}
+	wildcard := searchTask
+	wildcard.ID = "wildcard-task"
+	wildcard.Title = "literal 100% value"
+	if _, err := store.CreateTask(context.Background(), wildcard); err != nil {
+		t.Fatal(err)
+	}
+	matched, err := store.Search(context.Background(), repository.TaskFilter{Query: "%"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matched) != 1 || matched[0].Task.ID != wildcard.ID {
+		t.Fatalf("wildcard search results = %#v", matched)
+	}
+}
+
+func TestConstraintErrorsKeepTheirCategories(t *testing.T) {
+	store := openTestStore(t)
+	h := createHierarchy(t, store, "constraint-errors")
+	if _, err := store.CreateProvider(context.Background(), testProvider(h.provider.ID.String())); !errors.Is(err, domain.ErrAlreadyExists) {
+		t.Fatalf("duplicate provider error = %v, want ErrAlreadyExists", err)
+	}
+	foreignErr := adaptError(func() error {
+		_, err := store.SQLDB().Exec("INSERT INTO tasks (id, provider_id, list_id, title, status, priority) VALUES (?, ?, ?, ?, ?, ?)", "bad-task", h.provider.ID, "missing-list", "bad", "todo", "normal")
+		return err
+	}(), false)
+	if !errors.Is(foreignErr, ErrForeignKeyConstraint) || errors.Is(foreignErr, domain.ErrAlreadyExists) {
+		t.Fatalf("foreign-key error = %v", foreignErr)
+	}
+	checkErr := adaptError(func() error {
+		_, err := store.SQLDB().Exec("INSERT INTO tasks (id, provider_id, list_id, title, status, priority) VALUES (?, ?, ?, ?, ?, ?)", "bad-task", h.provider.ID, h.list.ID, "", "todo", "normal")
+		return err
+	}(), false)
+	if !errors.Is(checkErr, ErrCheckConstraint) || errors.Is(checkErr, domain.ErrAlreadyExists) {
+		t.Fatalf("check error = %v", checkErr)
+	}
+	immutableErr := adaptError(func() error {
+		_, err := store.SQLDB().Exec("UPDATE tasks SET provider_id = ? WHERE id = ?", "other-provider", h.task.ID)
+		return err
+	}(), false)
+	if !errors.Is(immutableErr, ErrImmutableProvider) || !errors.Is(immutableErr, domain.ErrProviderMismatch) {
+		t.Fatalf("immutable-provider error = %v", immutableErr)
+	}
+}
+
+func TestUpsertProviderRejectsIdentityCollisionsWithoutReplacingState(t *testing.T) {
+	store := openTestStore(t)
+	provider := createProvider(t, store, "persistent-provider")
+	configuration := json.RawMessage(`{"account":"one"}`)
+	provider.Configuration = configuration
+	if _, err := store.UpdateProvider(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Type = domain.ProviderTypeClickUp
+	provider.Configuration = json.RawMessage(`{"account":"two"}`)
+	if _, err := store.UpsertProvider(context.Background(), provider); !errors.Is(err, domain.ErrAlreadyExists) {
+		t.Fatalf("colliding provider error = %v, want ErrAlreadyExists", err)
+	}
+	got, err := store.GetProvider(context.Background(), provider.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Type != domain.ProviderTypeLocal || string(got.Configuration) != string(configuration) {
+		t.Fatalf("provider was replaced: %#v", got)
 	}
 }
 
@@ -624,6 +721,63 @@ func TestTerminalQueueFailureIsNotClaimable(t *testing.T) {
 	}
 }
 
+func TestTerminalFailureDoesNotBlockLaterEntityOperation(t *testing.T) {
+	store := openTestStore(t)
+	h := createHierarchy(t, store, "terminal-order")
+	base := time.Now().UTC().Add(-time.Second)
+	for _, operation := range []domain.SyncOperation{
+		{ID: "terminal-order-create", ProviderID: h.provider.ID, EntityType: domain.EntityTypeTask, EntityID: h.task.ID.String(), Operation: domain.OperationTypeCreate, CreatedAt: base},
+		{ID: "terminal-order-update", ProviderID: h.provider.ID, EntityType: domain.EntityTypeTask, EntityID: h.task.ID.String(), Operation: domain.OperationTypeUpdate, CreatedAt: base.Add(time.Second)},
+	} {
+		if err := store.Enqueue(context.Background(), operation); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := store.Claim(context.Background(), h.provider.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Fail(context.Background(), first.ID, errors.New("permanent")); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := store.GetOperation(context.Background(), h.provider.ID.String(), first.ID.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Retryable {
+		t.Fatal("terminal failure remained retryable")
+	}
+	second, err := store.Claim(context.Background(), h.provider.ID)
+	if err != nil {
+		t.Fatalf("later operation remained blocked: %v", err)
+	}
+	if second.ID != "terminal-order-update" {
+		t.Fatalf("claimed operation = %q, want later update", second.ID)
+	}
+}
+
+func TestQueueLifecycleRejectsForeignProvider(t *testing.T) {
+	store := openTestStore(t)
+	first := createHierarchy(t, store, "lifecycle-first")
+	second := createHierarchy(t, store, "lifecycle-second")
+	if err := store.Enqueue(context.Background(), domain.SyncOperation{
+		ID: "foreign-lifecycle-op", ProviderID: first.provider.ID, EntityType: domain.EntityTypeTask,
+		EntityID: first.task.ID.String(), Operation: domain.OperationTypeUpdate,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.Claim(context.Background(), first.provider.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteForProvider(context.Background(), second.provider.ID, claimed.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("foreign completion error = %v, want ErrNotFound", err)
+	}
+	if err := store.CompleteForProvider(context.Background(), first.provider.ID, claimed.ID); err != nil {
+		t.Fatalf("owner completion = %v", err)
+	}
+}
+
 func TestReleasedQueueOperationIsImmediatelyClaimable(t *testing.T) {
 	store := openTestStore(t)
 	h := createHierarchy(t, store, "released-operation")
@@ -736,7 +890,10 @@ func TestMetadataSyncBasesConflictsAndAppState(t *testing.T) {
 	}
 
 	remoteID := "remote-task"
+	remoteVersion := "version-7"
 	remoteUpdated := time.Now().UTC()
+	createdAt := time.Now().UTC().Add(-time.Hour)
+	capturedAt := time.Now().UTC().Add(-time.Minute)
 	base := domain.SyncBase{
 		ProviderID:      h.provider.ID,
 		RemoteID:        &remoteID,
@@ -745,14 +902,16 @@ func TestMetadataSyncBasesConflictsAndAppState(t *testing.T) {
 		EntityType:      domain.EntityTypeTask,
 		EntityID:        h.task.ID.String(),
 		Payload:         json.RawMessage(`{"title":"base"}`),
-		CreatedAt:       time.Now().UTC(),
+		RemoteVersion:   &remoteVersion,
+		CreatedAt:       createdAt,
+		CapturedAt:      capturedAt,
 		UpdatedAt:       time.Now().UTC(),
 	}
 	if err := store.SaveBase(context.Background(), base); err != nil {
 		t.Fatal(err)
 	}
 	gotBase, err := store.GetBase(context.Background(), h.provider.ID, domain.EntityTypeTask, h.task.ID.String())
-	if err != nil || string(gotBase.Payload) != string(base.Payload) || gotBase.RemoteID == nil || *gotBase.RemoteID != remoteID {
+	if err != nil || string(gotBase.Payload) != string(base.Payload) || gotBase.RemoteID == nil || *gotBase.RemoteID != remoteID || gotBase.RemoteVersion == nil || *gotBase.RemoteVersion != remoteVersion || !gotBase.CreatedAt.Equal(createdAt) || !gotBase.UpdatedAt.Equal(base.UpdatedAt) || !gotBase.CapturedAt.Equal(capturedAt) {
 		t.Fatalf("sync base = %#v, %v", gotBase, err)
 	}
 
@@ -792,6 +951,49 @@ func TestMetadataSyncBasesConflictsAndAppState(t *testing.T) {
 	loaded, err := store.Load(context.Background(), "ui")
 	if err != nil || string(loaded.Value) != string(state.Value) {
 		t.Fatalf("app state = %#v, %v", loaded, err)
+	}
+}
+
+func TestProviderSyncMetadataSurvivesReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "provider-state.db")
+	ctx := context.Background()
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID := domain.ProviderID("provider-state")
+	if _, err := store.UpsertProvider(ctx, domain.Provider{ID: providerID, Type: domain.ProviderTypeClickUp, Name: "State", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	cursor := "cursor-9"
+	lastSync := time.Now().UTC().Add(-time.Minute)
+	if err := store.UpdateProviderSyncState(ctx, providerID, domain.SyncStateFailed, &cursor, errors.New("rate limited"), &lastSync); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	provider, err := store.GetProvider(ctx, providerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.SyncState != domain.SyncStateFailed || provider.SyncCursor == nil || *provider.SyncCursor != cursor || provider.SyncError != "rate limited" || provider.LastSyncAt == nil || !provider.LastSyncAt.Equal(lastSync) {
+		t.Fatalf("provider sync metadata = %#v", provider)
+	}
+	if err := store.UpdateProviderSyncState(ctx, providerID, domain.SyncStateSynced, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	provider, err = store.GetProvider(ctx, providerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.SyncState != domain.SyncStateSynced || provider.SyncError != "" {
+		t.Fatalf("successful provider sync metadata = %#v, want cleared error", provider)
 	}
 }
 

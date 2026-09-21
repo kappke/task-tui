@@ -9,6 +9,9 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	modernsqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 func newID() (string, error) {
@@ -61,7 +64,37 @@ func isNoRows(err error) bool {
 }
 
 func isConstraintError(err error) bool {
-	return strings.Contains(strings.ToLower(err.Error()), "constraint")
+	_, ok := constraintKind(err)
+	return ok
+}
+
+type constraintKindValue uint8
+
+const (
+	constraintUnique constraintKindValue = iota + 1
+	constraintForeignKey
+	constraintCheck
+	constraintImmutableProvider
+)
+
+func constraintKind(err error) (constraintKindValue, bool) {
+	var sqliteErr *modernsqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return 0, false
+	}
+	switch sqliteErr.Code() {
+	case sqlite3.SQLITE_CONSTRAINT_UNIQUE, sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY:
+		return constraintUnique, true
+	case sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY:
+		return constraintForeignKey, true
+	case sqlite3.SQLITE_CONSTRAINT_CHECK:
+		return constraintCheck, true
+	case sqlite3.SQLITE_CONSTRAINT_TRIGGER:
+		if strings.Contains(strings.ToLower(sqliteErr.Error()), "provider_id is immutable") {
+			return constraintImmutableProvider, true
+		}
+	}
+	return 0, false
 }
 
 type queryer interface {

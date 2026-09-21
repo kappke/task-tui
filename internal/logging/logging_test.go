@@ -82,3 +82,33 @@ func TestLogLevelFiltering(t *testing.T) {
 		t.Fatal("log level filtering is incorrect")
 	}
 }
+
+func TestNewStartsEachRunWithFreshLogFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasktui.log")
+	first, err := New(Config{Path: path, Level: LevelTrace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Info("first run")
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := New(Config{Path: path, Level: LevelTrace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.Info("second run")
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(data)
+	if strings.Contains(output, "first run") || !strings.Contains(output, "second run") {
+		t.Fatalf("log file was not reset per run: %q", output)
+	}
+}

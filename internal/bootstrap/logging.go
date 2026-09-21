@@ -47,7 +47,7 @@ func OpenLogger(cfg LoggingConfig) (*slog.Logger, *LogSink, error) {
 	if err := os.MkdirAll(filepath.Dir(cfg.Path), 0o700); err != nil {
 		return nil, nil, fmt.Errorf("create log directory: %w", err)
 	}
-	file, err := os.OpenFile(cfg.Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	file, err := os.OpenFile(cfg.Path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open log file: %w", err)
 	}
@@ -70,7 +70,9 @@ func OpenLogger(cfg LoggingConfig) (*slog.Logger, *LogSink, error) {
 
 func parseLogLevel(value string) slog.Level {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "trace", "debug":
+	case "trace":
+		return slog.Level(-8)
+	case "debug":
 		return slog.LevelDebug
 	case "warn", "warning":
 		return slog.LevelWarn

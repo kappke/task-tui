@@ -21,8 +21,17 @@ func adaptError(err error, duplicate bool) error {
 	if errors.Is(err, ErrNotFound) || errors.Is(err, sql.ErrNoRows) {
 		return domain.ErrNotFound
 	}
-	if duplicate && isConstraintError(err) {
-		return fmt.Errorf("%w: %v", domain.ErrAlreadyExists, err)
+	if kind, ok := constraintKind(err); ok {
+		switch kind {
+		case constraintUnique:
+			return fmt.Errorf("%w: %v", domain.ErrAlreadyExists, err)
+		case constraintForeignKey:
+			return fmt.Errorf("%w: %v", ErrForeignKeyConstraint, err)
+		case constraintCheck:
+			return fmt.Errorf("%w: %v", ErrCheckConstraint, err)
+		case constraintImmutableProvider:
+			return fmt.Errorf("%w: %w: %v", ErrImmutableProvider, domain.ErrProviderMismatch, err)
+		}
 	}
 	return err
 }
@@ -96,9 +105,30 @@ func (s *Store) UpdateProvider(ctx context.Context, provider domain.Provider) (d
 }
 
 func (s *Store) UpsertProvider(ctx context.Context, provider domain.Provider) (domain.Provider, error) {
+	if existing, err := s.getProvider(ctx, provider.ID.String()); err == nil {
+		if provider.SyncState.IsZero() {
+			provider.SyncState = domain.SyncState(existing.SyncState)
+		}
+		if provider.SyncCursor == nil {
+			provider.SyncCursor = copyStringPointer(existing.SyncCursor)
+		}
+		if provider.SyncError == "" {
+			provider.SyncError = stringOrEmpty(existing.SyncError)
+		}
+		if provider.LastSyncAt == nil {
+			provider.LastSyncAt = cloneTime(existing.LastSyncAt)
+		}
+	} else if !errors.Is(err, ErrNotFound) && !errors.Is(err, sql.ErrNoRows) {
+		return domain.Provider{}, adaptError(err, false)
+	}
 	record, err := providerRecord(provider)
 	if err != nil {
 		return domain.Provider{}, err
+	}
+	if existing, lookupErr := s.getProvider(ctx, record.ID); lookupErr == nil {
+		if existing.Type != record.Type || string(existing.Configuration) != string(record.Configuration) {
+			return domain.Provider{}, domain.ErrAlreadyExists
+		}
 	}
 	upserted, err := s.upsertProvider(ctx, record)
 	if err != nil {
@@ -129,11 +159,35 @@ func providerRecord(provider domain.Provider) (Provider, error) {
 		Name:          provider.Name,
 		Enabled:       provider.Enabled,
 		Configuration: append([]byte(nil), provider.Configuration...),
-		SyncState:     SyncStateLocal,
+		SyncState:     SyncState(provider.SyncState),
+		SyncCursor:    copyStringPointer(provider.SyncCursor),
+		SyncError:     stringPointer(provider.SyncError),
 		LastSyncAt:    provider.LastSyncAt,
 		CreatedAt:     provider.CreatedAt,
 		UpdatedAt:     provider.UpdatedAt,
 	}, nil
+}
+
+func stringPointer(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func stringOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func cloneTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 func domainProvider(provider Provider) domain.Provider {
@@ -143,6 +197,9 @@ func domainProvider(provider Provider) domain.Provider {
 		Name:          provider.Name,
 		Enabled:       provider.Enabled,
 		Configuration: append(json.RawMessage(nil), provider.Configuration...),
+		SyncState:     domain.SyncState(provider.SyncState),
+		SyncCursor:    copyStringPointer(provider.SyncCursor),
+		SyncError:     stringOrEmpty(provider.SyncError),
 		LastSyncAt:    provider.LastSyncAt,
 		CreatedAt:     provider.CreatedAt,
 		UpdatedAt:     provider.UpdatedAt,
@@ -301,6 +358,8 @@ func domainSpace(space Space) domain.Space {
 		Name:            space.Name,
 		SyncState:       domain.SyncState(space.SyncState),
 		RemoteUpdatedAt: space.RemoteUpdatedAt,
+		IsDeleted:       space.IsDeleted,
+		DeletedAt:       space.DeletedAt,
 		CreatedAt:       space.CreatedAt,
 		UpdatedAt:       space.UpdatedAt,
 	}
@@ -468,6 +527,8 @@ func domainList(list List) domain.List {
 		Name:            list.Name,
 		SyncState:       domain.SyncState(list.SyncState),
 		RemoteUpdatedAt: list.RemoteUpdatedAt,
+		IsDeleted:       list.IsDeleted,
+		DeletedAt:       list.DeletedAt,
 		CreatedAt:       list.CreatedAt,
 		UpdatedAt:       list.UpdatedAt,
 	}
@@ -518,6 +579,39 @@ func (s *Store) ListByList(ctx context.Context, listID domain.ListID) ([]domain.
 
 func (s *Store) ListTasksByProvider(ctx context.Context, providerID domain.ProviderID) ([]domain.Task, error) {
 	tasks, err := s.listAllTasks(ctx, providerID.String())
+	if err != nil {
+		return nil, err
+	}
+	result := make([]domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		result = append(result, domainTask(task))
+	}
+	return result, nil
+}
+
+// ListTasksByListPage returns a bounded local task page for startup and list
+// opening. A non-positive limit uses the repository's normal unbounded query.
+func (s *Store) ListTasksByListPage(ctx context.Context, providerID domain.ProviderID, listID domain.ListID, limit, offset int) ([]domain.Task, error) {
+	if limit <= 0 {
+		return s.ListTasks(ctx, listID)
+	}
+	tasks, err := s.listTasksPage(ctx, providerID.String(), listID.String(), limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		result = append(result, domainTask(task))
+	}
+	return result, nil
+}
+
+// ListTasksByProviderPage returns a bounded local task page for one provider.
+func (s *Store) ListTasksByProviderPage(ctx context.Context, providerID domain.ProviderID, limit, offset int) ([]domain.Task, error) {
+	if limit <= 0 {
+		return s.ListTasksByProvider(ctx, providerID)
+	}
+	tasks, err := s.listAllTasksPage(ctx, providerID.String(), limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -671,6 +765,8 @@ func domainTask(task Task) domain.Task {
 		CompletedAt:     task.CompletedAt,
 		SyncState:       domain.SyncState(task.SyncState),
 		RemoteUpdatedAt: task.RemoteUpdatedAt,
+		IsDeleted:       task.IsDeleted,
+		DeletedAt:       task.DeletedAt,
 		CreatedAt:       task.CreatedAt,
 		UpdatedAt:       task.UpdatedAt,
 	}

@@ -161,14 +161,16 @@ const (
 type Mode string
 
 const (
-	ModeBrowse     Mode = "browse"
-	ModeDetail     Mode = "detail"
-	ModeSearch     Mode = "search"
-	ModeFilter     Mode = "filter"
-	ModeCommand    Mode = "command"
-	ModeCreateTask Mode = "create_task"
-	ModeEditTask   Mode = "edit_task"
-	ModeConfirm    Mode = "confirm"
+	ModeBrowse      Mode = "browse"
+	ModeDetail      Mode = "detail"
+	ModeSearch      Mode = "search"
+	ModeFilter      Mode = "filter"
+	ModeCommand     Mode = "command"
+	ModeCreateSpace Mode = "create_space"
+	ModeCreateList  Mode = "create_list"
+	ModeCreateTask  Mode = "create_task"
+	ModeEditTask    Mode = "edit_task"
+	ModeConfirm     Mode = "confirm"
 )
 
 // UIState contains only presentation state. Domain objects remain in Data.

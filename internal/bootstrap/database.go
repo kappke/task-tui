@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	storagesqlite "github.com/kappke/task-tui/internal/storage/sqlite"
 	_ "modernc.org/sqlite"
 )
 
@@ -45,33 +46,20 @@ func OpenSQLite(ctx context.Context, cfg DatabaseConfig) (*sql.DB, error) {
 			}
 		}
 	}
-	db, err := sql.Open(sqliteDriverName, cfg.Path)
+	store, err := storagesqlite.Open(cfg.Path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite connection: %w", err)
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	db := store.SQLDB()
 	busyTimeout := cfg.BusyTimeout
 	if busyTimeout <= 0 {
 		busyTimeout = 5 * time.Second
 	}
 	pragmaCtx, cancel := context.WithTimeout(ctx, busyTimeout)
 	defer cancel()
-	if _, err := db.ExecContext(pragmaCtx, "PRAGMA foreign_keys = ON"); err != nil {
-		closeDatabase(db, err)
-		return nil, fmt.Errorf("enable sqlite foreign keys: %w", err)
-	}
-	if _, err := db.ExecContext(pragmaCtx, "PRAGMA journal_mode = WAL"); err != nil {
-		closeDatabase(db, err)
-		return nil, fmt.Errorf("enable sqlite WAL: %w", err)
-	}
 	if _, err := db.ExecContext(pragmaCtx, fmt.Sprintf("PRAGMA busy_timeout = %d", busyTimeout.Milliseconds())); err != nil {
 		closeDatabase(db, err)
 		return nil, fmt.Errorf("set sqlite busy timeout: %w", err)
-	}
-	if err := MigrateSQLite(pragmaCtx, db); err != nil {
-		closeDatabase(db, err)
-		return nil, fmt.Errorf("migrate sqlite: %w", err)
 	}
 	if err := db.PingContext(ctx); err != nil {
 		closeDatabase(db, err)
@@ -221,46 +209,7 @@ func MigrateSQLite(ctx context.Context, db *sql.DB) error {
 	if db == nil {
 		return errors.New("migrate sqlite: nil database")
 	}
-	if _, err := db.ExecContext(ctx, `
-CREATE TABLE IF NOT EXISTS schema_migrations (
-		version INTEGER PRIMARY KEY NOT NULL,
-		name TEXT NOT NULL,
-	applied_at TEXT NOT NULL
-)`); err != nil {
-		return fmt.Errorf("create migration table: %w", err)
-	}
-	for _, migration := range sqliteMigrations {
-		var applied int
-		err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version = ?", migration.version).Scan(&applied)
-		if err != nil {
-			return fmt.Errorf("check migration %d: %w", migration.version, err)
-		}
-		if applied != 0 {
-			continue
-		}
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("begin migration %d: %w", migration.version, err)
-		}
-		if _, err := tx.ExecContext(ctx, migration.sql); err != nil {
-			rollbackErr := tx.Rollback()
-			if rollbackErr != nil {
-				return fmt.Errorf("apply migration %d: %w; rollback: %v", migration.version, err, rollbackErr)
-			}
-			return fmt.Errorf("apply migration %d: %w", migration.version, err)
-		}
-		if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)", migration.version, migration.name, formatTime(time.Now().UTC())); err != nil {
-			rollbackErr := tx.Rollback()
-			if rollbackErr != nil {
-				return fmt.Errorf("record migration %d: %w; rollback: %v", migration.version, err, rollbackErr)
-			}
-			return fmt.Errorf("record migration %d: %w", migration.version, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit migration %d: %w", migration.version, err)
-		}
-	}
-	return nil
+	return storagesqlite.Migrate(ctx, db)
 }
 
 func formatTime(value time.Time) string {

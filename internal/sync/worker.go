@@ -224,7 +224,7 @@ func (w *Worker) SyncOnce(ctx context.Context) error {
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return w.cancelClaim(ctx, "before claiming sync operation", err, "")
+			return w.cancelClaim(ctx, "before claiming sync operation", err, Operation{})
 		}
 
 		operation, err := w.queue.Claim(ctx, w.ProviderID(), w.options.Clock.Now())
@@ -242,12 +242,12 @@ func (w *Worker) SyncOnce(ctx context.Context) error {
 			return w.isolationFailure(ctx, operation, err)
 		}
 		if err := ctx.Err(); err != nil {
-			return w.cancelClaim(ctx, "before attempting sync operation", err, operation.ID)
+			return w.cancelClaim(ctx, "before attempting sync operation", err, operation)
 		}
 
 		attemptAt := w.options.Clock.Now()
 		if err := w.queue.MarkAttempt(ctx, operation.ID, attemptAt); err != nil {
-			if releaseErr := w.releaseClaim(ctx, operation.ID); releaseErr != nil {
+			if releaseErr := w.releaseClaim(ctx, operation.ProviderID, operation.ID, operation.LeaseOwner); releaseErr != nil {
 				err = errors.Join(err, releaseErr)
 			}
 			return w.infrastructureFailure(ctx, EventSyncFailed, "persist sync attempt", err)
@@ -264,11 +264,11 @@ func (w *Worker) SyncOnce(ctx context.Context) error {
 		providerErr := w.push(ctx, operation)
 		if providerErr != nil {
 			if ctx.Err() != nil {
-				return w.cancelClaim(ctx, "cancel sync operation", ctx.Err(), operation.ID)
+				return w.cancelClaim(ctx, "cancel sync operation", ctx.Err(), operation)
 			}
 			decision := w.options.RetryPolicy.Decide(providerErr, operation.Attempts)
 			if decision.Kind == DecisionCanceled {
-				return w.cancelClaim(ctx, "provider canceled sync operation", providerErr, operation.ID)
+				return w.cancelClaim(ctx, "provider canceled sync operation", providerErr, operation)
 			}
 			if err := w.persistFailure(ctx, operation, providerErr, decision); err != nil {
 				return err
@@ -278,7 +278,7 @@ func (w *Worker) SyncOnce(ctx context.Context) error {
 
 		completeAt := w.options.Clock.Now()
 		persistCtx, cancel := w.persistenceContext(ctx)
-		completeErr := w.queue.Complete(persistCtx, operation.ID, completeAt)
+		completeErr := w.queue.Complete(persistCtx, operation.ProviderID, operation.ID, operation.LeaseOwner, completeAt)
 		cancel()
 		if completeErr != nil {
 			return w.infrastructureFailure(ctx, EventSyncFailed, "complete sync operation", completeErr)
@@ -394,7 +394,7 @@ func (w *Worker) persistFailure(ctx context.Context, operation Operation, provid
 	}
 
 	persistCtx, cancel := w.persistenceContext(ctx)
-	err := w.queue.Fail(persistCtx, operation.ID, failure)
+	err := w.queue.Fail(persistCtx, operation.ProviderID, operation.ID, operation.LeaseOwner, failure)
 	cancel()
 	if err != nil {
 		return w.infrastructureFailure(ctx, EventSyncFailed, "persist sync failure", err)
@@ -417,7 +417,7 @@ func (w *Worker) persistFailure(ctx context.Context, operation Operation, provid
 }
 
 func (w *Worker) isolationFailure(ctx context.Context, operation Operation, err error) error {
-	releaseErr := w.releaseClaim(ctx, operation.ID)
+	releaseErr := w.releaseClaim(ctx, operation.ProviderID, operation.ID, operation.LeaseOwner)
 	if releaseErr != nil {
 		err = errors.Join(err, releaseErr)
 	}
@@ -441,20 +441,20 @@ func (w *Worker) infrastructureFailure(ctx context.Context, kind EventKind, acti
 	return fmt.Errorf("%s: %w", action, err)
 }
 
-func (w *Worker) cancelClaim(ctx context.Context, action string, err error, operationID OperationID) error {
-	if operationID != "" {
-		if releaseErr := w.releaseClaim(ctx, operationID); releaseErr != nil {
+func (w *Worker) cancelClaim(ctx context.Context, action string, err error, operation Operation) error {
+	if operation.ID != "" {
+		if releaseErr := w.releaseClaim(ctx, operation.ProviderID, operation.ID, operation.LeaseOwner); releaseErr != nil {
 			err = errors.Join(err, releaseErr)
 		}
 	}
 	w.setState(WorkerStopped)
-	w.emit(context.Background(), Event{Kind: EventWorkerStopped, State: WorkerStopped, OperationID: operationID, Err: fmt.Errorf("%s: %w", action, err)})
+	w.emit(context.Background(), Event{Kind: EventWorkerStopped, State: WorkerStopped, OperationID: operation.ID, Err: fmt.Errorf("%s: %w", action, err)})
 	return err
 }
 
-func (w *Worker) releaseClaim(ctx context.Context, operationID OperationID) error {
+func (w *Worker) releaseClaim(ctx context.Context, providerID ProviderID, operationID OperationID, leaseOwner string) error {
 	persistCtx, cancel := w.persistenceContext(ctx)
-	err := w.queue.Release(persistCtx, operationID)
+	err := w.queue.Release(persistCtx, providerID, operationID, leaseOwner)
 	cancel()
 	return err
 }

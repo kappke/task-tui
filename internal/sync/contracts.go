@@ -174,9 +174,9 @@ type Queue interface {
 	RecoverStale(context.Context, ProviderID, time.Time) error
 	Claim(context.Context, ProviderID, time.Time) (Operation, error)
 	MarkAttempt(context.Context, OperationID, time.Time) error
-	Complete(context.Context, OperationID, time.Time) error
-	Fail(context.Context, OperationID, Failure) error
-	Release(context.Context, OperationID) error
+	Complete(context.Context, ProviderID, OperationID, string, time.Time) error
+	Fail(context.Context, ProviderID, OperationID, string, Failure) error
+	Release(context.Context, ProviderID, OperationID, string) error
 }
 
 // SyncQueue is an explicit alias for repository packages that use that name.
@@ -189,9 +189,9 @@ type QueueFuncs struct {
 	RecoverStaleFunc func(context.Context, ProviderID, time.Time) error
 	ClaimFunc        func(context.Context, ProviderID, time.Time) (Operation, error)
 	MarkAttemptFunc  func(context.Context, OperationID, time.Time) error
-	CompleteFunc     func(context.Context, OperationID, time.Time) error
-	FailFunc         func(context.Context, OperationID, Failure) error
-	ReleaseFunc      func(context.Context, OperationID) error
+	CompleteFunc     func(context.Context, ProviderID, OperationID, string, time.Time) error
+	FailFunc         func(context.Context, ProviderID, OperationID, string, Failure) error
+	ReleaseFunc      func(context.Context, ProviderID, OperationID, string) error
 }
 
 func (q QueueFuncs) RecoverStale(ctx context.Context, providerID ProviderID, before time.Time) error {
@@ -215,25 +215,25 @@ func (q QueueFuncs) MarkAttempt(ctx context.Context, operationID OperationID, at
 	return q.MarkAttemptFunc(ctx, operationID, at)
 }
 
-func (q QueueFuncs) Complete(ctx context.Context, operationID OperationID, at time.Time) error {
+func (q QueueFuncs) Complete(ctx context.Context, providerID ProviderID, operationID OperationID, leaseOwner string, at time.Time) error {
 	if q.CompleteFunc == nil {
 		return errors.New("sync queue Complete is not configured")
 	}
-	return q.CompleteFunc(ctx, operationID, at)
+	return q.CompleteFunc(ctx, providerID, operationID, leaseOwner, at)
 }
 
-func (q QueueFuncs) Fail(ctx context.Context, operationID OperationID, failure Failure) error {
+func (q QueueFuncs) Fail(ctx context.Context, providerID ProviderID, operationID OperationID, leaseOwner string, failure Failure) error {
 	if q.FailFunc == nil {
 		return errors.New("sync queue Fail is not configured")
 	}
-	return q.FailFunc(ctx, operationID, failure)
+	return q.FailFunc(ctx, providerID, operationID, leaseOwner, failure)
 }
 
-func (q QueueFuncs) Release(ctx context.Context, operationID OperationID) error {
+func (q QueueFuncs) Release(ctx context.Context, providerID ProviderID, operationID OperationID, leaseOwner string) error {
 	if q.ReleaseFunc == nil {
 		return nil
 	}
-	return q.ReleaseFunc(ctx, operationID)
+	return q.ReleaseFunc(ctx, providerID, operationID, leaseOwner)
 }
 
 // ProviderAdapter turns function boundaries into a Provider, Pusher, and

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/kappke/task-tui/internal/domain"
 )
 
 type Clock interface {
@@ -183,7 +185,7 @@ func (s *Service) CreateSpace(ctx context.Context, input CreateSpaceInput) (Spac
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
-	intent, err := makeIntent(provider, EntityTypeSpace, id, OperationCreate, createSpacePayload{Name: input.Name})
+	intent, err := makeIntent(provider, EntityTypeSpace, id, OperationCreate, domain.NewSpaceCreateMutationPayload(space))
 	if err != nil {
 		return Space{}, fmt.Errorf("create space %s: %w", id, err)
 	}
@@ -238,10 +240,7 @@ func (s *Service) CreateList(ctx context.Context, input CreateListInput) (List, 
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
-	intent, err := makeIntent(provider, EntityTypeList, id, OperationCreate, createListPayload{
-		SpaceID: input.SpaceID,
-		Name:    input.Name,
-	})
+	intent, err := makeIntent(provider, EntityTypeList, id, OperationCreate, domain.NewListCreateMutationPayload(list))
 	if err != nil {
 		return List{}, fmt.Errorf("create list %s: %w", id, err)
 	}
@@ -332,7 +331,7 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (Task, 
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	intent, err := makeIntent(provider, EntityTypeTask, id, OperationCreate, taskCreatePayloadFrom(task))
+	intent, err := makeIntent(provider, EntityTypeTask, id, OperationCreate, domain.NewTaskCreateMutationPayload(task))
 	if err != nil {
 		return Task{}, fmt.Errorf("create task %s: %w", id, err)
 	}
@@ -398,7 +397,7 @@ func (s *Service) PatchTask(ctx context.Context, id TaskID, patch TaskPatch) (Ta
 		return Task{}, fmt.Errorf("apply patch to task %s: %w", id, err)
 	}
 	updated.SyncState = stateFor(provider)
-	intent, err := makeIntent(provider, EntityTypeTask, string(id), OperationUpdate, taskPatchPayloadFrom(patch))
+	intent, err := makeIntent(provider, EntityTypeTask, string(id), OperationUpdate, domain.NewTaskUpdateMutationPayload(updated, patch))
 	if err != nil {
 		return Task{}, fmt.Errorf("patch task %s: %w", id, err)
 	}
@@ -442,7 +441,7 @@ func (s *Service) CompleteTask(ctx context.Context, id TaskID) (Task, error) {
 		return Task{}, fmt.Errorf("complete task %s: %w", id, err)
 	}
 	updated.SyncState = stateFor(provider)
-	intent, err := makeIntent(provider, EntityTypeTask, string(id), OperationComplete, taskPatchPayloadFrom(patch))
+	intent, err := makeIntent(provider, EntityTypeTask, string(id), OperationComplete, domain.NewTaskUpdateMutationPayload(updated, patch))
 	if err != nil {
 		return Task{}, fmt.Errorf("complete task %s: %w", id, err)
 	}
@@ -512,7 +511,8 @@ func (s *Service) MoveTask(ctx context.Context, id TaskID, destinationListID Lis
 	moved.ListID = destinationListID
 	moved.UpdatedAt = s.now()
 	moved.SyncState = stateFor(provider)
-	intent, err := makeIntent(provider, EntityTypeTask, string(id), OperationMove, moveTaskPayload{ListID: destinationListID})
+	patch := TaskPatch{ListID: &destinationListID}
+	intent, err := makeIntent(provider, EntityTypeTask, string(id), OperationMove, domain.NewTaskUpdateMutationPayload(moved, patch))
 	if err != nil {
 		return Task{}, fmt.Errorf("move task %s: %w", id, err)
 	}
@@ -712,7 +712,7 @@ func (s *Service) copyLoadedTask(ctx context.Context, source Task, destinationLi
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
-	intent, err := makeIntent(provider, EntityTypeTask, id, OperationCreate, taskCreatePayloadFrom(copy))
+	intent, err := makeIntent(provider, EntityTypeTask, id, OperationCreate, domain.NewTaskCreateMutationPayload(copy))
 	if err != nil {
 		return Task{}, err
 	}
@@ -733,7 +733,7 @@ func (s *Service) deleteLoadedTask(ctx context.Context, task Task, provider Prov
 	if err := checkContext(ctx); err != nil {
 		return err
 	}
-	intent, err := makeIntent(provider, EntityTypeTask, string(task.ID), OperationDelete, deleteTaskPayload{RemoteID: cloneString(task.RemoteID)})
+	intent, err := makeIntent(provider, EntityTypeTask, string(task.ID), OperationDelete, domain.NewTaskDeleteMutationPayload(task))
 	if err != nil {
 		return err
 	}

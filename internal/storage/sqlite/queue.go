@@ -10,7 +10,7 @@ import (
 
 const operationSelect = `
 	SELECT id, provider_id, entity_type, entity_id, operation, payload, attempts,
-		status, error, created_at, last_attempt_at, next_attempt_at, lease_owner,
+		status, retryable, error, created_at, last_attempt_at, next_attempt_at, lease_owner,
 		lease_expires_at, completed_at
 	FROM sync_operations`
 
@@ -112,6 +112,7 @@ func (s *Store) claimOperationAt(ctx context.Context, providerID, workerID strin
 			WHERE eligible.provider_id = ?
 			  AND (
 				(eligible.status = 'pending' AND eligible.next_attempt_at <= ?)
+				OR (eligible.status = 'failed' AND eligible.retryable = 1 AND eligible.next_attempt_at <= ?)
 				OR (eligible.status = 'syncing' AND eligible.lease_expires_at IS NOT NULL AND eligible.lease_expires_at <= ?)
 			  )
 			  AND NOT EXISTS (
@@ -121,6 +122,7 @@ func (s *Store) claimOperationAt(ctx context.Context, providerID, workerID strin
 				  AND prior.entity_type = eligible.entity_type
 				  AND prior.entity_id = eligible.entity_id
 				  AND prior.status <> 'completed'
+				  AND (prior.status <> 'failed' OR prior.retryable = 1)
 				  AND (
 					prior.created_at < eligible.created_at
 					OR (prior.created_at = eligible.created_at AND prior.id < eligible.id)
@@ -130,13 +132,14 @@ func (s *Store) claimOperationAt(ctx context.Context, providerID, workerID strin
 			LIMIT 1
 		  )
 		RETURNING id, provider_id, entity_type, entity_id, operation, payload, attempts,
-			status, error, created_at, last_attempt_at, next_attempt_at, lease_owner,
+			status, retryable, error, created_at, last_attempt_at, next_attempt_at, lease_owner,
 			lease_expires_at, completed_at`,
 		formatTime(now),
 		workerID,
 		formatTime(leaseUntil),
 		providerID,
 		providerID,
+		formatTime(now),
 		formatTime(now),
 		formatTime(now),
 	)
@@ -263,10 +266,14 @@ func (s *Store) finishRetry(ctx context.Context, providerID, operationID, worker
 	}
 	query := `
 		UPDATE sync_operations
-		SET status = ?, error = ?, lease_owner = NULL, lease_expires_at = NULL,
+		SET status = ?, retryable = ?, error = ?, lease_owner = NULL, lease_expires_at = NULL,
 			next_attempt_at = ?, completed_at = NULL
 		WHERE provider_id = ? AND id = ? AND status = 'syncing'`
-	args := []any{status, message, formatTime(nextAttemptAt), providerID, operationID}
+	retryable := 0
+	if status == QueueStatusPending {
+		retryable = 1
+	}
+	args := []any{status, retryable, message, formatTime(nextAttemptAt), providerID, operationID}
 	if workerID != "" {
 		query += " AND lease_owner = ?"
 		args = append(args, workerID)
@@ -380,10 +387,10 @@ func enqueueExec(ctx context.Context, exec execer, operation SyncOperation) erro
 	operation = prepared
 	_, err = exec.ExecContext(ctx, `
 		INSERT INTO sync_operations (
-			id, provider_id, entity_type, entity_id, operation, payload, attempts, status,
+			id, provider_id, entity_type, entity_id, operation, payload, attempts, status, retryable,
 			error, created_at, last_attempt_at, next_attempt_at, lease_owner,
 			lease_expires_at, completed_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		operation.ID,
 		operation.ProviderID,
 		operation.EntityType,
@@ -392,6 +399,7 @@ func enqueueExec(ctx context.Context, exec execer, operation SyncOperation) erro
 		operation.Payload,
 		operation.Attempts,
 		operation.Status,
+		operation.Retryable,
 		nullableError(operationError(operation.Error)),
 		formatTime(operation.CreatedAt),
 		nullableTime(operation.LastAttemptAt),
@@ -426,6 +434,9 @@ func prepareOperation(operation SyncOperation) (SyncOperation, error) {
 	if operation.Status == "" {
 		operation.Status = QueueStatusPending
 	}
+	if operation.Status != QueueStatusFailed {
+		operation.Retryable = true
+	}
 	if operation.Attempts < 0 {
 		return SyncOperation{}, errors.New("sqlite: sync operation attempts cannot be negative")
 	}
@@ -443,7 +454,7 @@ func scanOperation(row rowScanner) (SyncOperation, error) {
 	)
 	if err := row.Scan(
 		&operation.ID, &operation.ProviderID, &entityType, &operation.EntityID,
-		&operationType, &payload, &operation.Attempts, &status, &errorValue,
+		&operationType, &payload, &operation.Attempts, &status, &operation.Retryable, &errorValue,
 		&createdAt, &lastAttemptAt, &nextAttemptAt, &leaseOwner, &leaseExpiresAt,
 		&completedAt,
 	); err != nil {

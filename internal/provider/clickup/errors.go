@@ -14,6 +14,11 @@ var (
 	ErrResponseTooLarge   = errors.New("clickup response body exceeds configured limit")
 )
 
+// Permanent marks failures that should not be retried by synchronization.
+func (e *RequestError) Permanent() bool {
+	return e != nil && errors.Is(e.Err, ErrMissingTokenSource)
+}
+
 // RequestError describes a failure before a response was received.
 type RequestError struct {
 	Method string
@@ -59,6 +64,10 @@ func (e *ResponseError) Unwrap() error {
 	return e.Err
 }
 
+func (e *ResponseError) Permanent() bool {
+	return e != nil && (errors.Is(e.Err, ErrMalformedResponse) || errors.Is(e.Err, ErrResponseTooLarge))
+}
+
 // APIError is returned for an HTTP response with a non-success status code.
 // Body is bounded by ClientConfig.MaxBodyBytes and contains only the response
 // payload, never request headers or credentials.
@@ -84,6 +93,18 @@ func (e *APIError) Error() string {
 		return fmt.Sprintf("clickup api %s %s: %s: %s", e.Method, e.URL, e.Status, message)
 	}
 	return fmt.Sprintf("clickup api %s %s: %d: %s", e.Method, e.URL, e.StatusCode, message)
+}
+
+func (e *APIError) Permanent() bool {
+	if e == nil {
+		return false
+	}
+	switch e.StatusCode {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+		return true
+	default:
+		return false
+	}
 }
 
 // RateLimitError is an APIError for HTTP 429 responses. RetryAfter is the
@@ -112,3 +133,5 @@ func (e *RateLimitError) Unwrap() error {
 	}
 	return e.APIError
 }
+
+func (e *RateLimitError) Permanent() bool { return false }

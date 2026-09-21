@@ -6,8 +6,11 @@ import (
 )
 
 var (
-	ErrNotFound  = errors.New("sqlite: not found")
-	ErrLeaseLost = errors.New("sqlite: queue lease lost")
+	ErrNotFound             = errors.New("sqlite: not found")
+	ErrLeaseLost            = errors.New("sqlite: queue lease lost")
+	ErrForeignKeyConstraint = errors.New("sqlite: foreign-key constraint")
+	ErrCheckConstraint      = errors.New("sqlite: check constraint")
+	ErrImmutableProvider    = errors.New("sqlite: provider ownership is immutable")
 )
 
 type SyncState string
@@ -152,6 +155,7 @@ type SyncOperation struct {
 	Payload        []byte
 	Attempts       int
 	Status         QueueStatus
+	Retryable      bool
 	Error          *string
 	CreatedAt      time.Time
 	LastAttemptAt  *time.Time
@@ -171,6 +175,7 @@ type SyncBase struct {
 	Payload         []byte
 	RemoteVersion   *string
 	CapturedAt      time.Time
+	CreatedAt       time.Time
 	UpdatedAt       time.Time
 }
 

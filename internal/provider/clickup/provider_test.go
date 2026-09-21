@@ -67,8 +67,11 @@ func TestProviderUsesRemoteIDsForTaskOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateTask() error = %v", err)
 	}
-	if updated.ID != "remote-task" {
-		t.Fatalf("updated ID = %q", updated.ID)
+	if updated.ID == "" || updated.ID == "remote-task" {
+		t.Fatalf("updated ID = %q, want independent local identity", updated.ID)
+	}
+	if updated.RemoteID == nil || *updated.RemoteID != "remote-task" {
+		t.Fatalf("updated RemoteID = %v, want remote-task", updated.RemoteID)
 	}
 	if err := clickupProvider.DeleteTask(context.Background(), task); err != nil {
 		t.Fatalf("DeleteTask() error = %v", err)
@@ -112,6 +115,58 @@ func TestProviderCreatesTaskInRemoteListAndMapsProviderID(t *testing.T) {
 	}
 	if gotPath != "/list/remote-list/task" || created.ProviderID != "clickup-work" || created.ListID != "local-list" {
 		t.Fatalf("path = %q, task = %#v", gotPath, created)
+	}
+}
+
+func TestProviderResolvesLocalSpaceIDBeforeFetchingLists(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/space/remote-space/list" && r.URL.Path != "/space/remote-space/folder" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Path == "/space/remote-space/list" {
+			_, _ = io.WriteString(w, `{"lists":[{"id":"remote-list","name":"Backend"}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"folders":[]}`)
+	}))
+	defer server.Close()
+	provider := New(NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
+		ProviderID:          "clickup-work",
+		RemoteSpaceResolver: func(domain.SpaceID) (string, error) { return "remote-space", nil },
+	})
+	lists, err := provider.FetchLists(context.Background(), "local-space")
+	if err != nil || len(lists) != 1 || lists[0].SpaceID != "local-space" {
+		t.Fatalf("FetchLists() = %#v, %v", lists, err)
+	}
+}
+
+func TestProviderFetchTaskUsesRemoteTaskCallAndLocalListIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/task/remote-task" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"remote-task","name":"Task","list":{"id":"remote-list"}}`)
+	}))
+	defer server.Close()
+
+	provider := New(NewClient(ClientConfig{
+		BaseURL:     server.URL,
+		HTTPClient:  server.Client(),
+		TokenSource: "token",
+	}), ProviderConfig{
+		ProviderID:         "clickup-work",
+		RemoteTaskResolver: func(domain.TaskID) (string, error) { return "remote-task", nil },
+		LocalListResolver:  func(string) (domain.ListID, error) { return "local-list", nil },
+	})
+
+	task, err := provider.FetchTask(context.Background(), "local-task")
+	if err != nil {
+		t.Fatalf("FetchTask() error = %v", err)
+	}
+	if task.ID != "local-task" || task.ListID != "local-list" || task.RemoteID == nil || *task.RemoteID != "remote-task" {
+		t.Fatalf("FetchTask() = %#v, want local task/list identities and remote task ID", task)
 	}
 }
 
@@ -172,6 +227,30 @@ func TestProviderUpdatePayloadClearsDescriptionAndResolvesParent(t *testing.T) {
 		ParentTaskID: &parentID,
 		Title:        "updated",
 		Status:       "open",
+	})
+	if err != nil {
+		t.Fatalf("UpdateTask() error = %v", err)
+	}
+}
+
+func TestProviderUpdatePayloadClearsParentWithNull(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode update payload: %v", err)
+		}
+		if value, ok := payload["parent"]; !ok || value != nil {
+			t.Errorf("parent payload = %#v, want explicit null", payload["parent"])
+		}
+		_, _ = io.WriteString(w, `{"id":"remote-task","name":"updated","status":{"status":"open"}}`)
+	}))
+	defer server.Close()
+	provider := New(NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
+		ProviderID:         "clickup-work",
+		RemoteListResolver: func(domain.ListID) (string, error) { return "remote-list", nil },
+	})
+	_, err := provider.UpdateTask(context.Background(), domain.Task{
+		ProviderID: "clickup-work", ListID: "local-list", RemoteID: stringPointer("remote-task"), Title: "updated",
 	})
 	if err != nil {
 		t.Fatalf("UpdateTask() error = %v", err)

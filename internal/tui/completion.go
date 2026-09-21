@@ -13,11 +13,15 @@ var commandNames = []string{
 	"ungroup",
 	"refresh",
 	"task",
+	"space",
+	"list",
 	"quit",
 	"help",
 }
 
 var taskCommandNames = []string{"create", "edit", "complete", "delete"}
+
+var hierarchyCommandNames = []string{"create", "new"}
 
 var groupNames = []string{"status", "assignee", "tasks", "none"}
 
@@ -42,6 +46,10 @@ func (m Model) commandCompletion() (prefix string, candidates []string, start, e
 	case "task":
 		if len(before) == 1 {
 			candidates = matchingCompletions(taskCommandNames, fragment)
+		}
+	case "space", "list":
+		if len(before) == 1 {
+			candidates = matchingCompletions(hierarchyCommandNames, fragment)
 		}
 	case "group", "groupby":
 		if len(before) == 1 || (len(before) == 2 && normalize(before[1]) == "by") {
@@ -138,7 +146,7 @@ func (m Model) commandCompletionLine(width int) string {
 	for index := start; index < end; index++ {
 		candidate := candidates[index]
 		if index == m.UI.CommandCompletionIndex {
-			parts = append(parts, candidate)
+			parts = append(parts, "["+candidate+"]")
 		} else {
 			parts = append(parts, candidate)
 		}

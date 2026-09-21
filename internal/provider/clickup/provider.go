@@ -26,21 +26,23 @@ var (
 // ProviderConfig binds a ClickUp client to one provider instance. ProviderID
 // identifies the account/configuration instance, not merely the ClickUp type.
 type ProviderConfig struct {
-	ProviderID         domain.ProviderID
-	ID                 domain.ProviderID
-	Client             *Client
-	BaseURL            string
-	HTTPClient         HTTPDoer
-	TokenSource        any
-	Timeout            time.Duration
-	MaxBodyBytes       int64
-	MaxPages           int
-	Mapper             *Mapper
-	TeamID             string
-	ParentResolver     any
-	ParentIDs          map[string]domain.TaskID
-	RemoteTaskResolver any
-	RemoteListResolver any
+	ProviderID          domain.ProviderID
+	ID                  domain.ProviderID
+	Client              *Client
+	BaseURL             string
+	HTTPClient          HTTPDoer
+	TokenSource         any
+	Timeout             time.Duration
+	MaxBodyBytes        int64
+	MaxPages            int
+	Mapper              *Mapper
+	TeamID              string
+	ParentResolver      any
+	ParentIDs           map[string]domain.TaskID
+	RemoteTaskResolver  any
+	RemoteListResolver  any
+	LocalListResolver   any
+	RemoteSpaceResolver any
 }
 
 // Config is the provider-level configuration used during registration.
@@ -51,11 +53,13 @@ type ProviderOptions = ProviderConfig
 
 // Provider adapts ClickUp to the common provider contract.
 type Provider struct {
-	client             *Client
-	mapper             Mapper
-	id                 domain.ProviderID
-	remoteTaskResolver any
-	remoteListResolver any
+	client              *Client
+	mapper              Mapper
+	id                  domain.ProviderID
+	remoteTaskResolver  any
+	remoteListResolver  any
+	localListResolver   any
+	remoteSpaceResolver any
 }
 
 // New constructs a provider from a client, provider identity, or
@@ -161,11 +165,13 @@ func newProvider(config ProviderConfig) *Provider {
 	}
 
 	return &Provider{
-		client:             config.Client,
-		mapper:             *NewMapper(mapperConfig),
-		id:                 config.ProviderID,
-		remoteTaskResolver: config.RemoteTaskResolver,
-		remoteListResolver: config.RemoteListResolver,
+		client:              config.Client,
+		mapper:              *NewMapper(mapperConfig),
+		id:                  config.ProviderID,
+		remoteTaskResolver:  config.RemoteTaskResolver,
+		remoteListResolver:  config.RemoteListResolver,
+		localListResolver:   config.LocalListResolver,
+		remoteSpaceResolver: config.RemoteSpaceResolver,
 	}
 }
 
@@ -227,7 +233,11 @@ func (p *Provider) FetchLists(ctx context.Context, spaceID domain.SpaceID) ([]do
 	if err := p.ensureReady(); err != nil {
 		return nil, err
 	}
-	lists, err := p.client.GetLists(ctx, string(spaceID))
+	remoteSpaceID, err := p.resolveSpaceRemoteID(ctx, spaceID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve ClickUp space %s: %w", spaceID, err)
+	}
+	lists, err := p.client.GetLists(ctx, remoteSpaceID)
 	if err != nil {
 		return nil, fmt.Errorf("fetch ClickUp lists for space %s: %w", spaceID, err)
 	}
@@ -261,8 +271,60 @@ func (p *Provider) FetchTask(ctx context.Context, taskID domain.TaskID) (domain.
 	if err != nil {
 		return domain.Task{}, fmt.Errorf("fetch ClickUp task %s: %w", remoteTaskID, err)
 	}
-	listID := domain.ListID(task.List.ID.String())
-	return p.mapper.MapTaskContext(ctx, task, listID), nil
+	listID, err := p.resolveListLocalID(ctx, task.List.ID.String())
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("resolve ClickUp list %s: %w", task.List.ID, err)
+	}
+	result := p.mapper.MapTaskContext(ctx, task, listID)
+	result.ID = taskID
+	return result, nil
+}
+
+func (p *Provider) resolveListLocalID(ctx context.Context, remoteID string) (domain.ListID, error) {
+	remoteID = strings.TrimSpace(remoteID)
+	if remoteID == "" {
+		return "", errors.New("ClickUp task response has no list ID")
+	}
+	if p.localListResolver == nil {
+		return domain.ListID(remoteID), nil
+	}
+	var listID domain.ListID
+	var err error
+	switch resolver := p.localListResolver.(type) {
+	case func(context.Context, string) (domain.ListID, error):
+		listID, err = resolver(ctx, remoteID)
+	case func(string) (domain.ListID, error):
+		listID, err = resolver(remoteID)
+	case func(context.Context, string) (string, error):
+		var value string
+		value, err = resolver(ctx, remoteID)
+		listID = domain.ListID(value)
+	case func(string) (string, error):
+		var value string
+		value, err = resolver(remoteID)
+		listID = domain.ListID(value)
+	case func(string) domain.ListID:
+		listID = resolver(remoteID)
+	case func(string) string:
+		listID = domain.ListID(resolver(remoteID))
+	case interface {
+		ResolveListLocalID(context.Context, string) (domain.ListID, error)
+	}:
+		listID, err = resolver.ResolveListLocalID(ctx, remoteID)
+	case interface {
+		ResolveListLocalID(string) (domain.ListID, error)
+	}:
+		listID, err = resolver.ResolveListLocalID(remoteID)
+	default:
+		return "", fmt.Errorf("unsupported ClickUp local list resolver %T", p.localListResolver)
+	}
+	if err != nil {
+		return "", err
+	}
+	if listID = domain.ListID(strings.TrimSpace(string(listID))); listID == "" {
+		return "", errors.New("ClickUp local list resolver returned an empty ID")
+	}
+	return listID, nil
 }
 
 func (p *Provider) CreateTask(ctx context.Context, task domain.Task) (domain.Task, error) {
@@ -287,7 +349,11 @@ func (p *Provider) CreateTask(ctx context.Context, task domain.Task) (domain.Tas
 	if err != nil {
 		return domain.Task{}, fmt.Errorf("create ClickUp task in list %s: %w", remoteListID, err)
 	}
-	return p.mapper.MapTaskContext(ctx, created, listID), nil
+	result := p.mapper.MapTaskContext(ctx, created, listID)
+	if task.ID != "" {
+		result.ID = task.ID
+	}
+	return result, nil
 }
 
 func (p *Provider) UpdateTask(ctx context.Context, task domain.Task) (domain.Task, error) {
@@ -319,7 +385,9 @@ func (p *Provider) UpdateTask(ctx context.Context, task domain.Task) (domain.Tas
 			return domain.Task{}, fmt.Errorf("move ClickUp task %s to list %s: %w", remoteID, remoteListID, err)
 		}
 	}
-	return p.mapper.MapTaskContext(ctx, updated, domainListID(task)), nil
+	result := p.mapper.MapTaskContext(ctx, updated, domainListID(task))
+	result.ID = task.ID
+	return result, nil
 }
 
 func (p *Provider) DeleteTask(ctx context.Context, task domain.Task) error {
@@ -482,6 +550,44 @@ func (p *Provider) resolveListRemoteID(ctx context.Context, listID domain.ListID
 	remoteID = strings.TrimSpace(remoteID)
 	if strings.TrimSpace(remoteID) == "" {
 		return "", errors.New("ClickUp list resolver returned an empty remote ID")
+	}
+	return remoteID, nil
+}
+
+func (p *Provider) resolveSpaceRemoteID(ctx context.Context, spaceID domain.SpaceID) (string, error) {
+	if strings.TrimSpace(string(spaceID)) == "" {
+		return "", errors.New("ClickUp space ID is required")
+	}
+	if p.remoteSpaceResolver == nil {
+		return string(spaceID), nil
+	}
+	var remoteID string
+	var err error
+	switch resolver := p.remoteSpaceResolver.(type) {
+	case func(context.Context, domain.ProviderID, domain.SpaceID) (string, error):
+		remoteID, err = resolver(ctx, p.id, spaceID)
+	case func(domain.ProviderID, domain.SpaceID) (string, error):
+		remoteID, err = resolver(p.id, spaceID)
+	case func(context.Context, domain.SpaceID) (string, error):
+		remoteID, err = resolver(ctx, spaceID)
+	case func(context.Context, string) (string, error):
+		remoteID, err = resolver(ctx, string(spaceID))
+	case func(domain.SpaceID) (string, error):
+		remoteID, err = resolver(spaceID)
+	case func(string) (string, error):
+		remoteID, err = resolver(string(spaceID))
+	case func(domain.SpaceID) string:
+		remoteID = resolver(spaceID)
+	case func(string) string:
+		remoteID = resolver(string(spaceID))
+	default:
+		return "", fmt.Errorf("unsupported ClickUp space resolver %T", p.remoteSpaceResolver)
+	}
+	if err != nil {
+		return "", err
+	}
+	if remoteID = strings.TrimSpace(remoteID); remoteID == "" {
+		return "", errors.New("ClickUp space resolver returned an empty remote ID")
 	}
 	return remoteID, nil
 }

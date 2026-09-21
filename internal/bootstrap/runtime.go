@@ -134,7 +134,7 @@ func Build(ctx context.Context, options Options) (*Runtime, error) {
 	} else {
 		terminal = NewDefaultTerminal(options.Input, options.Output)
 	}
-	graph, err := buildFoundationGraph(ctx, cfg, terminal)
+	graph, err := buildFoundationGraph(ctx, cfg, terminal, logger)
 	if err != nil {
 		if logSink != nil {
 			_ = logSink.Close()
@@ -206,6 +206,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 	}
 	r.phase = runtimeStarting
 	r.mu.Unlock()
+	logContext(ctx, r.logger, slog.LevelInfo, "runtime start", "config_path", r.config.Logging.Path, "headless", r.config.UI.Headless)
 	if err := ctx.Err(); err != nil {
 		r.failStart()
 		return fmt.Errorf("start runtime: %w", err)
@@ -214,6 +215,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 		r.failStart()
 		return fmt.Errorf("initialize UI: %w", err)
 	}
+	logContext(ctx, r.logger, slog.LevelDebug, "ui initialized")
 	r.mu.Lock()
 	r.uiInitialized = true
 	r.mu.Unlock()
@@ -227,6 +229,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 		r.failStart()
 		return fmt.Errorf("load local cached view: %w", err)
 	}
+	logContext(ctx, r.logger, slog.LevelDebug, "local cache loaded")
 	r.ui.SetState(state)
 	if err := r.ui.Render(ctx, view); err != nil {
 		r.failStart()
@@ -236,6 +239,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 		r.failStart()
 		return fmt.Errorf("start sync workers: %w", err)
 	}
+	logContext(ctx, r.logger, slog.LevelInfo, "sync workers started")
 	r.mu.Lock()
 	r.syncStarted = true
 	r.phase = runtimeRunning
@@ -296,6 +300,7 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 	uiInitialized := r.uiInitialized
 	syncStarted := r.syncStarted
 	r.mu.Unlock()
+	logContext(ctx, r.logger, slog.LevelInfo, "runtime shutdown")
 
 	var shutdownErr error
 	r.ui.StopAccepting()
@@ -342,38 +347,6 @@ func (r *Runtime) Config() Config {
 		return Config{}
 	}
 	return r.config
-}
-
-// Repository returns the concrete repository when the default graph was built.
-func (r *Runtime) Repository() *Repository {
-	if r == nil {
-		return nil
-	}
-	return r.repo
-}
-
-// Providers returns the provider registry when the default graph was built.
-func (r *Runtime) Providers() *Registry {
-	if r == nil {
-		return nil
-	}
-	return r.registry
-}
-
-// Application returns the default local-first command handler.
-func (r *Runtime) Application() *Application {
-	if r == nil {
-		return nil
-	}
-	return r.app
-}
-
-// SyncEngine returns the default background synchronization engine.
-func (r *Runtime) SyncEngine() *SyncEngine {
-	if r == nil {
-		return nil
-	}
-	return r.engine
 }
 
 // TUI returns the default presentation model.

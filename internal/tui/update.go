@@ -134,10 +134,21 @@ func firstListIndex(nodes []TreeNode) int {
 func (m *Model) applySnapshot(data Snapshot) Model {
 	oldNode := m.UI.SelectedNode
 	oldTask := m.UI.SelectedTask
+	hadLists := len(m.Data.Lists) > 0
 	m.Data = cloneSnapshot(data)
 	m.UI.ExpandedNodes = cloneExpanded(m.UI.ExpandedNodes)
 	m.initializeExpansion()
 	m.reconcileSelection(oldNode, oldTask)
+	if !hadLists && len(m.Data.Lists) > 0 && oldNode.Kind == TreeNodeProvider {
+		for index, node := range m.TreeNodes() {
+			if node.Ref.Kind == TreeNodeList && node.Ref.ProviderID == oldNode.ProviderID {
+				m.UI.TreeCursor = index
+				m.UI.SelectedNode = node.Ref
+				m.selectTaskAt(0)
+				break
+			}
+		}
+	}
 	m.Status = Status{
 		Level: StatusInfo,
 		Text:  fmt.Sprintf("Loaded cached data: %d providers, %d tasks", len(m.Data.Providers), len(m.Data.Tasks)),
@@ -360,6 +371,10 @@ func (m Model) applyCommandResult(event CommandResultMsg) Model {
 
 func commandResultText(command AppCommand) string {
 	switch command.Kind {
+	case CommandCreateSpace:
+		return "Space created"
+	case CommandCreateList:
+		return "List created"
 	case CommandCreateTask:
 		return "Task created"
 	case CommandUpdateTask:
@@ -450,7 +465,7 @@ func (m Model) updateBrowse(key KeyMsg, action Action) (Model, Cmd) {
 	case ActionScrollRight:
 		m.scrollHorizontal(horizontalScrollStep)
 	case ActionSelect:
-		m.selectCurrent()
+		return m, m.selectCurrent()
 	case ActionExpandAll:
 		m.setAllExpanded(true)
 	case ActionCollapseAll:
@@ -726,35 +741,36 @@ func (m *Model) nextPanel() {
 	m.Status = Status{Level: StatusInfo, Text: "Focus: hierarchy"}
 }
 
-func (m *Model) selectCurrent() {
+func (m *Model) selectCurrent() Cmd {
 	if m.UI.Focus == PanelTasks {
 		if m.UI.TaskHeaderSelected {
 			m.toggleTaskGroup()
-			return
+			return nil
 		}
 		row, ok := m.selectedTask()
 		if !ok {
 			m.Status = Status{Level: StatusWarning, Text: "No task selected"}
-			return
+			return nil
 		}
 		m.UI.Mode = ModeDetail
 		m.UI.DetailOffset = 0
 		m.Status = Status{Level: StatusInfo, Text: "Opened task details: " + row.Task.Title}
-		return
+		return nil
 	}
 	node, ok := m.currentNode()
 	if !ok {
 		m.Status = Status{Level: StatusWarning, Text: "No hierarchy item selected"}
-		return
+		return nil
 	}
 	if node.Ref.Kind == TreeNodeList {
 		m.UI.Focus = PanelTasks
 		m.Status = Status{Level: StatusInfo, Text: "Opened " + node.Name}
-		return
+		return m.emit(AppCommand{Kind: CommandLoadCached, ProviderID: node.Ref.ProviderID, SpaceID: node.Ref.SpaceID, ListID: node.Ref.ListID})
 	}
 	m.UI.ExpandedNodes = cloneExpanded(m.UI.ExpandedNodes)
 	m.UI.ExpandedNodes[node.Ref] = !node.Expanded
 	m.Status = Status{Level: StatusInfo, Text: expansionText(node, !node.Expanded)}
+	return nil
 }
 
 func (m *Model) setAllExpanded(expanded bool) {
@@ -1104,6 +1120,10 @@ func (m Model) submitInput() (Model, Cmd) {
 		return m.submitPalette()
 	case ModeCreateTask:
 		return m.submitCreate()
+	case ModeCreateSpace:
+		return m.submitHierarchyCreate(CommandCreateSpace, m.UI.Input)
+	case ModeCreateList:
+		return m.submitHierarchyCreate(CommandCreateList, m.UI.Input)
 	case ModeEditTask:
 		return m.submitEdit()
 	case ModeConfirm:
@@ -1191,13 +1211,22 @@ func (m Model) submitPalette() (Model, Cmd) {
 		return m.applyGrouping(command.GroupBy, command)
 	case CommandCreateTask:
 		if command.Title == "" {
-			m.UI.Mode = ModeCreateTask
+			m.UI.Mode = modeForCreation(command.Kind)
 			m.UI.Input = ""
 			m.UI.InputCursor = 0
 			m.Status = Status{Level: StatusInfo, Text: "Enter a title for the new task"}
 			return m, nil
 		}
 		return m.submitCreateTitle(command.Title, command)
+	case CommandCreateSpace, CommandCreateList:
+		if command.Title == "" {
+			m.UI.Mode = modeForCreation(command.Kind)
+			m.UI.Input = ""
+			m.UI.InputCursor = 0
+			m.Status = Status{Level: StatusInfo, Text: creationPrompt(command.Kind)}
+			return m, nil
+		}
+		return m.submitHierarchyCreate(command.Kind, command.Title)
 	case CommandUpdateTask:
 		if command.Title == "" {
 			if !m.beginEdit() {
@@ -1233,6 +1262,46 @@ func (m Model) submitPalette() (Model, Cmd) {
 
 func (m Model) submitCreate() (Model, Cmd) {
 	return m.submitCreateTitle(strings.TrimSpace(m.UI.Input), AppCommand{Kind: CommandCreateTask, Title: strings.TrimSpace(m.UI.Input)})
+}
+
+func creationPrompt(kind CommandKind) string {
+	if kind == CommandCreateSpace {
+		return "Enter a name for the new space"
+	}
+	return "Enter a name for the new list"
+}
+
+func modeForCreation(kind CommandKind) Mode {
+	if kind == CommandCreateSpace {
+		return ModeCreateSpace
+	}
+	return ModeCreateList
+}
+
+func (m Model) submitHierarchyCreate(kind CommandKind, title string) (Model, Cmd) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		m.Status = Status{Level: StatusError, Text: "Name cannot be empty"}
+		return m, nil
+	}
+	command := AppCommand{Kind: kind, Title: title, ProviderID: m.UI.SelectedNode.ProviderID}
+	if command.ProviderID == "" {
+		m.Status = Status{Level: StatusError, Text: "Select a provider before creating hierarchy"}
+		return m, nil
+	}
+	if kind == CommandCreateList {
+		space, ok := m.selectedSpace()
+		if !ok {
+			m.Status = Status{Level: StatusError, Text: "Select a space before creating a list"}
+			return m, nil
+		}
+		command.SpaceID = space.ID
+	}
+	m.UI.Mode = ModeBrowse
+	m.UI.Input = ""
+	m.UI.InputCursor = 0
+	m.Status = Status{Level: StatusInfo, Text: "Hierarchy creation requested locally"}
+	return m, m.emit(command)
 }
 
 func (m Model) submitCreateTitle(title string, command AppCommand) (Model, Cmd) {
@@ -1390,6 +1459,29 @@ func (m Model) selectedList() (List, bool) {
 		}
 	}
 	return List{}, false
+}
+
+func (m Model) selectedSpace() (Space, bool) {
+	ref := m.UI.SelectedNode
+	for _, space := range m.Data.Spaces {
+		if space.ProviderID != ref.ProviderID {
+			continue
+		}
+		if ref.Kind == TreeNodeSpace && space.ID == ref.SpaceID {
+			return space, true
+		}
+		if ref.Kind == TreeNodeList && space.ID == ref.SpaceID {
+			return space, true
+		}
+	}
+	if ref.Kind == TreeNodeProvider {
+		for _, space := range m.Data.Spaces {
+			if space.ProviderID == ref.ProviderID {
+				return space, true
+			}
+		}
+	}
+	return Space{}, false
 }
 
 func taskProviderLabel(row TaskRow) string {

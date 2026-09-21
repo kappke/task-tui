@@ -2,6 +2,9 @@ package clickup
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -80,7 +83,7 @@ func NewMapperForProvider(providerID domain.ProviderID) *Mapper {
 func (m Mapper) MapSpace(input wireSpace) domain.Space {
 	remoteID := input.ID.String()
 	return domain.Space{
-		ID:         domain.SpaceID(remoteID),
+		ID:         domain.SpaceID(newLocalID("space")),
 		ProviderID: m.ProviderID,
 		RemoteID:   stringPointer(remoteID),
 		Name:       input.Name,
@@ -91,7 +94,7 @@ func (m Mapper) MapSpace(input wireSpace) domain.Space {
 func (m Mapper) MapList(input wireList, spaceID domain.SpaceID) domain.List {
 	remoteID := input.ID.String()
 	return domain.List{
-		ID:         domain.ListID(remoteID),
+		ID:         domain.ListID(newLocalID("list")),
 		ProviderID: m.ProviderID,
 		SpaceID:    spaceID,
 		RemoteID:   stringPointer(remoteID),
@@ -110,7 +113,7 @@ func (m Mapper) MapTask(input wireTask, listID domain.ListID) domain.Task {
 func (m Mapper) MapTaskContext(ctx context.Context, input wireTask, listID domain.ListID) domain.Task {
 	remoteID := input.ID.String()
 	output := domain.Task{
-		ID:           domain.TaskID(remoteID),
+		ID:           domain.TaskID(newLocalID("task")),
 		ProviderID:   m.ProviderID,
 		ListID:       listID,
 		RemoteID:     stringPointer(remoteID),
@@ -171,10 +174,38 @@ func (m Mapper) MapTasks(inputs []wireTask, listID domain.ListID) []domain.Task 
 
 func (m Mapper) MapTasksContext(ctx context.Context, inputs []wireTask, listID domain.ListID) []domain.Task {
 	output := make([]domain.Task, 0, len(inputs))
+	parentIDs := make(map[string]domain.TaskID, len(inputs))
 	for _, input := range inputs {
-		output = append(output, m.MapTaskContext(ctx, input, listID))
+		if remoteID := strings.TrimSpace(input.ID.String()); remoteID != "" {
+			parentIDs[remoteID] = domain.TaskID(newLocalID("task"))
+		}
+	}
+	mapper := m
+	mapper.ParentIDs = make(map[string]domain.TaskID, len(m.ParentIDs)+len(parentIDs))
+	for remoteID, localID := range m.ParentIDs {
+		mapper.ParentIDs[remoteID] = localID
+	}
+	for remoteID, localID := range parentIDs {
+		mapper.ParentIDs[remoteID] = localID
+	}
+	for _, input := range inputs {
+		task := mapper.MapTaskContext(ctx, input, listID)
+		if localID, ok := parentIDs[input.ID.String()]; ok {
+			task.ID = localID
+		}
+		output = append(output, task)
 	}
 	return output
+}
+
+func newLocalID(kind string) string {
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err == nil {
+		return fmt.Sprintf("clickup-%s-%s", kind, hex.EncodeToString(bytes[:]))
+	}
+	// crypto/rand failure is exceptionally unlikely; the remote ID remains
+	// isolated in RemoteID and this fallback still avoids using it as a key.
+	return fmt.Sprintf("clickup-%s-%d", kind, time.Now().UnixNano())
 }
 
 func (m Mapper) resolveParent(ctx context.Context, remoteID string) (domain.TaskID, bool) {

@@ -237,7 +237,7 @@ func (m *CharmModel) inputMode() bool {
 		return false
 	}
 	switch m.core.UI.Mode {
-	case ModeSearch, ModeFilter, ModeCommand, ModeCreateTask, ModeEditTask:
+	case ModeSearch, ModeFilter, ModeCommand, ModeCreateSpace, ModeCreateList, ModeCreateTask, ModeEditTask:
 		return true
 	default:
 		return false
@@ -537,6 +537,12 @@ func (m *CharmModel) charmModeLine(width int) string {
 		suffix = " tab/shift+tab complete | enter run | esc cancel"
 	case ModeCreateTask:
 		prefix = "NEW TASK"
+		suffix = " enter submit | esc cancel"
+	case ModeCreateSpace:
+		prefix = "NEW SPACE"
+		suffix = " enter submit | esc cancel"
+	case ModeCreateList:
+		prefix = "NEW LIST"
 		suffix = " enter submit | esc cancel"
 	case ModeEditTask:
 		prefix = "EDIT TASK"

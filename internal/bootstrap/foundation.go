@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,13 +21,13 @@ import (
 	providerpkg "github.com/kappke/task-tui/internal/provider"
 	clickuppkg "github.com/kappke/task-tui/internal/provider/clickup"
 	localpkg "github.com/kappke/task-tui/internal/provider/local"
-	repositorypkg "github.com/kappke/task-tui/internal/repository"
 	"github.com/kappke/task-tui/internal/storage/sqlite"
 	foundationsync "github.com/kappke/task-tui/internal/sync"
 	foundationtui "github.com/kappke/task-tui/internal/tui"
 )
 
 const foundationUIStateKey = "main"
+const foundationTaskPageSize = 200
 
 // foundationDataStore adapts the authoritative SQLite store to the small
 // lifecycle persistence contract. All snapshots are assembled from local rows.
@@ -63,6 +64,10 @@ func (s *foundationDataStore) Snapshot(ctx context.Context) (View, error) {
 	spaces := make([]domain.Space, 0)
 	lists := make([]domain.List, 0)
 	tasks := make([]domain.Task, 0)
+	uiState, err := s.LoadUIState(ctx)
+	if err != nil {
+		return View{}, err
+	}
 	for _, provider := range providers {
 		providerSpaces, err := s.store.ListSpaces(ctx, provider.ID)
 		if err != nil {
@@ -74,9 +79,14 @@ func (s *foundationDataStore) Snapshot(ctx context.Context) (View, error) {
 			return View{}, fmt.Errorf("list lists for provider %s: %w", provider.ID, err)
 		}
 		lists = append(lists, providerLists...)
-		providerTasks, err := s.store.ListTasksByProvider(ctx, provider.ID)
+		var providerTasks []domain.Task
+		if uiState.ListID != "" && uiState.ProviderID == provider.ID.String() {
+			providerTasks, err = s.store.ListTasksByListPage(ctx, provider.ID, domain.ListID(uiState.ListID), foundationTaskPageSize, 0)
+		} else if uiState.ListID == "" {
+			providerTasks, err = s.store.ListTasksByProviderPage(ctx, provider.ID, foundationTaskPageSize, 0)
+		}
 		if err != nil {
-			return View{}, fmt.Errorf("list tasks for provider %s: %w", provider.ID, err)
+			return View{}, fmt.Errorf("list task page for provider %s: %w", provider.ID, err)
 		}
 		tasks = append(tasks, providerTasks...)
 	}
@@ -297,41 +307,119 @@ func (p *cachedProvider) pull(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	seenSpaces := make(map[string]struct{}, len(spaces))
 	for _, space := range spaces {
 		if space.ProviderID != p.ID() {
 			return fmt.Errorf("%w: space %s belongs to %s, provider is %s", domain.ErrProviderMismatch, space.ID, space.ProviderID, p.ID())
 		}
-		storedSpace, err := p.upsertSpace(ctx, space)
+		storedSpace, conflict, err := p.reconcileSpace(ctx, space)
 		if err != nil {
 			return fmt.Errorf("store space %s: %w", space.ID, err)
 		}
-		lists, err := p.Provider.FetchLists(ctx, space.ID)
-		if err != nil {
-			return fmt.Errorf("fetch lists for space %s: %w", space.ID, err)
+		if space.RemoteID != nil {
+			seenSpaces[*space.RemoteID] = struct{}{}
 		}
+		if conflict {
+			continue
+		}
+		lists, err := p.Provider.FetchLists(ctx, storedSpace.ID)
+		if err != nil {
+			return fmt.Errorf("fetch lists for space %s: %w", storedSpace.ID, err)
+		}
+		seenLists := make(map[string]struct{}, len(lists))
 		for _, list := range lists {
-			if list.ProviderID != p.ID() || list.SpaceID != space.ID {
+			if list.ProviderID != p.ID() || list.SpaceID != storedSpace.ID {
 				return fmt.Errorf("%w: list %s has invalid provider or parent", domain.ErrProviderMismatch, list.ID)
 			}
 			list.SpaceID = storedSpace.ID
-			storedList, err := p.upsertList(ctx, list)
+			storedList, conflict, err := p.reconcileList(ctx, list)
 			if err != nil {
 				return fmt.Errorf("store list %s: %w", list.ID, err)
 			}
-			tasks, err := p.Provider.FetchTasks(ctx, list.ID)
-			if err != nil {
-				return fmt.Errorf("fetch tasks for list %s: %w", list.ID, err)
+			if list.RemoteID != nil {
+				seenLists[*list.RemoteID] = struct{}{}
 			}
-			for _, task := range tasks {
-				if task.ProviderID != p.ID() || task.ListID != list.ID {
-					return fmt.Errorf("%w: task %s has invalid provider or parent", domain.ErrProviderMismatch, task.ID)
-				}
-				task.ListID = storedList.ID
-				if _, err := p.upsertTask(ctx, task); err != nil {
-					return fmt.Errorf("store task %s: %w", task.ID, err)
-				}
+			if conflict {
+				continue
+			}
+			// FetchTasks accepts the local identity at the provider boundary. A
+			// ClickUp provider resolves it to the remote list ID before calling
+			// the API; the pre-upsert mapper ID is not a local identity.
+			tasks, err := p.Provider.FetchTasks(ctx, storedList.ID)
+			if err != nil {
+				return fmt.Errorf("fetch tasks for list %s: %w", storedList.ID, err)
+			}
+			seenTasks := make(map[string]struct{}, len(tasks))
+			if err := p.reconcileTasks(ctx, storedList.ID, tasks, seenTasks); err != nil {
+				return err
+			}
+			if err := p.reconcileMissingTasks(ctx, storedList.ID, seenTasks); err != nil {
+				return err
 			}
 		}
+		if err := p.reconcileMissingLists(ctx, storedSpace.ID, seenLists); err != nil {
+			return err
+		}
+	}
+	if err := p.reconcileMissingSpaces(ctx, seenSpaces); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *cachedProvider) reconcileTasks(ctx context.Context, listID domain.ListID, tasks []domain.Task, seen map[string]struct{}) error {
+	// ClickUp's mapper may use batch-local IDs for out-of-order parents. Resolve
+	// those placeholders to remote identities before saving either task so a
+	// later import cannot leave a child pointing at an old mapper ID.
+	remoteByMappedID := make(map[domain.TaskID]string, len(tasks))
+	for _, task := range tasks {
+		if task.RemoteID != nil {
+			remoteByMappedID[task.ID] = *task.RemoteID
+		}
+	}
+	pending := append([]domain.Task(nil), tasks...)
+	for len(pending) > 0 {
+		progress := false
+		next := pending[:0]
+		for _, task := range pending {
+			if task.ProviderID != p.ID() || task.ListID != listID {
+				return fmt.Errorf("%w: task %s has invalid provider or parent", domain.ErrProviderMismatch, task.ID)
+			}
+			task.ListID = listID
+			if task.ParentTaskID != nil {
+				parentRemoteID := remoteByMappedID[*task.ParentTaskID]
+				if parentRemoteID != "" {
+					parent, err := p.store.GetTaskByRemoteID(ctx, p.ID(), parentRemoteID)
+					if errors.Is(err, domain.ErrNotFound) {
+						next = append(next, task)
+						continue
+					}
+					if err != nil {
+						return fmt.Errorf("resolve parent task %s: %w", parentRemoteID, err)
+					}
+					task.ParentTaskID = &parent.ID
+				}
+			}
+			if task.RemoteID != nil {
+				if existing, lookupErr := p.store.GetTaskByRemoteID(ctx, p.ID(), *task.RemoteID); lookupErr == nil && hasLocalChanges(existing.SyncState) {
+					progress = true
+					seen[*task.RemoteID] = struct{}{}
+					continue
+				}
+			}
+			_, _, err := p.reconcileTask(ctx, task)
+			if err != nil {
+				return fmt.Errorf("store task %s: %w", task.ID, err)
+			}
+			if task.RemoteID != nil {
+				seen[*task.RemoteID] = struct{}{}
+			}
+			progress = true
+		}
+		if !progress {
+			return fmt.Errorf("reconcile tasks: unresolved parent dependency")
+		}
+		pending = next
 	}
 	return nil
 }
@@ -355,6 +443,7 @@ func (p *cachedProvider) UpdateTask(ctx context.Context, task domain.Task) (doma
 	if err := p.check(ctx); err != nil {
 		return domain.Task{}, err
 	}
+	task = p.persistedTaskIdentity(ctx, task)
 	updated, err := p.Provider.UpdateTask(ctx, task)
 	if err != nil {
 		return domain.Task{}, err
@@ -370,7 +459,19 @@ func (p *cachedProvider) DeleteTask(ctx context.Context, task domain.Task) error
 	if err := p.check(ctx); err != nil {
 		return err
 	}
+	task = p.persistedTaskIdentity(ctx, task)
 	return p.Provider.DeleteTask(ctx, task)
+}
+
+func (p *cachedProvider) persistedTaskIdentity(ctx context.Context, task domain.Task) domain.Task {
+	if task.RemoteID != nil || task.ID.IsZero() {
+		return task
+	}
+	persisted, err := p.store.GetTaskByProvider(ctx, p.ID(), task.ID)
+	if err == nil && persisted.RemoteID != nil {
+		task.RemoteID = cloneString(persisted.RemoteID)
+	}
+	return task
 }
 
 func (p *cachedProvider) check(ctx context.Context) error {
@@ -426,6 +527,295 @@ func (p *cachedProvider) upsertTask(ctx context.Context, task domain.Task) (doma
 		}
 	}
 	return p.store.UpsertTask(ctx, task)
+}
+
+func (p *cachedProvider) reconcileSpace(ctx context.Context, remote domain.Space) (domain.Space, bool, error) {
+	value, conflict, err := reconcileEntity(ctx, p, remote, remote.RemoteID, domain.EntityTypeSpace, func() (any, error) {
+		return p.store.GetSpaceByRemoteID(ctx, p.ID(), *remote.RemoteID)
+	}, func(existing any, merged map[string]any, state domain.SyncState) (any, error) {
+		local := existing.(domain.Space)
+		mapped, err := mapEntity(merged, remote)
+		if err != nil {
+			return domain.Space{}, err
+		}
+		value := mapped.(domain.Space)
+		value.ID, value.ProviderID, value.SyncState = local.ID, p.ID(), state
+		return p.store.UpsertSpace(ctx, value)
+	}, func(value any) domain.SyncBase { return value.(domain.Space).SyncBase() })
+	return value.(domain.Space), conflict, err
+}
+
+func (p *cachedProvider) reconcileList(ctx context.Context, remote domain.List) (domain.List, bool, error) {
+	value, conflict, err := reconcileEntity(ctx, p, remote, remote.RemoteID, domain.EntityTypeList, func() (any, error) {
+		return p.store.GetListByRemoteID(ctx, p.ID(), *remote.RemoteID)
+	}, func(existing any, merged map[string]any, state domain.SyncState) (any, error) {
+		local := existing.(domain.List)
+		mapped, err := mapEntity(merged, remote)
+		if err != nil {
+			return domain.List{}, err
+		}
+		value := mapped.(domain.List)
+		value.ID, value.ProviderID, value.SpaceID, value.SyncState = local.ID, p.ID(), local.SpaceID, state
+		return p.store.UpsertList(ctx, value)
+	}, func(value any) domain.SyncBase { return value.(domain.List).SyncBase() })
+	return value.(domain.List), conflict, err
+}
+
+func (p *cachedProvider) reconcileTask(ctx context.Context, remote domain.Task) (domain.Task, bool, error) {
+	value, conflict, err := reconcileEntity(ctx, p, remote, remote.RemoteID, domain.EntityTypeTask, func() (any, error) {
+		return p.store.GetTaskByRemoteID(ctx, p.ID(), *remote.RemoteID)
+	}, func(existing any, merged map[string]any, state domain.SyncState) (any, error) {
+		local := existing.(domain.Task)
+		mapped, err := mapEntity(merged, remote)
+		if err != nil {
+			return domain.Task{}, err
+		}
+		value := mapped.(domain.Task)
+		value.ID, value.ProviderID, value.ListID, value.SyncState = local.ID, p.ID(), local.ListID, state
+		return p.store.UpsertTask(ctx, value)
+	}, func(value any) domain.SyncBase { return value.(domain.Task).SyncBase() })
+	return value.(domain.Task), conflict, err
+}
+
+// reconcileEntity is deliberately local to the bootstrap pull boundary. The
+// provider returns complete snapshots, while pending local mutations remain
+// authoritative until their queue operation succeeds.
+func reconcileEntity(ctx context.Context, p *cachedProvider, remote any, remoteID *string, entityType domain.EntityType,
+	lookup func() (any, error), save func(any, map[string]any, domain.SyncState) (any, error), baseOf func(any) domain.SyncBase) (any, bool, error) {
+	if remoteID == nil || strings.TrimSpace(*remoteID) == "" {
+		return nil, false, errors.New("pull entity has no remote ID")
+	}
+	existing, err := lookup()
+	if errors.Is(err, domain.ErrNotFound) {
+		value, err := save(remote, entityFields(remote), domain.SyncStateSynced)
+		if err != nil {
+			return nil, false, err
+		}
+		if err := p.savePullBase(ctx, baseOf(value), value); err != nil {
+			return nil, false, err
+		}
+		return value, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	localFields := entityFields(existing)
+	remoteFields := entityFields(remote)
+	baseFields := make(map[string]any)
+	entityID := entityID(existing)
+	base, baseErr := p.store.GetBase(ctx, p.ID(), entityType, entityID)
+	if baseErr == nil && len(base.Payload) > 0 {
+		if err := json.Unmarshal(base.Payload, &baseFields); err != nil {
+			return nil, false, fmt.Errorf("decode sync base for %s/%s: %w", entityType, entityID, err)
+		}
+		if baseFields == nil {
+			return nil, false, fmt.Errorf("decode sync base for %s/%s: expected object", entityType, entityID)
+		}
+	} else if baseErr != nil && !errors.Is(baseErr, domain.ErrNotFound) {
+		return nil, false, fmt.Errorf("load sync base for %s/%s: %w", entityType, entityID, baseErr)
+	}
+	if entityDeleted(existing) {
+		return existing, false, nil
+	}
+	result, err := foundationsync.MergeFields(foundationsync.MergeInput{
+		ProviderID: foundationsync.ProviderID(p.ID()), EntityType: foundationsync.EntityType(entityType), EntityID: entityID,
+		Base: baseFields, Local: localFields, Remote: remoteFields,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	state := domain.SyncStateSynced
+	if entitySyncState(existing) != domain.SyncStateSynced {
+		state = entitySyncState(existing)
+	}
+	if len(result.Conflicts) > 0 {
+		state = domain.SyncStateConflict
+	}
+	mergedFields := result.Fields
+	if hasLocalChanges(entitySyncState(existing)) {
+		// Do not let a provider snapshot replace the retained local object while
+		// a queued local mutation is outstanding. Remote changes are fetched on
+		// the next pull after the push resolves the pending state.
+		mergedFields = localFields
+	}
+	value, err := save(existing, mergedFields, state)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(result.Conflicts) > 0 {
+		for _, conflict := range result.Conflicts {
+			if err := p.store.UpdateConflict(ctx, domain.Conflict{ID: domain.ConflictID(conflict.ID), ProviderID: p.ID(), EntityType: entityType, EntityID: conflict.EntityID, Fields: []domain.FieldConflict{{Field: conflict.Field, BaseValue: jsonValue(conflict.BaseValue), LocalValue: jsonValue(conflict.LocalValue), RemoteValue: jsonValue(conflict.RemoteValue)}}, CreatedAt: conflict.CreatedAt, UpdatedAt: conflict.CreatedAt}); err != nil {
+				return nil, true, err
+			}
+		}
+		return value, true, nil
+	}
+	if state == domain.SyncStateSynced {
+		if err := p.savePullBase(ctx, baseOf(value), value); err != nil {
+			return nil, false, err
+		}
+	}
+	return value, false, nil
+}
+
+func (p *cachedProvider) savePullBase(ctx context.Context, base domain.SyncBase, value any) error {
+	payload, err := json.Marshal(entityFields(value))
+	if err != nil {
+		return err
+	}
+	base.Payload = payload
+	base.SyncState = domain.SyncStateSynced
+	base.CapturedAt = time.Now().UTC()
+	base.UpdatedAt = base.CapturedAt
+	return p.store.SaveBase(ctx, base)
+}
+
+func entityFields(value any) map[string]any {
+	payload, _ := json.Marshal(value)
+	fields := make(map[string]any)
+	_ = json.Unmarshal(payload, &fields)
+	for _, key := range []string{"id", "provider_id", "space_id", "list_id", "created_at", "updated_at", "sync_state", "remote_updated_at", "is_deleted", "deleted_at"} {
+		delete(fields, key)
+	}
+	return fields
+}
+
+func entityDeleted(value any) bool {
+	switch value := value.(type) {
+	case domain.Space:
+		return value.IsDeleted
+	case domain.List:
+		return value.IsDeleted
+	case domain.Task:
+		return value.IsDeleted
+	default:
+		return false
+	}
+}
+
+func mapEntity(fields map[string]any, template any) (any, error) {
+	payload, err := json.Marshal(fields)
+	if err != nil {
+		return nil, err
+	}
+	switch template.(type) {
+	case domain.Space:
+		var value domain.Space
+		if err := json.Unmarshal(payload, &value); err != nil {
+			return nil, err
+		}
+		return value, nil
+	case domain.List:
+		var value domain.List
+		if err := json.Unmarshal(payload, &value); err != nil {
+			return nil, err
+		}
+		return value, nil
+	case domain.Task:
+		var value domain.Task
+		if err := json.Unmarshal(payload, &value); err != nil {
+			return nil, err
+		}
+		return value, nil
+	default:
+		return nil, fmt.Errorf("unsupported pull entity template %T", template)
+	}
+}
+
+func entityID(value any) string {
+	switch value := value.(type) {
+	case domain.Space:
+		return value.ID.String()
+	case domain.List:
+		return value.ID.String()
+	case domain.Task:
+		return value.ID.String()
+	default:
+		return ""
+	}
+}
+
+func entitySyncState(value any) domain.SyncState {
+	switch value := value.(type) {
+	case domain.Space:
+		return value.SyncState
+	case domain.List:
+		return value.SyncState
+	case domain.Task:
+		return value.SyncState
+	default:
+		return domain.SyncStateLocal
+	}
+}
+
+func jsonValue(value any) []byte {
+	if value == nil {
+		return nil
+	}
+	payload, _ := json.Marshal(value)
+	return payload
+}
+
+func (p *cachedProvider) reconcileMissingSpaces(ctx context.Context, seen map[string]struct{}) error {
+	spaces, err := p.store.ListSpaces(ctx, p.ID())
+	if err != nil {
+		return fmt.Errorf("list cached spaces for deletion reconciliation: %w", err)
+	}
+	for _, space := range spaces {
+		if space.RemoteID == nil || hasRemote(seen, *space.RemoteID) || hasLocalChanges(space.SyncState) {
+			continue
+		}
+		if err := p.store.DeleteSpace(ctx, space.ID); err != nil {
+			return fmt.Errorf("tombstone missing space %s: %w", space.ID, err)
+		}
+	}
+	return nil
+}
+
+func (p *cachedProvider) reconcileMissingLists(ctx context.Context, spaceID domain.SpaceID, seen map[string]struct{}) error {
+	lists, err := p.store.ListBySpace(ctx, spaceID)
+	if err != nil {
+		return fmt.Errorf("list cached lists for deletion reconciliation: %w", err)
+	}
+	for _, list := range lists {
+		if list.RemoteID == nil || hasRemote(seen, *list.RemoteID) || hasLocalChanges(list.SyncState) {
+			continue
+		}
+		if err := p.store.DeleteList(ctx, list.ID); err != nil {
+			return fmt.Errorf("tombstone missing list %s: %w", list.ID, err)
+		}
+	}
+	return nil
+}
+
+func (p *cachedProvider) reconcileMissingTasks(ctx context.Context, listID domain.ListID, seen map[string]struct{}) error {
+	tasks, err := p.store.ListByList(ctx, listID)
+	if err != nil {
+		return fmt.Errorf("list cached tasks for deletion reconciliation: %w", err)
+	}
+	for _, task := range tasks {
+		if task.RemoteID == nil || hasRemote(seen, *task.RemoteID) || hasLocalChanges(task.SyncState) {
+			continue
+		}
+		if err := p.store.DeleteTask(ctx, task.ID); err != nil {
+			return fmt.Errorf("tombstone missing task %s: %w", task.ID, err)
+		}
+	}
+	return nil
+}
+
+func hasRemote(seen map[string]struct{}, remoteID string) bool {
+	_, ok := seen[remoteID]
+	return ok
+}
+
+func hasLocalChanges(state domain.SyncState) bool {
+	switch state {
+	case domain.SyncStatePending, domain.SyncStateSyncing, domain.SyncStateFailed, domain.SyncStateConflict:
+		return true
+	default:
+		return false
+	}
 }
 
 func pushedTask(original, result domain.Task) domain.Task {
@@ -669,27 +1059,6 @@ func (h *foundationHandler) StopAccepting() {
 	h.mu.Lock()
 	h.accepting = false
 	h.mu.Unlock()
-}
-
-// fullTaskMutationStore keeps the queued payload self-contained. The app
-// service uses compact create/patch payloads, while the sync provider boundary
-// needs the provider-scoped task that was optimistically persisted.
-type fullTaskMutationStore struct {
-	store repositorypkg.TaskMutationStore
-}
-
-var _ repositorypkg.TaskMutationStore = (*fullTaskMutationStore)(nil)
-
-func (s *fullTaskMutationStore) ApplyTaskMutation(ctx context.Context, mutation repositorypkg.TaskMutation) (domain.Task, error) {
-	if s == nil || s.store == nil {
-		return domain.Task{}, errors.New("apply task mutation: store unavailable")
-	}
-	payload, err := json.Marshal(mutation.Task)
-	if err != nil {
-		return domain.Task{}, fmt.Errorf("encode queued task mutation: %w", err)
-	}
-	mutation.Payload = payload
-	return s.store.ApplyTaskMutation(ctx, mutation)
 }
 
 func foundationCommand(input command.Command) (app.Command, error) {
@@ -1361,6 +1730,10 @@ func foundationNodeRef(state UIState) foundationtui.TreeNodeRef {
 
 func foundationUICommand(input foundationtui.AppCommand) (command.Command, bool, error) {
 	switch input.Kind {
+	case foundationtui.CommandCreateSpace:
+		return command.Command{Kind: command.KindCreateSpace, ProviderID: string(input.ProviderID), Title: input.Title}, true, nil
+	case foundationtui.CommandCreateList:
+		return command.Command{Kind: command.KindCreateList, ProviderID: string(input.ProviderID), SpaceID: string(input.SpaceID), Title: input.Title}, true, nil
 	case foundationtui.CommandCreateTask:
 		return command.Command{
 			Kind:        command.KindCreateTask,
@@ -1519,7 +1892,7 @@ type foundationGraph struct {
 	ui      UIController
 }
 
-func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal) (*foundationGraph, error) {
+func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal, logger *slog.Logger) (*foundationGraph, error) {
 	store, err := openFoundationStore(cfg.Database)
 	if err != nil {
 		return nil, err
@@ -1554,9 +1927,11 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal) (*
 				TeamID:      cfg.ClickUp.WorkspaceID,
 				TokenSource: foundationTokenSource(cfg.ClickUp.TokenEnv),
 			}),
-			ParentResolver:     foundationParentResolver(store),
-			RemoteListResolver: foundationRemoteListResolver(store),
-			RemoteTaskResolver: foundationRemoteTaskResolver(store),
+			ParentResolver:      foundationParentResolver(store),
+			RemoteListResolver:  foundationRemoteListResolver(store),
+			RemoteSpaceResolver: foundationRemoteSpaceResolver(store),
+			LocalListResolver:   foundationLocalListResolver(store, clickupProviderID),
+			RemoteTaskResolver:  foundationRemoteTaskResolver(store),
 		})
 		cached := newCachedProvider(clickupProvider, store)
 		providers = append(providers, cached)
@@ -1586,12 +1961,11 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal) (*
 		closeStore()
 		return nil, fmt.Errorf("default provider %s is not registered", cfg.App.DefaultProvider)
 	}
-	mutationStore := &fullTaskMutationStore{store: store}
 	mutationRepository := app.NewFoundationMutationAdapter(
 		spaceRepository,
 		listRepository,
 		taskRepository,
-		mutationStore,
+		store,
 		nil,
 		nil,
 	)
@@ -1600,6 +1974,23 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal) (*
 	workerOptions.Interval = cfg.Sync.Interval
 	if !cfg.Sync.RetryFailed {
 		workerOptions.RetryPolicy.MaxAttempts = 1
+	}
+	workerOptions.EventSink = func(event foundationsync.Event) {
+		level := slog.LevelDebug
+		if event.Err != nil || event.Kind == foundationsync.EventSyncFailed || event.Kind == foundationsync.EventOperationFailed {
+			level = slog.LevelWarn
+		}
+		args := []any{
+			"provider_id", event.ProviderID,
+			"event", event.Kind,
+			"state", event.State,
+			"operation_id", event.OperationID,
+			"attempts", event.Attempts,
+		}
+		if event.Err != nil {
+			args = append(args, "error", SafeErrorText(event.Err))
+		}
+		logContext(ctx, logger, level, "sync event", args...)
 	}
 	engine, err := foundationsync.NewEngine(store, providers, foundationsync.EngineOptions{Worker: workerOptions})
 	if err != nil {
@@ -1621,6 +2012,22 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal) (*
 		sync:    syncController,
 		ui:      ui,
 	}, nil
+}
+
+func foundationLocalListResolver(store *sqlite.Store, providerID domain.ProviderID) func(context.Context, string) (domain.ListID, error) {
+	return func(ctx context.Context, remoteID string) (domain.ListID, error) {
+		if store == nil {
+			return "", errors.New("resolve local list ID: store unavailable")
+		}
+		if ctx == nil {
+			return "", errors.New("resolve local list ID: nil context")
+		}
+		list, err := store.GetListByRemoteID(ctx, providerID, remoteID)
+		if err != nil {
+			return "", err
+		}
+		return list.ID, nil
+	}
 }
 
 func foundationParentResolver(store *sqlite.Store) clickuppkg.ContextParentResolverFunc {
@@ -1655,6 +2062,25 @@ func foundationRemoteListResolver(store *sqlite.Store) func(context.Context, dom
 			return "", clickuppkg.ErrRemoteIDMissing
 		}
 		return strings.TrimSpace(*list.RemoteID), nil
+	}
+}
+
+func foundationRemoteSpaceResolver(store *sqlite.Store) func(context.Context, domain.ProviderID, domain.SpaceID) (string, error) {
+	return func(ctx context.Context, providerID domain.ProviderID, spaceID domain.SpaceID) (string, error) {
+		if store == nil {
+			return "", errors.New("resolve remote space ID: store unavailable")
+		}
+		if ctx == nil {
+			return "", errors.New("resolve remote space ID: nil context")
+		}
+		space, err := store.GetSpaceByProvider(ctx, providerID, spaceID)
+		if err != nil {
+			return "", err
+		}
+		if space.RemoteID == nil || strings.TrimSpace(*space.RemoteID) == "" {
+			return "", clickuppkg.ErrRemoteIDMissing
+		}
+		return strings.TrimSpace(*space.RemoteID), nil
 	}
 }
 

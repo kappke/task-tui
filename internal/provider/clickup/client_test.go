@@ -236,6 +236,42 @@ func TestClientReturnsTypedErrorsAndClosesBodies(t *testing.T) {
 	}
 }
 
+func TestClientErrorsExposeRetryabilityClassification(t *testing.T) {
+	for _, test := range []struct {
+		status    int
+		permanent bool
+	}{
+		{http.StatusBadRequest, true},
+		{http.StatusUnauthorized, true},
+		{http.StatusForbidden, true},
+		{http.StatusNotFound, true},
+		{http.StatusInternalServerError, false},
+	} {
+		t.Run(http.StatusText(test.status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(test.status)
+				_, _ = io.WriteString(w, `{"message":"failure"}`)
+			}))
+			defer server.Close()
+			client := NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"})
+			_, err := client.GetTask(context.Background(), "task")
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.Permanent() != test.permanent {
+				t.Fatalf("error = %T %v, permanent = %v", err, err, apiErr != nil && apiErr.Permanent())
+			}
+		})
+	}
+}
+
+func TestMissingTokenIsPermanent(t *testing.T) {
+	client := NewClient(ClientConfig{BaseURL: "https://clickup.test", HTTPClient: &http.Client{}, TokenSource: ""})
+	_, err := client.GetTask(context.Background(), "task")
+	var requestErr *RequestError
+	if !errors.As(err, &requestErr) || !requestErr.Permanent() {
+		t.Fatalf("error = %T %v, want permanent request error", err, err)
+	}
+}
+
 func TestClientRateLimitParsesSecondsAndDate(t *testing.T) {
 	for _, test := range []struct {
 		name      string

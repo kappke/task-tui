@@ -86,7 +86,7 @@ func DefaultConfig() Config {
 		},
 		Logging: LoggingConfig{
 			Path:  filepath.Join(stateDir, "tasktui.log"),
-			Level: "info",
+			Level: "trace",
 		},
 		Database: DatabaseConfig{
 			Path:        filepath.Join(dataDir, "tasktui.db"),
@@ -356,6 +356,9 @@ func (c Config) Validate() error {
 		}
 		if strings.TrimSpace(c.ClickUp.TokenEnv) == "" {
 			return errors.New("config: clickup token environment variable is required when enabled")
+		}
+		if c.ClickUp.ID == ProviderID("local") {
+			return errors.New("config: clickup provider ID duplicates the local provider")
 		}
 	}
 	return nil

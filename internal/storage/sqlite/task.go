@@ -64,6 +64,14 @@ func (s *Store) listTasksByListID(ctx context.Context, listID string) ([]Task, e
 		taskSelect+" WHERE list_id = ? AND is_deleted = 0 ORDER BY due_at IS NULL, due_at, created_at, id", listID)
 }
 
+func (s *Store) listTasksPage(ctx context.Context, providerID, listID string, limit, offset int) ([]Task, error) {
+	return taskQuery(ctx, s.db, taskSelect+" WHERE provider_id = ? AND list_id = ? AND is_deleted = 0 ORDER BY due_at IS NULL, due_at, created_at, id LIMIT ? OFFSET ?", providerID, listID, limit, offset)
+}
+
+func (s *Store) listAllTasksPage(ctx context.Context, providerID string, limit, offset int) ([]Task, error) {
+	return taskQuery(ctx, s.db, taskSelect+" WHERE provider_id = ? AND is_deleted = 0 ORDER BY due_at IS NULL, due_at, created_at, id LIMIT ? OFFSET ?", providerID, limit, offset)
+}
+
 func (s *Store) listAllTasks(ctx context.Context, providerID string) ([]Task, error) {
 	return taskQuery(ctx, s.db,
 		taskSelect+" WHERE provider_id = ? AND is_deleted = 0 ORDER BY due_at IS NULL, due_at, created_at, id", providerID)
@@ -214,8 +222,10 @@ func (s *Store) createTaskWithQueue(ctx context.Context, task Task, intent *Sync
 	if err != nil {
 		return Task{}, err
 	}
-	if err := assignTaskID(&task); err != nil {
-		return Task{}, err
+	if task.ID == "" {
+		if err := assignTaskID(&task); err != nil {
+			return Task{}, err
+		}
 	}
 	if intent != nil && task.SyncState == SyncStateLocal {
 		task.SyncState = SyncStatePending
@@ -395,8 +405,8 @@ func (s *Store) searchTaskRecords(ctx context.Context, search TaskSearch) ([]Tas
 		queryText = filter.Query
 	}
 	if value := strings.TrimSpace(queryText); value != "" {
-		pattern := "%" + value + "%"
-		query += " AND (t.title LIKE ? COLLATE NOCASE OR t.description LIKE ? COLLATE NOCASE OR l.name LIKE ? COLLATE NOCASE OR s.name LIKE ? COLLATE NOCASE OR p.name LIKE ? COLLATE NOCASE)"
+		pattern := "%" + escapeLike(value) + "%"
+		query += " AND (t.title LIKE ? ESCAPE '\\' COLLATE NOCASE OR t.description LIKE ? ESCAPE '\\' COLLATE NOCASE OR l.name LIKE ? ESCAPE '\\' COLLATE NOCASE OR s.name LIKE ? ESCAPE '\\' COLLATE NOCASE OR p.name LIKE ? ESCAPE '\\' COLLATE NOCASE)"
 		args = append(args, pattern, pattern, pattern, pattern, pattern)
 	}
 	if filter.ProviderID != "" {
@@ -489,6 +499,12 @@ func (s *Store) searchTaskRecords(ctx context.Context, search TaskSearch) ([]Tas
 		return nil, fmt.Errorf("sqlite: search tasks: %w", err)
 	}
 	return results, nil
+}
+
+func escapeLike(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `%`, `\%`)
+	return strings.ReplaceAll(value, `_`, `\_`)
 }
 
 func placeholders(count int) string {

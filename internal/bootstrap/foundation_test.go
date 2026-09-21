@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -44,6 +45,55 @@ func TestBuildUsesFoundationGraphAndRendersCachedProviders(t *testing.T) {
 	}
 	if count := strings.Count(output.String(), "TASK MANAGER"); count != 1 {
 		t.Fatalf("headless render count = %d, want one frame", count)
+	}
+}
+
+func TestCurrentSQLiteRunnerUpgradesLegacyBootstrapDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open(sqliteDriverName, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(sqliteMigrations[0].sql); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL); INSERT INTO schema_migrations VALUES (1, 'initial_schema', '2026-01-01T00:00:00Z'); INSERT INTO providers(id, type, name, enabled, configuration, last_sync_at, sync_error, created_at, updated_at) VALUES ('legacy', 'local', 'Legacy', 1, '', NULL, '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlite.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	provider, err := store.GetProvider(context.Background(), "legacy")
+	if err != nil || provider.Name != "Legacy" {
+		t.Fatalf("legacy provider = %#v, %v", provider, err)
+	}
+	for _, table := range []string{"sync_bases", "conflicts", "app_state"} {
+		var count int
+		if err := store.SQLDB().QueryRow("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("legacy upgrade table %s: count=%d err=%v", table, count, err)
+		}
+	}
+	for _, object := range []struct {
+		kind string
+		name string
+	}{
+		{"index", "spaces_provider_remote_id"},
+		{"index", "sync_operations_claim_idx"},
+		{"trigger", "spaces_provider_immutable"},
+		{"trigger", "provider_metadata_validate_insert"},
+		{"trigger", "sync_bases_validate_insert"},
+	} {
+		var count int
+		if err := store.SQLDB().QueryRow("SELECT count(*) FROM sqlite_master WHERE type = ? AND name = ?", object.kind, object.name).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("legacy upgrade %s %s: count=%d err=%v", object.kind, object.name, count, err)
+		}
 	}
 }
 
@@ -160,6 +210,26 @@ func TestFoundationHandlerPersistsLocalTaskThroughComposedGraph(t *testing.T) {
 	}
 }
 
+func TestFoundationUICommandsCreateFirstHierarchy(t *testing.T) {
+	space, dispatch, err := foundationUICommand(foundationtui.AppCommand{
+		Kind:       foundationtui.CommandCreateSpace,
+		ProviderID: "local",
+		Title:      "Personal",
+	})
+	if err != nil || !dispatch || space.Kind != command.KindCreateSpace || space.ProviderID != "local" {
+		t.Fatalf("space translation = %#v, dispatch=%v, err=%v", space, dispatch, err)
+	}
+	list, dispatch, err := foundationUICommand(foundationtui.AppCommand{
+		Kind:       foundationtui.CommandCreateList,
+		ProviderID: "local",
+		SpaceID:    "space-1",
+		Title:      "Today",
+	})
+	if err != nil || !dispatch || list.Kind != command.KindCreateList || list.SpaceID != "space-1" {
+		t.Fatalf("list translation = %#v, dispatch=%v, err=%v", list, dispatch, err)
+	}
+}
+
 func TestCachedProviderReconcilesRemoteIDsWithLocalIDs(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlite.Open(":memory:")
@@ -244,6 +314,10 @@ func TestCachedProviderReconcilesRemoteIDsWithLocalIDs(t *testing.T) {
 	if err != nil || remoteList != listRemoteID {
 		t.Fatalf("remote list resolver = %q, %v; want %q", remoteList, err, listRemoteID)
 	}
+	remoteSpace, err := foundationRemoteSpaceResolver(store)(ctx, providerID, space.ID)
+	if err != nil || remoteSpace != spaceRemoteID {
+		t.Fatalf("remote space resolver = %q, %v; want %q", remoteSpace, err, spaceRemoteID)
+	}
 	remoteTask, err := foundationRemoteTaskResolver(store)(ctx, providerID, localTask.ID)
 	if err != nil || remoteTask != taskRemoteID {
 		t.Fatalf("remote task resolver = %q, %v; want %q", remoteTask, err, taskRemoteID)
@@ -279,10 +353,10 @@ func TestCachedProviderReconcilesRemoteIDsWithLocalIDs(t *testing.T) {
 		}},
 	}
 	fake.tasks = map[domain.ListID][]domain.Task{
-		fetchedListID: {{
+		list.ID: {{
 			ID:              domain.TaskID("task-fetched"),
 			ProviderID:      providerID,
-			ListID:          fetchedListID,
+			ListID:          list.ID,
 			RemoteID:        &taskRemoteID,
 			Title:           "Remote task",
 			Status:          "todo",
@@ -321,7 +395,7 @@ func TestCachedProviderReconcilesRemoteIDsWithLocalIDs(t *testing.T) {
 	if _, err := store.UpdateTask(ctx, local); err != nil {
 		t.Fatalf("persist local edit: %v", err)
 	}
-	fake.tasks[fetchedListID][0].Title = "Remote overwrite"
+	fake.tasks[list.ID][0].Title = "Remote overwrite"
 	if err := cached.Pull(ctx); err != nil {
 		t.Fatalf("cached Pull() after local edit: %v", err)
 	}
@@ -332,6 +406,83 @@ func TestCachedProviderReconcilesRemoteIDsWithLocalIDs(t *testing.T) {
 	if local.Title != "Local edit" || local.SyncState != domain.SyncStatePending {
 		t.Fatalf("local task after pull = %#v, want pending local edit", local)
 	}
+}
+
+func TestCachedProviderPreservesParentsAcrossOutOfOrderRepeatedPulls(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+
+	providerID := domain.ProviderID("clickup-work")
+	if _, err := store.UpsertProvider(ctx, domain.Provider{ID: providerID, Type: domain.ProviderTypeClickUp, Name: "Work", Enabled: true, SyncState: domain.SyncStatePending}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	spaceRemoteID, listRemoteID := "space-remote", "list-remote"
+	space, err := store.UpsertSpace(ctx, domain.Space{ID: "space-local", ProviderID: providerID, RemoteID: &spaceRemoteID, Name: "Work", SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := store.UpsertList(ctx, domain.List{ID: "list-local", ProviderID: providerID, SpaceID: space.ID, RemoteID: &listRemoteID, Name: "Inbox", SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parentRemoteID, childRemoteID := "parent-remote", "child-remote"
+	fake := &foundationTestProvider{
+		id:     providerID,
+		spaces: []domain.Space{{ID: "fetched-space", ProviderID: providerID, RemoteID: &spaceRemoteID, Name: "Work", SyncState: domain.SyncStateSynced}},
+		lists:  map[domain.SpaceID][]domain.List{space.ID: {{ID: "fetched-list", ProviderID: providerID, SpaceID: space.ID, RemoteID: &listRemoteID, Name: "Inbox", SyncState: domain.SyncStateSynced}}},
+		tasks: map[domain.ListID][]domain.Task{
+			list.ID: {
+				{ID: "mapped-child-1", ProviderID: providerID, ListID: list.ID, RemoteID: &childRemoteID, ParentTaskID: taskIDPointer("mapped-parent-1"), Title: "Child", Status: "todo", Priority: domain.PriorityNormal, SyncState: domain.SyncStateSynced},
+				{ID: "mapped-parent-1", ProviderID: providerID, ListID: list.ID, RemoteID: &parentRemoteID, Title: "Parent", Status: "todo", Priority: domain.PriorityNormal, SyncState: domain.SyncStateSynced},
+			},
+		},
+	}
+	cached := newCachedProvider(fake, store)
+	if err := cached.Pull(ctx); err != nil {
+		t.Fatalf("first Pull() error = %v", err)
+	}
+
+	parent, err := store.GetTaskByRemoteID(ctx, providerID, parentRemoteID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := store.GetTaskByRemoteID(ctx, providerID, childRemoteID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.ParentTaskID == nil || *child.ParentTaskID != parent.ID {
+		t.Fatalf("first child parent = %v, want %q", child.ParentTaskID, parent.ID)
+	}
+
+	fake.tasks[list.ID] = []domain.Task{
+		{ID: "mapped-parent-2", ProviderID: providerID, ListID: list.ID, RemoteID: &parentRemoteID, Title: "Parent", Status: "todo", Priority: domain.PriorityNormal, SyncState: domain.SyncStateSynced},
+		{ID: "mapped-child-2", ProviderID: providerID, ListID: list.ID, RemoteID: &childRemoteID, ParentTaskID: taskIDPointer("mapped-parent-2"), Title: "Child", Status: "todo", Priority: domain.PriorityNormal, SyncState: domain.SyncStateSynced},
+	}
+	if err := cached.Pull(ctx); err != nil {
+		t.Fatalf("second Pull() error = %v", err)
+	}
+	parent, err = store.GetTaskByRemoteID(ctx, providerID, parentRemoteID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err = store.GetTaskByRemoteID(ctx, providerID, childRemoteID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.ParentTaskID == nil || *child.ParentTaskID != parent.ID {
+		t.Fatalf("second child parent = %v, want stable local ID %q", child.ParentTaskID, parent.ID)
+	}
+}
+
+func taskIDPointer(value string) *domain.TaskID {
+	id := domain.TaskID(value)
+	return &id
 }
 
 func TestFoundationSyncMessageKeepsOperationFailureVisible(t *testing.T) {

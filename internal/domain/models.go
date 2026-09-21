@@ -31,6 +31,8 @@ type Space struct {
 	Name            string     `json:"name"`
 	SyncState       SyncState  `json:"sync_state"`
 	RemoteUpdatedAt *time.Time `json:"remote_updated_at,omitempty"`
+	IsDeleted       bool       `json:"is_deleted,omitempty"`
+	DeletedAt       *time.Time `json:"deleted_at,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
 }
@@ -45,6 +47,8 @@ type List struct {
 	Name            string     `json:"name"`
 	SyncState       SyncState  `json:"sync_state"`
 	RemoteUpdatedAt *time.Time `json:"remote_updated_at,omitempty"`
+	IsDeleted       bool       `json:"is_deleted,omitempty"`
+	DeletedAt       *time.Time `json:"deleted_at,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
 }
@@ -67,6 +71,8 @@ type Task struct {
 	CompletedAt     *time.Time     `json:"completed_at,omitempty"`
 	SyncState       SyncState      `json:"sync_state"`
 	RemoteUpdatedAt *time.Time     `json:"remote_updated_at,omitempty"`
+	IsDeleted       bool           `json:"is_deleted,omitempty"`
+	DeletedAt       *time.Time     `json:"deleted_at,omitempty"`
 	CreatedAt       time.Time      `json:"created_at"`
 	UpdatedAt       time.Time      `json:"updated_at"`
 }

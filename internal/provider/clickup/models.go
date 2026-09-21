@@ -134,5 +134,5 @@ type taskUpdatePayload struct {
 	Status      *string `json:"status,omitempty"`
 	DueDate     *int64  `json:"due_date"`
 	Priority    *int    `json:"priority,omitempty"`
-	Parent      *string `json:"parent,omitempty"`
+	Parent      *string `json:"parent"`
 }

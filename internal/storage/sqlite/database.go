@@ -132,6 +132,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		)`); err != nil {
 		return fmt.Errorf("sqlite: create migration table: %w", err)
 	}
+	if err := s.upgradeLegacySchema(ctx); err != nil {
+		return err
+	}
 
 	migrations, err := loadMigrations()
 	if err != nil {
@@ -173,6 +176,94 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// upgradeLegacySchema handles databases created by the former bootstrap
+// migration owner. Their recorded versions cannot safely be replayed against
+// the current schema because both systems used version 1 for different DDL.
+func (s *Store) upgradeLegacySchema(ctx context.Context) error {
+	legacy, err := missingColumn(ctx, s.db, "providers", "sync_state")
+	if err != nil {
+		return fmt.Errorf("sqlite: inspect legacy schema: %w", err)
+	}
+	if !legacy {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqlite: begin legacy schema upgrade: %w", err)
+	}
+	statements := []string{
+		"ALTER TABLE providers ADD COLUMN sync_state TEXT NOT NULL DEFAULT 'local'",
+		"ALTER TABLE providers ADD COLUMN sync_cursor TEXT",
+		"ALTER TABLE spaces ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE spaces ADD COLUMN deleted_at TEXT",
+		"ALTER TABLE lists ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE lists ADD COLUMN deleted_at TEXT",
+		"ALTER TABLE tasks ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE tasks ADD COLUMN deleted_at TEXT",
+		"ALTER TABLE provider_metadata ADD COLUMN created_at TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE provider_metadata ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
+		"UPDATE provider_metadata SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE created_at = ''",
+		"ALTER TABLE sync_operations ADD COLUMN next_attempt_at TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE sync_operations ADD COLUMN lease_owner TEXT",
+		"ALTER TABLE sync_operations ADD COLUMN lease_expires_at TEXT",
+		"ALTER TABLE sync_operations ADD COLUMN completed_at TEXT",
+		"UPDATE sync_operations SET next_attempt_at = created_at WHERE next_attempt_at = ''",
+		`CREATE TABLE IF NOT EXISTS sync_bases (
+            provider_id TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
+            remote_id TEXT, sync_state TEXT NOT NULL DEFAULT 'local', remote_updated_at TEXT,
+				payload TEXT NOT NULL, remote_version TEXT, captured_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+            PRIMARY KEY (provider_id, entity_type, entity_id),
+            FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE RESTRICT
+        )`,
+		`CREATE TABLE IF NOT EXISTS conflicts (
+            id TEXT PRIMARY KEY NOT NULL, provider_id TEXT NOT NULL, entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL, base_value TEXT, local_value TEXT NOT NULL,
+            remote_value TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', resolution TEXT,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL, resolved_at TEXT,
+            FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE RESTRICT
+        )`,
+		`CREATE TABLE IF NOT EXISTS app_state (
+            key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL, updated_at TEXT NOT NULL
+        )`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("sqlite: upgrade legacy schema: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sqlite: commit legacy schema upgrade: %w", err)
+	}
+	return nil
+}
+
+func missingColumn(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, typ string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, err
+		}
+		found = true
+		if name == column {
+			return false, rows.Err()
+		}
+	}
+	if !found {
+		return false, rows.Err()
+	}
+	return true, rows.Err()
 }
 
 func loadMigrations() ([]migration, error) {

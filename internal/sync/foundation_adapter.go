@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	stdsync "sync"
 	"time"
 
@@ -22,6 +23,14 @@ import (
 type RepositoryQueue struct {
 	queue      repository.SyncQueue
 	providerID domain.ProviderID
+}
+
+type providerScopedQueue interface {
+	CompleteForProviderWithLease(context.Context, domain.ProviderID, domain.OperationID, string) error
+	RetryForProviderWithLease(context.Context, domain.ProviderID, domain.OperationID, string, error) error
+	RetryAtForProviderWithLease(context.Context, domain.ProviderID, domain.OperationID, string, time.Time, error) error
+	FailForProviderWithLease(context.Context, domain.ProviderID, domain.OperationID, string, error) error
+	ReleaseForProviderWithLease(context.Context, domain.ProviderID, domain.OperationID, string) error
 }
 
 // AdaptQueue adapts one provider-scoped foundation queue. A separate adapter
@@ -68,7 +77,11 @@ func (q *RepositoryQueue) Claim(ctx context.Context, providerID ProviderID, _ ti
 	if err != nil {
 		return Operation{}, mapQueueError(err)
 	}
-	return fromDomainOperation(operation), nil
+	converted := fromDomainOperation(operation)
+	if err := requireLease(converted.LeaseOwner); err != nil {
+		return Operation{}, err
+	}
+	return converted, nil
 }
 
 func (q *RepositoryQueue) MarkAttempt(context.Context, OperationID, time.Time) error {
@@ -77,34 +90,53 @@ func (q *RepositoryQueue) MarkAttempt(context.Context, OperationID, time.Time) e
 	return nil
 }
 
-func (q *RepositoryQueue) Complete(ctx context.Context, operationID OperationID, _ time.Time) error {
-	return mapQueueError(q.queue.Complete(ctx, domain.OperationID(operationID)))
+func (q *RepositoryQueue) Complete(ctx context.Context, providerID ProviderID, operationID OperationID, leaseOwner string, _ time.Time) error {
+	if err := q.checkProvider(providerID); err != nil {
+		return err
+	}
+	if err := requireLease(leaseOwner); err != nil {
+		return err
+	}
+	if scoped, ok := q.queue.(providerScopedQueue); ok {
+		return mapQueueError(scoped.CompleteForProviderWithLease(ctx, q.providerID, domain.OperationID(operationID), leaseOwner))
+	}
+	return errors.New("sync foundation queue does not support scoped completion")
 }
 
-func (q *RepositoryQueue) Fail(ctx context.Context, operationID OperationID, failure Failure) error {
+func (q *RepositoryQueue) Fail(ctx context.Context, providerID ProviderID, operationID OperationID, leaseOwner string, failure Failure) error {
+	if err := q.checkProvider(providerID); err != nil {
+		return err
+	}
+	if err := requireLease(leaseOwner); err != nil {
+		return err
+	}
 	cause := failure.Err
 	if cause == nil {
 		cause = errors.New(failure.Error())
 	}
 	if failure.RetryAt != nil {
-		if scheduled, ok := q.queue.(repository.ScheduledSyncQueue); ok {
-			return mapQueueError(scheduled.RetryAt(ctx, domain.OperationID(operationID), *failure.RetryAt, cause))
+		if scoped, ok := q.queue.(providerScopedQueue); ok {
+			return mapQueueError(scoped.RetryAtForProviderWithLease(ctx, q.providerID, domain.OperationID(operationID), leaseOwner, *failure.RetryAt, cause))
 		}
-		return mapQueueError(q.queue.Retry(ctx, domain.OperationID(operationID), cause))
+		return errors.New("sync foundation queue does not support scoped retry")
 	}
-	return mapQueueError(q.queue.Fail(ctx, domain.OperationID(operationID), cause))
+	if scoped, ok := q.queue.(providerScopedQueue); ok {
+		return mapQueueError(scoped.FailForProviderWithLease(ctx, q.providerID, domain.OperationID(operationID), leaseOwner, cause))
+	}
+	return errors.New("sync foundation queue does not support scoped failure")
 }
 
-func (q *RepositoryQueue) Release(ctx context.Context, operationID OperationID) error {
-	if releaser, ok := q.queue.(interface {
-		Release(context.Context, domain.OperationID) error
-	}); ok {
-		return mapQueueError(releaser.Release(ctx, domain.OperationID(operationID)))
+func (q *RepositoryQueue) Release(ctx context.Context, providerID ProviderID, operationID OperationID, leaseOwner string) error {
+	if err := q.checkProvider(providerID); err != nil {
+		return err
 	}
-	// The foundation queue contract guarantees RequeueStale. When it does not
-	// expose an eager release transition, cancellation leaves the durable row
-	// syncing and the next worker cycle recovers it by lease age.
-	return nil
+	if err := requireLease(leaseOwner); err != nil {
+		return err
+	}
+	if scoped, ok := q.queue.(providerScopedQueue); ok {
+		return mapQueueError(scoped.ReleaseForProviderWithLease(ctx, q.providerID, domain.OperationID(operationID), leaseOwner))
+	}
+	return errors.New("sync foundation queue does not support scoped release")
 }
 
 func (q *RepositoryQueue) checkProvider(providerID ProviderID) error {
@@ -131,9 +163,13 @@ func fromDomainOperation(operation domain.SyncOperation) Operation {
 		CreatedAt:     operation.CreatedAt,
 		LastAttemptAt: operation.LastAttemptAt,
 		NextAttemptAt: time.Time{},
+		LeaseOwner:    operation.LeaseOwner,
 	}
 	if operation.NextAttemptAt != nil {
 		converted.NextAttemptAt = *operation.NextAttemptAt
+	}
+	if operation.LeaseExpiresAt != nil {
+		converted.LeaseExpiresAt = operation.LeaseExpiresAt
 	}
 	return converted
 }
@@ -152,9 +188,11 @@ func mapQueueError(err error) error {
 // boundary. It dispatches one queue operation to the provider's normalized
 // entity method and leaves retry policy entirely to Worker.
 type FoundationProvider struct {
-	provider providerpkg.Provider
-	id       ProviderID
-	caps     Capabilities
+	provider   providerpkg.Provider
+	id         ProviderID
+	caps       Capabilities
+	identityMu stdsync.Mutex
+	remoteIDs  map[string]string
 }
 
 var _ Provider = (*FoundationProvider)(nil)
@@ -234,8 +272,9 @@ func AdaptProvider(value providerpkg.Provider) Provider {
 		_, canPull = value.(providerpkg.Synchronizer)
 	}
 	return &FoundationProvider{
-		provider: value,
-		id:       id,
+		provider:  value,
+		id:        id,
+		remoteIDs: make(map[string]string),
 		caps: Capabilities{
 			Remote:  !local,
 			Network: !local,
@@ -352,8 +391,8 @@ func (p *FoundationProvider) Push(ctx context.Context, operation Operation) erro
 	}
 	switch EntityType(operation.EntityType) {
 	case EntityTask:
-		var task domain.Task
-		if err := decodeOperationPayload(operation, &task); err != nil {
+		task, err := decodeTaskMutationPayload(operation)
+		if err != nil {
 			return err
 		}
 		if task.ProviderID != p.providerID() {
@@ -361,8 +400,8 @@ func (p *FoundationProvider) Push(ctx context.Context, operation Operation) erro
 		}
 		return p.pushTask(ctx, operation, task)
 	case EntityList:
-		var list domain.List
-		if err := decodeOperationPayload(operation, &list); err != nil {
+		list, err := decodeListMutationPayload(operation)
+		if err != nil {
 			return err
 		}
 		if list.ProviderID != p.providerID() {
@@ -370,8 +409,8 @@ func (p *FoundationProvider) Push(ctx context.Context, operation Operation) erro
 		}
 		return p.pushList(ctx, operation, list)
 	case EntitySpace:
-		var space domain.Space
-		if err := decodeOperationPayload(operation, &space); err != nil {
+		space, err := decodeSpaceMutationPayload(operation)
+		if err != nil {
 			return err
 		}
 		if space.ProviderID != p.providerID() {
@@ -398,9 +437,23 @@ func (p *FoundationProvider) providerID() domain.ProviderID {
 }
 
 func (p *FoundationProvider) pushTask(ctx context.Context, operation Operation, task domain.Task) error {
+	if operation.Type() != OperationCreate {
+		p.identityMu.Lock()
+		if task.RemoteID == nil {
+			if remoteID := p.remoteIDs[task.ID.String()]; remoteID != "" {
+				task.RemoteID = &remoteID
+			}
+		}
+		p.identityMu.Unlock()
+	}
 	switch operation.Type() {
 	case OperationCreate:
-		_, err := p.provider.CreateTask(ctx, task)
+		created, err := p.provider.CreateTask(ctx, task)
+		if err == nil && created.RemoteID != nil && *created.RemoteID != "" {
+			p.identityMu.Lock()
+			p.remoteIDs[task.ID.String()] = *created.RemoteID
+			p.identityMu.Unlock()
+		}
 		return err
 	case OperationUpdate:
 		_, err := p.provider.UpdateTask(ctx, task)
@@ -458,6 +511,93 @@ func decodeOperationPayload(operation Operation, target any) error {
 		return Terminal(fmt.Errorf("%w: operation %s payload: %v", ErrInvalidPayload, operation.ID, err))
 	}
 	return nil
+}
+
+func decodeTaskMutationPayload(operation Operation) (domain.Task, error) {
+	if len(operation.Payload) == 0 {
+		return domain.Task{}, Terminal(fmt.Errorf("%w: operation %s has empty payload", ErrInvalidPayload, operation.ID))
+	}
+	var payload domain.TaskMutationPayload
+	if err := json.Unmarshal(operation.Payload, &payload); err != nil {
+		return domain.Task{}, Terminal(fmt.Errorf("%w: operation %s payload: %v", ErrInvalidPayload, operation.ID, err))
+	}
+	if payload.Version == 0 {
+		// Queue rows written before the normalized contract are still readable;
+		// newly created rows always use the versioned form below.
+		var legacy domain.Task
+		if err := json.Unmarshal(operation.Payload, &legacy); err != nil || legacy.ID.IsZero() {
+			return domain.Task{}, Terminal(fmt.Errorf("%w: operation %s has unsupported task payload", ErrInvalidPayload, operation.ID))
+		}
+		return legacy, nil
+	}
+	if payload.Version != domain.TaskMutationPayloadVersion || payload.ProviderID != domain.ProviderID(operation.ProviderID) || payload.TaskID != domain.TaskID(operation.EntityID) {
+		return domain.Task{}, Terminal(fmt.Errorf("%w: operation %s has invalid task identity or version", ErrInvalidPayload, operation.ID))
+	}
+	if payload.Snapshot == nil {
+		return domain.Task{}, Terminal(fmt.Errorf("%w: operation %s has no task snapshot", ErrInvalidPayload, operation.ID))
+	}
+	task := *payload.Snapshot
+	if task.ProviderID != payload.ProviderID || task.ID != payload.TaskID {
+		return domain.Task{}, Terminal(fmt.Errorf("%w: operation %s snapshot identity mismatch", ErrInvalidPayload, operation.ID))
+	}
+	if payload.TaskPatch != nil && operation.Type() != OperationDelete {
+		updated, err := payload.TaskPatch.Apply(task)
+		if err != nil {
+			return domain.Task{}, Terminal(fmt.Errorf("%w: operation %s patch: %v", ErrInvalidPayload, operation.ID, err))
+		}
+		task = updated
+	}
+	return task, nil
+}
+
+func decodeSpaceMutationPayload(operation Operation) (domain.Space, error) {
+	if len(operation.Payload) == 0 {
+		return domain.Space{}, Terminal(fmt.Errorf("%w: operation %s has empty payload", ErrInvalidPayload, operation.ID))
+	}
+	var payload domain.SpaceMutationPayload
+	if err := json.Unmarshal(operation.Payload, &payload); err != nil {
+		return domain.Space{}, Terminal(fmt.Errorf("%w: operation %s payload: %v", ErrInvalidPayload, operation.ID, err))
+	}
+	if payload.Version != 0 {
+		if payload.Version != domain.HierarchyMutationPayloadVersion || payload.ProviderID != domain.ProviderID(operation.ProviderID) || payload.SpaceID != domain.SpaceID(operation.EntityID) || payload.Snapshot == nil {
+			return domain.Space{}, Terminal(fmt.Errorf("%w: operation %s has invalid space identity or version", ErrInvalidPayload, operation.ID))
+		}
+		space := *payload.Snapshot
+		if space.ProviderID != payload.ProviderID || space.ID != payload.SpaceID {
+			return domain.Space{}, Terminal(fmt.Errorf("%w: operation %s space snapshot identity mismatch", ErrInvalidPayload, operation.ID))
+		}
+		return space, nil
+	}
+	var legacy domain.Space
+	if err := json.Unmarshal(operation.Payload, &legacy); err != nil || legacy.ID.IsZero() || legacy.ProviderID != domain.ProviderID(operation.ProviderID) || legacy.ID != domain.SpaceID(operation.EntityID) {
+		return domain.Space{}, Terminal(fmt.Errorf("%w: operation %s has unsupported space payload", ErrInvalidPayload, operation.ID))
+	}
+	return legacy, nil
+}
+
+func decodeListMutationPayload(operation Operation) (domain.List, error) {
+	if len(operation.Payload) == 0 {
+		return domain.List{}, Terminal(fmt.Errorf("%w: operation %s has empty payload", ErrInvalidPayload, operation.ID))
+	}
+	var payload domain.ListMutationPayload
+	if err := json.Unmarshal(operation.Payload, &payload); err != nil {
+		return domain.List{}, Terminal(fmt.Errorf("%w: operation %s payload: %v", ErrInvalidPayload, operation.ID, err))
+	}
+	if payload.Version != 0 {
+		if payload.Version != domain.HierarchyMutationPayloadVersion || payload.ProviderID != domain.ProviderID(operation.ProviderID) || payload.ListID != domain.ListID(operation.EntityID) || payload.Snapshot == nil {
+			return domain.List{}, Terminal(fmt.Errorf("%w: operation %s has invalid list identity or version", ErrInvalidPayload, operation.ID))
+		}
+		list := *payload.Snapshot
+		if list.ProviderID != payload.ProviderID || list.ID != payload.ListID {
+			return domain.List{}, Terminal(fmt.Errorf("%w: operation %s list snapshot identity mismatch", ErrInvalidPayload, operation.ID))
+		}
+		return list, nil
+	}
+	var legacy domain.List
+	if err := json.Unmarshal(operation.Payload, &legacy); err != nil || legacy.ID.IsZero() || legacy.ProviderID != domain.ProviderID(operation.ProviderID) || legacy.ID != domain.ListID(operation.EntityID) {
+		return domain.List{}, Terminal(fmt.Errorf("%w: operation %s has unsupported list payload", ErrInvalidPayload, operation.ID))
+	}
+	return legacy, nil
 }
 
 // NewRepositoryWorker creates a worker using the foundation repository and
@@ -522,7 +662,12 @@ type multiRepositoryQueue struct {
 	queue     repository.SyncQueue
 	providers []Provider
 	mu        stdsync.Mutex
-	claimed   map[OperationID]ProviderID
+	claimed   map[OperationID]queueClaim
+}
+
+type queueClaim struct {
+	providerID ProviderID
+	leaseOwner string
 }
 
 func (q *multiRepositoryQueue) adapter(providerID ProviderID) *RepositoryQueue {
@@ -540,9 +685,9 @@ func (q *multiRepositoryQueue) Claim(ctx context.Context, providerID ProviderID,
 	}
 	q.mu.Lock()
 	if q.claimed == nil {
-		q.claimed = make(map[OperationID]ProviderID)
+		q.claimed = make(map[OperationID]queueClaim)
 	}
-	q.claimed[operation.ID] = providerID
+	q.claimed[operation.ID] = queueClaim{providerID: providerID, leaseOwner: operation.LeaseOwner}
 	q.mu.Unlock()
 	return operation, nil
 }
@@ -551,57 +696,61 @@ func (q *multiRepositoryQueue) MarkAttempt(ctx context.Context, operationID Oper
 	return q.queueMarkAttempt(ctx, operationID, at)
 }
 
-func (q *multiRepositoryQueue) Complete(ctx context.Context, operationID OperationID, at time.Time) error {
-	providerID, err := q.providerForOperation(ctx, operationID)
-	if err != nil {
+func (q *multiRepositoryQueue) Complete(ctx context.Context, providerID ProviderID, operationID OperationID, leaseOwner string, at time.Time) error {
+	if err := q.checkClaim(providerID, operationID, leaseOwner); err != nil {
 		return err
 	}
-	err = q.adapter(providerID).Complete(ctx, operationID, at)
+	err := q.adapter(providerID).Complete(ctx, providerID, operationID, leaseOwner, at)
 	if err == nil {
 		q.forget(operationID)
 	}
 	return err
 }
 
-func (q *multiRepositoryQueue) Fail(ctx context.Context, operationID OperationID, failure Failure) error {
-	providerID, err := q.providerForOperation(ctx, operationID)
-	if err != nil {
+func (q *multiRepositoryQueue) Fail(ctx context.Context, providerID ProviderID, operationID OperationID, leaseOwner string, failure Failure) error {
+	if err := q.checkClaim(providerID, operationID, leaseOwner); err != nil {
 		return err
 	}
-	err = q.adapter(providerID).Fail(ctx, operationID, failure)
+	err := q.adapter(providerID).Fail(ctx, providerID, operationID, leaseOwner, failure)
 	if err == nil {
 		q.forget(operationID)
 	}
 	return err
 }
 
-func (q *multiRepositoryQueue) Release(ctx context.Context, operationID OperationID) error {
-	providerID, err := q.providerForOperation(ctx, operationID)
-	if err != nil {
+func (q *multiRepositoryQueue) Release(ctx context.Context, providerID ProviderID, operationID OperationID, leaseOwner string) error {
+	if err := q.checkClaim(providerID, operationID, leaseOwner); err != nil {
 		return err
 	}
-	err = q.adapter(providerID).Release(ctx, operationID)
+	err := q.adapter(providerID).Release(ctx, providerID, operationID, leaseOwner)
 	if err == nil {
 		q.forget(operationID)
 	}
 	return err
+}
+
+func (q *multiRepositoryQueue) checkClaim(providerID ProviderID, operationID OperationID, leaseOwner string) error {
+	if err := requireLease(leaseOwner); err != nil {
+		return err
+	}
+	q.mu.Lock()
+	claim, ok := q.claimed[operationID]
+	q.mu.Unlock()
+	if !ok || claim.providerID != providerID || claim.leaseOwner != leaseOwner {
+		return fmt.Errorf("sync operation %s was not claimed for provider %s", operationID, providerID)
+	}
+	return nil
+}
+
+func requireLease(leaseOwner string) error {
+	if strings.TrimSpace(leaseOwner) == "" {
+		return errors.New("sync operation lease owner is required")
+	}
+	return nil
 }
 
 func (q *multiRepositoryQueue) queueMarkAttempt(context.Context, OperationID, time.Time) error {
 	return nil
-}
-
-func (q *multiRepositoryQueue) providerForOperation(_ context.Context, operationID OperationID) (ProviderID, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	providerID, ok := q.claimed[operationID]
-	if ok {
-		return providerID, nil
-	}
-	if len(q.providers) == 1 {
-		return q.providers[0].ID(), nil
-	}
-	return "", errors.New("repository queue operation was not claimed by a provider worker")
 }
 
 func (q *multiRepositoryQueue) forget(operationID OperationID) {

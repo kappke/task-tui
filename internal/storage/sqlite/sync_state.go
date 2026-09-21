@@ -132,13 +132,13 @@ func (s *Store) putSyncBase(ctx context.Context, base SyncBase) (SyncBase, error
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO sync_bases (
 			provider_id, entity_type, entity_id, remote_id, sync_state, remote_updated_at,
-			payload, remote_version, captured_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			payload, remote_version, captured_at, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (provider_id, entity_type, entity_id) DO UPDATE SET
 			remote_id = excluded.remote_id, sync_state = excluded.sync_state,
 			remote_updated_at = excluded.remote_updated_at, payload = excluded.payload,
 			remote_version = excluded.remote_version,
-			captured_at = excluded.captured_at, updated_at = excluded.updated_at`,
+			captured_at = excluded.captured_at, created_at = excluded.created_at, updated_at = excluded.updated_at`,
 		base.ProviderID,
 		base.EntityType,
 		base.EntityID,
@@ -148,6 +148,7 @@ func (s *Store) putSyncBase(ctx context.Context, base SyncBase) (SyncBase, error
 		base.Payload,
 		base.RemoteVersion,
 		formatTime(base.CapturedAt),
+		formatTime(base.CreatedAt),
 		formatTime(base.UpdatedAt),
 	)
 	if err != nil {
@@ -163,7 +164,7 @@ func (s *Store) upsertSyncBase(ctx context.Context, base SyncBase) (SyncBase, er
 func (s *Store) getSyncBase(ctx context.Context, providerID string, entityType EntityType, entityID string) (SyncBase, error) {
 	base, err := scanSyncBase(s.db.QueryRowContext(ctx, `
 		SELECT provider_id, entity_type, entity_id, remote_id, sync_state, remote_updated_at,
-			payload, remote_version, captured_at, updated_at
+			payload, remote_version, captured_at, created_at, updated_at
 		FROM sync_bases WHERE provider_id = ? AND entity_type = ? AND entity_id = ?`,
 		providerID, entityType, entityID))
 	if err != nil {
@@ -175,7 +176,7 @@ func (s *Store) getSyncBase(ctx context.Context, providerID string, entityType E
 func (s *Store) listSyncBases(ctx context.Context, providerID string) ([]SyncBase, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT provider_id, entity_type, entity_id, remote_id, sync_state, remote_updated_at,
-			payload, remote_version, captured_at, updated_at
+			payload, remote_version, captured_at, created_at, updated_at
 		FROM sync_bases WHERE provider_id = ? ORDER BY entity_type, entity_id`, providerID)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: list sync bases: %w", err)
@@ -219,6 +220,9 @@ func prepareSyncBase(base SyncBase) (SyncBase, error) {
 	if base.CapturedAt.IsZero() {
 		base.CapturedAt = time.Now().UTC()
 	}
+	if base.CreatedAt.IsZero() {
+		base.CreatedAt = base.CapturedAt
+	}
 	if base.UpdatedAt.IsZero() {
 		base.UpdatedAt = base.CapturedAt
 	}
@@ -227,14 +231,14 @@ func prepareSyncBase(base SyncBase) (SyncBase, error) {
 
 func scanSyncBase(row rowScanner) (SyncBase, error) {
 	var (
-		base                      SyncBase
-		entityType, syncState     string
-		remoteID, remoteUpdatedAt sql.NullString
-		remoteVersion             sql.NullString
-		capturedAt, updatedAt     sql.NullString
+		base                             SyncBase
+		entityType, syncState            string
+		remoteID, remoteUpdatedAt        sql.NullString
+		remoteVersion                    sql.NullString
+		capturedAt, createdAt, updatedAt sql.NullString
 	)
 	if err := row.Scan(&base.ProviderID, &entityType, &base.EntityID, &remoteID, &syncState,
-		&remoteUpdatedAt, &base.Payload, &remoteVersion, &capturedAt, &updatedAt); err != nil {
+		&remoteUpdatedAt, &base.Payload, &remoteVersion, &capturedAt, &createdAt, &updatedAt); err != nil {
 		return SyncBase{}, err
 	}
 	base.EntityType = EntityType(entityType)
@@ -248,6 +252,13 @@ func scanSyncBase(row rowScanner) (SyncBase, error) {
 	base.RemoteVersion = nullableString(remoteVersion)
 	if base.CapturedAt, err = parseNullableRequiredTime(capturedAt); err != nil {
 		return SyncBase{}, err
+	}
+	if createdAt.Valid && createdAt.String != "" {
+		if base.CreatedAt, err = parseTime(createdAt.String); err != nil {
+			return SyncBase{}, err
+		}
+	} else {
+		base.CreatedAt = base.CapturedAt
 	}
 	if base.UpdatedAt, err = parseNullableRequiredTime(updatedAt); err != nil {
 		return SyncBase{}, err

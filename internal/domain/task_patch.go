@@ -50,6 +50,208 @@ type TaskDeletePayload struct {
 	TaskID TaskID `json:"task_id"`
 }
 
+// SpaceMutationPayload is the versioned queue payload for space writes.
+type SpaceMutationPayload struct {
+	Version    int        `json:"version"`
+	ProviderID ProviderID `json:"provider_id"`
+	SpaceID    SpaceID    `json:"space_id"`
+	Snapshot   *Space     `json:"snapshot"`
+}
+
+// ListMutationPayload is the versioned queue payload for list writes.
+type ListMutationPayload struct {
+	Version    int        `json:"version"`
+	ProviderID ProviderID `json:"provider_id"`
+	ListID     ListID     `json:"list_id"`
+	Snapshot   *List      `json:"snapshot"`
+}
+
+const HierarchyMutationPayloadVersion = 1
+
+const (
+	SpaceMutationPayloadVersion = HierarchyMutationPayloadVersion
+	ListMutationPayloadVersion  = HierarchyMutationPayloadVersion
+)
+
+func NewSpaceCreateMutationPayload(space Space) SpaceMutationPayload {
+	return SpaceMutationPayload{
+		Version: HierarchyMutationPayloadVersion, ProviderID: space.ProviderID,
+		SpaceID: space.ID, Snapshot: cloneSpaceSnapshot(space),
+	}
+}
+
+func NewListCreateMutationPayload(list List) ListMutationPayload {
+	return ListMutationPayload{
+		Version: HierarchyMutationPayloadVersion, ProviderID: list.ProviderID,
+		ListID: list.ID, Snapshot: cloneListSnapshot(list),
+	}
+}
+
+func cloneSpaceSnapshot(space Space) *Space {
+	space.RemoteID = cloneString(space.RemoteID)
+	space.RemoteUpdatedAt = cloneTime(space.RemoteUpdatedAt)
+	return &space
+}
+
+func cloneListSnapshot(list List) *List {
+	list.RemoteID = cloneString(list.RemoteID)
+	list.RemoteUpdatedAt = cloneTime(list.RemoteUpdatedAt)
+	return &list
+}
+
+// TaskMutationPayloadVersion identifies the normalized durable task payload.
+const TaskMutationPayloadVersion = 1
+
+// TaskMutationPayload is the queue contract shared by application, storage,
+// and synchronization. Snapshot is the provider-ready task state; Patch keeps
+// the update semantics explicit and lets consumers distinguish an update from
+// a replacement. Delete payloads retain Snapshot so a deleted task can still
+// be sent when its local row is gone.
+type TaskMutationPayload struct {
+	Version    int        `json:"version"`
+	ProviderID ProviderID `json:"provider_id"`
+	TaskID     TaskID     `json:"task_id"`
+	Snapshot   *Task      `json:"snapshot,omitempty"`
+	RemoteID   *string    `json:"remote_id,omitempty"`
+	*TaskPayload
+	*TaskPatch
+}
+
+func NewTaskCreateMutationPayload(task Task) TaskMutationPayload {
+	payload := NewTaskPayload(task)
+	return TaskMutationPayload{
+		Version:     TaskMutationPayloadVersion,
+		ProviderID:  task.ProviderID,
+		TaskID:      task.ID,
+		Snapshot:    cloneTaskPayloadSnapshot(task),
+		TaskPayload: &payload,
+	}
+}
+
+func NewTaskUpdateMutationPayload(task Task, patch TaskPatch) TaskMutationPayload {
+	return TaskMutationPayload{
+		Version:    TaskMutationPayloadVersion,
+		ProviderID: task.ProviderID,
+		TaskID:     task.ID,
+		Snapshot:   cloneTaskPayloadSnapshot(task),
+		TaskPatch:  &patch,
+	}
+}
+
+func NewTaskDeleteMutationPayload(task Task) TaskMutationPayload {
+	remoteID := cloneString(task.RemoteID)
+	return TaskMutationPayload{
+		Version:    TaskMutationPayloadVersion,
+		ProviderID: task.ProviderID,
+		TaskID:     task.ID,
+		Snapshot:   cloneTaskPayloadSnapshot(task),
+		RemoteID:   remoteID,
+	}
+}
+
+// MarshalJSON keeps the normalized metadata alongside the compact create or
+// patch fields. Flattening the operation fields makes the wire format useful
+// to simple payload inspectors without creating a second contract.
+func (p TaskMutationPayload) MarshalJSON() ([]byte, error) {
+	value := map[string]any{
+		"version":     p.Version,
+		"provider_id": p.ProviderID,
+		"task_id":     p.TaskID,
+	}
+	if p.Snapshot != nil {
+		value["snapshot"] = p.Snapshot
+	}
+	if p.RemoteID != nil {
+		value["remote_id"] = p.RemoteID
+	}
+	if p.TaskPayload != nil {
+		mergeJSONFields(value, p.TaskPayload)
+	}
+	if p.TaskPatch != nil {
+		mergeJSONFields(value, p.TaskPatch)
+	}
+	return json.Marshal(value)
+}
+
+func (p *TaskMutationPayload) UnmarshalJSON(data []byte) error {
+	type metadata struct {
+		Version    int        `json:"version"`
+		ProviderID ProviderID `json:"provider_id"`
+		TaskID     TaskID     `json:"task_id"`
+		Snapshot   *Task      `json:"snapshot,omitempty"`
+		RemoteID   *string    `json:"remote_id,omitempty"`
+	}
+	var header metadata
+	if err := json.Unmarshal(data, &header); err != nil {
+		return err
+	}
+	*p = TaskMutationPayload{
+		Version: header.Version, ProviderID: header.ProviderID, TaskID: header.TaskID,
+		Snapshot: header.Snapshot, RemoteID: header.RemoteID,
+	}
+	var fields TaskPatch
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if fields.ListID != nil || fields.ParentTaskID != nil || fields.Assignee != nil || fields.Title != nil ||
+		fields.Description != nil || fields.Status != nil || fields.Priority != nil || fields.DueAt != nil ||
+		fields.CompletedAt != nil || fields.ClearParentTask || fields.ClearDueAt || fields.ClearCompletedAt {
+		p.TaskPatch = &fields
+	}
+	return nil
+}
+
+func mergeJSONFields(target map[string]any, fields any) {
+	data, err := json.Marshal(fields)
+	if err != nil {
+		return
+	}
+	var values map[string]any
+	if err := json.Unmarshal(data, &values); err != nil {
+		return
+	}
+	for key, value := range values {
+		target[key] = value
+	}
+}
+
+func cloneTaskPayloadSnapshot(task Task) *Task {
+	snapshot := cloneTaskSnapshot(task)
+	return &snapshot
+}
+
+func cloneTaskSnapshot(task Task) Task {
+	task.RemoteID = cloneString(task.RemoteID)
+	task.ParentTaskID = cloneTaskID(task.ParentTaskID)
+	task.DueAt = cloneTime(task.DueAt)
+	task.CompletedAt = cloneTime(task.CompletedAt)
+	return task
+}
+
+func cloneString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneTaskID(value *TaskID) *TaskID {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := value.UTC()
+	return &copy
+}
+
 // NewTaskPayload creates a provider-neutral create payload from a task.
 func NewTaskPayload(task Task) TaskPayload {
 	return TaskPayload{
