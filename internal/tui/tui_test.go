@@ -495,6 +495,55 @@ func TestCollapsedTaskGroupHeadersScrollWhenTheyOverflow(t *testing.T) {
 	}
 }
 
+func TestExpandedTaskGroupsScrollByHeadersAndRows(t *testing.T) {
+	snapshot := Snapshot{
+		Providers: []Provider{{ID: "work", Name: "Work", Type: ProviderTypeLocal, SyncState: SyncStateLocal}},
+		Spaces:    []Space{{ID: "space", ProviderID: "work", Name: "Space", SyncState: SyncStateLocal}},
+		Lists:     []List{{ID: "list", ProviderID: "work", SpaceID: "space", Name: "List", SyncState: SyncStateLocal}},
+	}
+	for index := 0; index < 3; index++ {
+		snapshot.Tasks = append(snapshot.Tasks, Task{
+			ID:         TaskID(fmt.Sprintf("open-%d", index)),
+			ProviderID: "work",
+			ListID:     "list",
+			Title:      fmt.Sprintf("Open %d", index),
+			Status:     "open",
+		})
+		snapshot.Tasks = append(snapshot.Tasks, Task{
+			ID:         TaskID(fmt.Sprintf("done-%d", index)),
+			ProviderID: "work",
+			ListID:     "list",
+			Title:      fmt.Sprintf("Done %d", index),
+			Status:     "done",
+		})
+	}
+
+	model := New(snapshot)
+	model.UI.Focus = PanelTasks
+	model.UI.GroupBy = TaskGroupStatus
+	model, _ = model.Update(WindowSizeMsg{Width: 100, Height: 40})
+	model.selectTaskAt(0)
+
+	for index := 0; index < 3; index++ {
+		model, _ = model.Update(KeyMsg{Key: "j"})
+	}
+	if !model.UI.TaskHeaderSelected || model.UI.FocusedGroup != taskGroupStateKey(TaskGroupStatus, "open") {
+		t.Fatalf("next group selection = %#v, want open header", model.UI)
+	}
+	if model.UI.TaskOffset != 0 {
+		t.Fatalf("task offset at next group = %d, want no movement within viewport", model.UI.TaskOffset)
+	}
+	view := model.View()
+	if !strings.Contains(view, "Done 2") || !strings.Contains(view, "OPEN") {
+		t.Fatalf("group transition did not scroll smoothly:\n%s", view)
+	}
+
+	model, _ = model.Update(WindowSizeMsg{Width: 100, Height: 12})
+	if model.UI.TaskOffset != 3 {
+		t.Fatalf("task offset after shrinking viewport = %d, want smooth visual offset 3", model.UI.TaskOffset)
+	}
+}
+
 func TestDeleteConfirmationPreservesProviderIdentity(t *testing.T) {
 	model := New(testSnapshot())
 	model, _ = model.Update(KeyMsg{Key: "tab"})

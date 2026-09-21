@@ -163,19 +163,13 @@ func (m Model) taskLines(width int) []string {
 		}
 		return append(lines, fit("  (no tasks in this view)", width))
 	}
-	if m.UI.GroupBy != TaskGroupNone && allTaskGroupsCollapsed(groups) {
-		offset := clamp(m.UI.TaskOffset, 0, len(groups)-1)
-		if offset > 0 {
-			lines = append(lines, fit("  ...", width))
-		}
-		for _, group := range groups[offset:] {
-			lines = append(lines, fitAtOffset(m.taskGroupLine(group), width, m.UI.TaskHorizontalOffset))
-		}
-		return lines
-	}
 	offset := 0
-	if len(rows) > 0 {
-		offset = clamp(m.UI.TaskOffset, 0, len(rows)-1)
+	if m.UI.GroupBy == TaskGroupNone {
+		if len(rows) > 0 {
+			offset = clamp(m.UI.TaskOffset, 0, len(rows)-1)
+		}
+	} else {
+		offset = clamp(m.UI.TaskOffset, 0, maxInt(taskGroupVisualLength(groups)-1, 0))
 	}
 	if offset > 0 {
 		lines = append(lines, fit("  ...", width))
@@ -187,22 +181,22 @@ func (m Model) taskLines(width int) []string {
 		return lines
 	}
 
+	visualIndex := 0
 	rowIndex := 0
 	for _, group := range groups {
-		if group.Collapsed {
+		if visualIndex >= offset {
 			lines = append(lines, fitAtOffset(m.taskGroupLine(group), width, m.UI.TaskHorizontalOffset))
+		}
+		visualIndex++
+		if group.Collapsed {
 			continue
 		}
-		groupStart := rowIndex
-		groupEnd := groupStart + len(group.Rows)
-		rowIndex = groupEnd
-		if groupEnd <= offset {
-			continue
-		}
-		lines = append(lines, fitAtOffset(m.taskGroupLine(group), width, m.UI.TaskHorizontalOffset))
-		start := maxInt(offset-groupStart, 0)
-		for index, row := range group.Rows[start:] {
-			lines = append(lines, m.taskRowLine(row, groupStart+start+index, width))
+		for _, row := range group.Rows {
+			if visualIndex >= offset {
+				lines = append(lines, m.taskRowLine(row, rowIndex, width))
+			}
+			visualIndex++
+			rowIndex++
 		}
 	}
 	return lines

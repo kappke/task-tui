@@ -653,7 +653,6 @@ func (m *Model) focusTaskGroupHeader(groups []TaskGroup, index int, preserve Tas
 	m.UI.TaskHeaderTask = preserve
 	m.UI.FocusedGroup = taskGroupStateKey(m.UI.GroupBy, groups[index].Key)
 	m.UI.TaskCursor = -1
-	m.UI.TaskOffset = m.taskGroupRowStart(groups, index)
 	if preserve == (TaskRef{}) {
 		m.UI.SelectedTask = TaskRef{}
 	}
@@ -1584,12 +1583,14 @@ func (m *Model) keepVisible() {
 		groups := m.VisibleTaskGroups()
 		groupIndex := m.currentTaskGroupIndex(groups)
 		if groupIndex >= 0 {
-			if allTaskGroupsCollapsed(groups) {
-				m.UI.TaskOffset = clamp(m.taskGroupRowStart(groups, groupIndex), 0, len(groups)-1)
-			} else {
-				rows := flattenTaskGroups(groups)
-				m.UI.TaskOffset = clamp(m.taskGroupRowStart(groups, groupIndex), 0, maxInt(len(rows)-1, 0))
-			}
+			m.UI.TaskOffset = keepCursorVisible(taskGroupVisualStart(groups, groupIndex), m.UI.TaskOffset, taskViewport)
+		} else {
+			m.UI.TaskOffset = 0
+		}
+	} else if m.UI.Focus == PanelTasks && m.UI.GroupBy != TaskGroupNone {
+		groups := m.VisibleTaskGroups()
+		if position, ok := taskVisualPosition(groups, m.UI.SelectedTask); ok {
+			m.UI.TaskOffset = keepCursorVisible(position, m.UI.TaskOffset, taskViewport)
 		} else {
 			m.UI.TaskOffset = 0
 		}

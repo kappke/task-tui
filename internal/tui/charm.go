@@ -416,24 +416,13 @@ func (m *CharmModel) charmTaskLines(width int) []string {
 		}
 		return append(lines, charmMutedStyle.Render(fitAtOffset("(no tasks in this view)", width, m.core.UI.TaskHorizontalOffset)))
 	}
-	if m.core.UI.GroupBy != TaskGroupNone && allTaskGroupsCollapsed(groups) {
-		offset := clamp(m.core.UI.TaskOffset, 0, len(groups)-1)
-		if offset > 0 {
-			lines = append(lines, charmMutedStyle.Render("  ..."))
-		}
-		for _, group := range groups[offset:] {
-			heading := fitAtOffset(m.core.taskGroupLine(group), width, m.core.UI.TaskHorizontalOffset)
-			if m.core.taskGroupSelected(group) {
-				lines = append(lines, charmSelectedStyle.Render(heading))
-			} else {
-				lines = append(lines, charmMutedStyle.Render(heading))
-			}
-		}
-		return lines
-	}
 	offset := 0
-	if len(rows) > 0 {
-		offset = clamp(m.core.UI.TaskOffset, 0, len(rows)-1)
+	if m.core.UI.GroupBy == TaskGroupNone {
+		if len(rows) > 0 {
+			offset = clamp(m.core.UI.TaskOffset, 0, len(rows)-1)
+		}
+	} else {
+		offset = clamp(m.core.UI.TaskOffset, 0, maxInt(taskGroupVisualLength(groups)-1, 0))
 	}
 	if offset > 0 {
 		lines = append(lines, charmMutedStyle.Render("  ..."))
@@ -453,28 +442,27 @@ func (m *CharmModel) charmTaskLines(width int) []string {
 		return lines
 	}
 
+	visualIndex := 0
 	rowIndex := 0
 	for _, group := range groups {
-		if group.Collapsed {
+		if visualIndex >= offset {
 			heading := fitAtOffset(m.core.taskGroupLine(group), width, m.core.UI.TaskHorizontalOffset)
 			if m.core.taskGroupSelected(group) {
 				lines = append(lines, charmSelectedStyle.Render(heading))
 			} else {
 				lines = append(lines, charmMutedStyle.Render(heading))
 			}
+		}
+		visualIndex++
+		if group.Collapsed {
 			continue
 		}
-		groupStart := rowIndex
-		groupEnd := groupStart + len(group.Rows)
-		rowIndex = groupEnd
-		if groupEnd <= offset {
-			continue
-		}
-		heading := fitAtOffset(m.core.taskGroupLine(group), width, m.core.UI.TaskHorizontalOffset)
-		lines = append(lines, charmMutedStyle.Render(heading))
-		start := maxInt(offset-groupStart, 0)
-		for index, row := range group.Rows[start:] {
-			appendRow(row, groupStart+start+index)
+		for _, row := range group.Rows {
+			if visualIndex >= offset {
+				appendRow(row, rowIndex)
+			}
+			visualIndex++
+			rowIndex++
 		}
 	}
 	return lines

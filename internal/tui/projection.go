@@ -222,6 +222,50 @@ func allTaskGroupsCollapsed(groups []TaskGroup) bool {
 	return true
 }
 
+// taskGroupVisualLength is the number of lines occupied by grouped content.
+// Group headers are scroll items alongside task rows, rather than decoration
+// outside the task offset.
+func taskGroupVisualLength(groups []TaskGroup) int {
+	length := 0
+	for _, group := range groups {
+		length++
+		if !group.Collapsed {
+			length += len(group.Rows)
+		}
+	}
+	return length
+}
+
+func taskGroupVisualStart(groups []TaskGroup, target int) int {
+	start := 0
+	for index, group := range groups {
+		if index == target {
+			return start
+		}
+		start++
+		if !group.Collapsed {
+			start += len(group.Rows)
+		}
+	}
+	return start
+}
+
+func taskVisualPosition(groups []TaskGroup, wanted TaskRef) (int, bool) {
+	position := 0
+	for _, group := range groups {
+		position++
+		if !group.Collapsed {
+			for _, row := range group.Rows {
+				if taskRef(row) == wanted {
+					return position, true
+				}
+				position++
+			}
+		}
+	}
+	return 0, false
+}
+
 func taskGroupStateKey(mode TaskGroupMode, key string) string {
 	if mode == TaskGroupNone || key == "" {
 		return ""
