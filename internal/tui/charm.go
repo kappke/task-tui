@@ -170,11 +170,15 @@ func (m *CharmModel) View() string {
 		fitAtOffset(headerText, maxInt(width-4, 1), 0),
 	)
 	modeLine := m.charmModeLine(width)
+	completionLine := m.charmCommandCompletionLine(width)
 	statusLine := m.charmStatusLine(width)
 	footer := m.charmFooter(width)
 
 	fixedHeight := 2
 	if modeLine != "" {
+		fixedHeight++
+	}
+	if completionLine != "" {
 		fixedHeight++
 	}
 	if statusLine != "" {
@@ -193,6 +197,9 @@ func (m *CharmModel) View() string {
 	lines = append(lines, header, charmMutedStyle.Render(strings.Repeat("-", maxInt(width, 1))))
 	if modeLine != "" {
 		lines = append(lines, modeLine)
+	}
+	if completionLine != "" {
+		lines = append(lines, completionLine)
 	}
 	lines = append(lines, body)
 	if statusLine != "" {
@@ -527,7 +534,7 @@ func (m *CharmModel) charmModeLine(width int) string {
 		prefix = "FILTER"
 	case ModeCommand:
 		prefix = "COMMAND"
-		suffix = " enter run | esc cancel"
+		suffix = " tab/shift+tab complete | enter run | esc cancel"
 	case ModeCreateTask:
 		prefix = "NEW TASK"
 		suffix = " enter submit | esc cancel"
@@ -539,6 +546,30 @@ func (m *CharmModel) charmModeLine(width int) string {
 	}
 	line := prefix + ": " + m.input.View() + suffix
 	return fit(line, width)
+}
+
+func (m *CharmModel) charmCommandCompletionLine(width int) string {
+	if m.core.UI.Mode != ModeCommand {
+		return ""
+	}
+	_, candidates, _, _ := m.core.commandCompletion()
+	if len(m.core.UI.CommandCompletion) > 0 {
+		candidates = m.core.UI.CommandCompletion
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	start, end := completionWindow(candidates, m.core.UI.CommandCompletionIndex, width)
+	parts := make([]string, 0, end-start)
+	for index := start; index < end; index++ {
+		candidate := candidates[index]
+		if index == m.core.UI.CommandCompletionIndex {
+			parts = append(parts, charmSelectedStyle.Render(candidate))
+		} else {
+			parts = append(parts, charmMutedStyle.Render(candidate))
+		}
+	}
+	return "options: " + strings.Join(parts, "  ")
 }
 
 func (m *CharmModel) charmStatusLine(width int) string {

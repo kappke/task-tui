@@ -21,9 +21,13 @@ func (m Model) View() string {
 	header := fit(" TASK MANAGER | overall sync: "+string(m.overallSync()), width)
 	divider := fit(strings.Repeat("-", width), width)
 	modeLine := m.modeLine(width)
+	completionLine := m.commandCompletionLine(width)
 	statusLine := m.statusLine(width)
 	fixedLines := 3
 	if modeLine != "" {
+		fixedLines++
+	}
+	if completionLine != "" {
 		fixedLines++
 	}
 	if statusLine != "" {
@@ -37,6 +41,9 @@ func (m Model) View() string {
 		}
 		if len(lines) < height && modeLine != "" {
 			lines = append(lines, modeLine)
+		}
+		if len(lines) < height && completionLine != "" {
+			lines = append(lines, completionLine)
 		}
 		if len(lines) < height && statusLine != "" {
 			lines = append(lines, statusLine)
@@ -52,6 +59,9 @@ func (m Model) View() string {
 	lines = append(lines, header, divider)
 	if modeLine != "" {
 		lines = append(lines, modeLine)
+	}
+	if completionLine != "" {
+		lines = append(lines, completionLine)
 	}
 	for len(body) < bodyHeight {
 		body = append(body, "")
@@ -402,7 +412,7 @@ func (m Model) modeLine(width int) string {
 		suffix = " enter apply | esc cancel"
 	case ModeCommand:
 		prefix = "COMMAND"
-		suffix = " enter run | esc cancel"
+		suffix = " tab/shift+tab complete | enter run | esc cancel"
 	case ModeCreateTask:
 		prefix = "NEW TASK"
 		suffix = " enter submit | esc cancel"

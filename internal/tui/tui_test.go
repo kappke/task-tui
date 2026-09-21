@@ -196,6 +196,74 @@ func TestFilterAndCommandPalette(t *testing.T) {
 	}
 }
 
+func TestCommandCompletionCyclesCommandsAndOptions(t *testing.T) {
+	model := New(testSnapshot())
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	if view := model.View(); !strings.Contains(view, "create") || !strings.Contains(view, "refresh") {
+		t.Fatalf("command suggestions are not visible:\n%s", view)
+	}
+
+	model, _ = model.Update(KeyMsg{Key: "tab"})
+	if model.UI.Input != "create" {
+		t.Fatalf("first command completion = %q, want %q", model.UI.Input, "create")
+	}
+	model, _ = model.Update(KeyMsg{Key: "tab"})
+	if model.UI.Input != "edit" {
+		t.Fatalf("second command completion = %q, want %q", model.UI.Input, "edit")
+	}
+	model, _ = model.Update(KeyMsg{Key: "shift+tab"})
+	if model.UI.Input != "create" {
+		t.Fatalf("reverse command completion = %q, want %q", model.UI.Input, "create")
+	}
+
+	model.UI.Input = "group"
+	model.UI.InputCursor = runeCount(model.UI.Input)
+	model.resetCommandCompletion()
+	model, _ = model.Update(KeyMsg{Key: "tab"})
+	if model.UI.Input != "group" {
+		t.Fatalf("parent command completion added a space: %q", model.UI.Input)
+	}
+	model, _ = model.Update(KeyMsg{Runes: []rune{' '}})
+	model, _ = model.Update(KeyMsg{Key: "tab"})
+	if model.UI.Input != "group status" {
+		t.Fatalf("first group option = %q, want %q", model.UI.Input, "group status")
+	}
+	model, _ = model.Update(KeyMsg{Key: "tab"})
+	if model.UI.Input != "group assignee" {
+		t.Fatalf("second group option = %q, want %q", model.UI.Input, "group assignee")
+	}
+	model, _ = model.Update(KeyMsg{Key: "shift+tab"})
+	if model.UI.Input != "group status" {
+		t.Fatalf("reverse group option = %q, want %q", model.UI.Input, "group status")
+	}
+}
+
+func TestCharmCommandCompletionIsRendered(t *testing.T) {
+	model := NewCharmModel(New(testSnapshot()), CharmOptions{})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{':'}})
+	model = updated.(*CharmModel)
+	view := model.View()
+	if !strings.Contains(view, "create") || !strings.Contains(view, "refresh") {
+		t.Fatalf("Charm command suggestions are not visible:\n%s", view)
+	}
+}
+
+func TestCommandCompletionScrollsThroughOverflowingOptions(t *testing.T) {
+	model := New(testSnapshot())
+	model, _ = model.Update(WindowSizeMsg{Width: 35, Height: 24})
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	for index := 0; index < len(commandNames); index++ {
+		model, _ = model.Update(KeyMsg{Key: "tab"})
+	}
+	line := model.commandCompletionLine(35)
+	if !strings.Contains(line, "[help]") {
+		t.Fatalf("selected final command is not visible in completion window:\n%s", line)
+	}
+	if strings.Contains(line, "~") {
+		t.Fatalf("completion options were truncated instead of scrolled:\n%s", line)
+	}
+}
+
 func TestTaskGroupingByStatusAssigneeAndHierarchy(t *testing.T) {
 	parentID := TaskID("parent")
 	snapshot := testSnapshot()

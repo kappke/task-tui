@@ -950,6 +950,7 @@ func (m *Model) beginCommand() {
 	m.UI.Input = ""
 	m.UI.InputCursor = 0
 	m.UI.InputOrigin = ""
+	m.resetCommandCompletion()
 	m.Status = Status{Level: StatusInfo, Text: "Command palette: create, edit, complete, delete, search, filter, group, refresh"}
 }
 
@@ -976,24 +977,39 @@ func (m Model) updateInput(key KeyMsg) (Model, Cmd) {
 		return m, nil
 	case "enter":
 		return m.submitInput()
+	case "tab":
+		if m.UI.Mode == ModeCommand {
+			m.completeCommand(false)
+		}
+		return m, nil
+	case "shift+tab":
+		if m.UI.Mode == ModeCommand {
+			m.completeCommand(true)
+		}
+		return m, nil
 	case "backspace", "ctrl+h":
+		m.resetCommandCompletion()
 		m.deleteInputRune()
 		m.liveSearch()
 		return m, nil
 	case "left", "shift+left":
+		m.resetCommandCompletion()
 		if m.UI.InputCursor > 0 {
 			m.UI.InputCursor--
 		}
 		return m, nil
 	case "right", "shift+right":
+		m.resetCommandCompletion()
 		if m.UI.InputCursor < runeCount(m.UI.Input) {
 			m.UI.InputCursor++
 		}
 		return m, nil
 	case "home":
+		m.resetCommandCompletion()
 		m.UI.InputCursor = 0
 		return m, nil
 	case "end":
+		m.resetCommandCompletion()
 		m.UI.InputCursor = runeCount(m.UI.Input)
 		return m, nil
 	}
@@ -1002,6 +1018,7 @@ func (m Model) updateInput(key KeyMsg) (Model, Cmd) {
 	if text == "" {
 		return m, nil
 	}
+	m.resetCommandCompletion()
 	inserted := false
 	for _, char := range text {
 		if unicode.IsPrint(char) || char == '\t' {

@@ -199,6 +199,10 @@ type UIState struct {
 	InputCursor             int
 	InputOrigin             string
 	InputOriginSearchActive bool
+	CommandCompletion       []string
+	CommandCompletionIndex  int
+	CommandCompletionStart  int
+	CommandCompletionEnd    int
 	PendingCommand          AppCommand
 	HasPending              bool
 	ConfirmPrompt           string
