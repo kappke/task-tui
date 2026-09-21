@@ -210,6 +210,18 @@ func flattenTaskGroups(groups []TaskGroup) []TaskRow {
 	return rows
 }
 
+func allTaskGroupsCollapsed(groups []TaskGroup) bool {
+	if len(groups) == 0 {
+		return false
+	}
+	for _, group := range groups {
+		if !group.Collapsed {
+			return false
+		}
+	}
+	return true
+}
+
 func taskGroupStateKey(mode TaskGroupMode, key string) string {
 	if mode == TaskGroupNone || key == "" {
 		return ""

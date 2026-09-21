@@ -163,6 +163,16 @@ func (m Model) taskLines(width int) []string {
 		}
 		return append(lines, fit("  (no tasks in this view)", width))
 	}
+	if m.UI.GroupBy != TaskGroupNone && allTaskGroupsCollapsed(groups) {
+		offset := clamp(m.UI.TaskOffset, 0, len(groups)-1)
+		if offset > 0 {
+			lines = append(lines, fit("  ...", width))
+		}
+		for _, group := range groups[offset:] {
+			lines = append(lines, fitAtOffset(m.taskGroupLine(group), width, m.UI.TaskHorizontalOffset))
+		}
+		return lines
+	}
 	offset := 0
 	if len(rows) > 0 {
 		offset = clamp(m.UI.TaskOffset, 0, len(rows)-1)
@@ -431,7 +441,7 @@ func (m Model) footerLine() string {
 	if m.UI.Mode == ModeDetail {
 		return "j/k or up/down scroll | g/G top/bottom | esc close | q quit"
 	}
-	return "j/k or up/down move | tab switch panel | h/l or left/right scroll | enter open/toggle group | space collapse/expand group | g/G first/last | n new | e edit | x complete | d delete | / search | f filter | : group/filter/commands | r refresh | q quit"
+	return "j/k or up/down move | tab switch panel | h/l or left/right scroll | enter open/toggle group | space collapse/expand group | +/- expand/collapse all | g/G first/last | n new | e edit | x complete | d delete | / search | f filter | : group/filter/commands | r refresh | q quit"
 }
 
 func (m Model) overallSync() SyncState {

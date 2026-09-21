@@ -416,6 +416,21 @@ func (m *CharmModel) charmTaskLines(width int) []string {
 		}
 		return append(lines, charmMutedStyle.Render(fitAtOffset("(no tasks in this view)", width, m.core.UI.TaskHorizontalOffset)))
 	}
+	if m.core.UI.GroupBy != TaskGroupNone && allTaskGroupsCollapsed(groups) {
+		offset := clamp(m.core.UI.TaskOffset, 0, len(groups)-1)
+		if offset > 0 {
+			lines = append(lines, charmMutedStyle.Render("  ..."))
+		}
+		for _, group := range groups[offset:] {
+			heading := fitAtOffset(m.core.taskGroupLine(group), width, m.core.UI.TaskHorizontalOffset)
+			if m.core.taskGroupSelected(group) {
+				lines = append(lines, charmSelectedStyle.Render(heading))
+			} else {
+				lines = append(lines, charmMutedStyle.Render(heading))
+			}
+		}
+		return lines
+	}
 	offset := 0
 	if len(rows) > 0 {
 		offset = clamp(m.core.UI.TaskOffset, 0, len(rows)-1)
@@ -584,6 +599,8 @@ func newCharmHelpKeyMap() charmHelpKeyMap {
 		bind([]string{"h", "l", "left", "right"}, "h/l", "scroll"),
 		bind([]string{"enter"}, "enter", "open/toggle"),
 		bind([]string{"space"}, "space", "group"),
+		bind([]string{"+", "="}, "+", "expand all"),
+		bind([]string{"-"}, "-", "collapse all"),
 		bind([]string{"n", "e", "x", "d"}, "n/e/x/d", "task"),
 		bind([]string{"/"}, "/", "search"),
 		bind([]string{"f"}, "f", "filter"),

@@ -16,6 +16,8 @@ const (
 	ActionScrollLeft    Action = "scroll_left"
 	ActionScrollRight   Action = "scroll_right"
 	ActionSelect        Action = "select"
+	ActionExpandAll     Action = "expand_all"
+	ActionCollapseAll   Action = "collapse_all"
 	ActionToggleGroup   Action = "toggle_group"
 	ActionFirst         Action = "first"
 	ActionLast          Action = "last"
@@ -55,6 +57,9 @@ func DefaultKeyMap() KeyMap {
 		"tab":         ActionNextPanel,
 		"shift+tab":   ActionPreviousPanel,
 		"enter":       ActionSelect,
+		"+":           ActionExpandAll,
+		"=":           ActionExpandAll,
+		"-":           ActionCollapseAll,
 		"space":       ActionToggleGroup,
 		"g":           ActionFirst,
 		"G":           ActionLast,

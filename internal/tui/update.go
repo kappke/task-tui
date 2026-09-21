@@ -451,6 +451,10 @@ func (m Model) updateBrowse(key KeyMsg, action Action) (Model, Cmd) {
 		m.scrollHorizontal(horizontalScrollStep)
 	case ActionSelect:
 		m.selectCurrent()
+	case ActionExpandAll:
+		m.setAllExpanded(true)
+	case ActionCollapseAll:
+		m.setAllExpanded(false)
 	case ActionToggleGroup:
 		m.toggleTaskGroup()
 	case ActionQuit:
@@ -622,6 +626,12 @@ func (m Model) currentTaskGroupIndex(groups []TaskGroup) int {
 }
 
 func (m Model) taskGroupRowStart(groups []TaskGroup, target int) int {
+	if len(groups) == 0 {
+		return 0
+	}
+	if allTaskGroupsCollapsed(groups) {
+		return clamp(target, 0, len(groups)-1)
+	}
 	start := 0
 	for index, group := range groups {
 		if index == target {
@@ -746,6 +756,130 @@ func (m *Model) selectCurrent() {
 	m.UI.ExpandedNodes = cloneExpanded(m.UI.ExpandedNodes)
 	m.UI.ExpandedNodes[node.Ref] = !node.Expanded
 	m.Status = Status{Level: StatusInfo, Text: expansionText(node, !node.Expanded)}
+}
+
+func (m *Model) setAllExpanded(expanded bool) {
+	if m.UI.Focus == PanelHierarchy {
+		m.setAllHierarchyExpanded(expanded)
+		return
+	}
+	m.setAllTaskGroupsExpanded(expanded)
+}
+
+func (m *Model) setAllHierarchyExpanded(expanded bool) {
+	providers := m.viewProviders()
+	if len(providers) == 0 {
+		m.Status = Status{Level: StatusWarning, Text: "No cached hierarchy to expand or collapse"}
+		return
+	}
+
+	oldNode := m.UI.SelectedNode
+	m.UI.ExpandedNodes = cloneExpanded(m.UI.ExpandedNodes)
+	for _, provider := range providers {
+		providerRef := TreeNodeRef{Kind: TreeNodeProvider, ProviderID: provider.ID}
+		m.UI.ExpandedNodes[providerRef] = expanded
+		for _, space := range m.Data.Spaces {
+			if space.ProviderID != provider.ID {
+				continue
+			}
+			spaceRef := TreeNodeRef{
+				Kind:       TreeNodeSpace,
+				ProviderID: provider.ID,
+				SpaceID:    space.ID,
+			}
+			m.UI.ExpandedNodes[spaceRef] = expanded
+		}
+	}
+
+	nodes := m.TreeNodes()
+	selectedIndex := findNode(nodes, oldNode)
+	if selectedIndex < 0 {
+		ancestor := TreeNodeRef{Kind: TreeNodeProvider, ProviderID: oldNode.ProviderID}
+		selectedIndex = findNode(nodes, ancestor)
+	}
+	if selectedIndex < 0 {
+		if len(nodes) == 0 {
+			m.UI.SelectedNode = TreeNodeRef{}
+			m.UI.TreeCursor = 0
+		} else {
+			selectedIndex = clamp(m.UI.TreeCursor, 0, len(nodes)-1)
+		}
+	}
+	if selectedIndex >= 0 {
+		m.UI.TreeCursor = selectedIndex
+		m.UI.SelectedNode = nodes[selectedIndex].Ref
+	}
+	if oldNode != m.UI.SelectedNode {
+		m.UI.SelectedTask = TaskRef{}
+		m.UI.TaskCursor = 0
+		m.selectTaskAt(0)
+	}
+	m.Status = Status{Level: StatusInfo, Text: hierarchyExpansionText(expanded)}
+}
+
+func hierarchyExpansionText(expanded bool) string {
+	if expanded {
+		return "Expanded all lists"
+	}
+	return "Collapsed all lists"
+}
+
+func (m *Model) setAllTaskGroupsExpanded(expanded bool) {
+	if m.UI.GroupBy == TaskGroupNone {
+		m.Status = Status{Level: StatusWarning, Text: "Enable task grouping before expanding or collapsing all tasks"}
+		return
+	}
+
+	groups := m.VisibleTaskGroups()
+	if len(groups) == 0 {
+		m.Status = Status{Level: StatusWarning, Text: "No task groups to expand or collapse"}
+		return
+	}
+
+	selected := m.UI.SelectedTask
+	if m.UI.TaskHeaderSelected && m.UI.TaskHeaderTask != (TaskRef{}) {
+		selected = m.UI.TaskHeaderTask
+	}
+	m.UI.CollapsedGroups = cloneCollapsed(m.UI.CollapsedGroups)
+	for _, group := range groups {
+		stateKey := taskGroupStateKey(m.UI.GroupBy, group.Key)
+		if expanded {
+			delete(m.UI.CollapsedGroups, stateKey)
+		} else {
+			m.UI.CollapsedGroups[stateKey] = true
+		}
+	}
+
+	if expanded {
+		m.UI.TaskHeaderSelected = false
+		m.UI.TaskHeaderTask = TaskRef{}
+		m.UI.FocusedGroup = ""
+		if !m.selectTaskRef(selected) {
+			m.selectTaskAt(0)
+		}
+		m.Status = Status{Level: StatusInfo, Text: "Expanded all task groups"}
+		return
+	}
+
+	groups = m.VisibleTaskGroups()
+	groupIndex := taskGroupIndexForRef(groups, selected)
+	if groupIndex < 0 {
+		groupIndex = clamp(m.UI.TaskGroupCursor, 0, len(groups)-1)
+	}
+	m.focusTaskGroupHeader(groups, groupIndex, selected)
+	m.Status = Status{Level: StatusInfo, Text: "Collapsed all task groups"}
+}
+
+func taskGroupIndexForRef(groups []TaskGroup, wanted TaskRef) int {
+	if wanted == (TaskRef{}) {
+		return -1
+	}
+	for index, group := range groups {
+		if findTask(group.Rows, wanted) >= 0 {
+			return index
+		}
+	}
+	return -1
 }
 
 func expansionText(node TreeNode, expanded bool) string {
@@ -1450,8 +1584,12 @@ func (m *Model) keepVisible() {
 		groups := m.VisibleTaskGroups()
 		groupIndex := m.currentTaskGroupIndex(groups)
 		if groupIndex >= 0 {
-			rows := flattenTaskGroups(groups)
-			m.UI.TaskOffset = clamp(m.taskGroupRowStart(groups, groupIndex), 0, maxInt(len(rows)-1, 0))
+			if allTaskGroupsCollapsed(groups) {
+				m.UI.TaskOffset = clamp(m.taskGroupRowStart(groups, groupIndex), 0, len(groups)-1)
+			} else {
+				rows := flattenTaskGroups(groups)
+				m.UI.TaskOffset = clamp(m.taskGroupRowStart(groups, groupIndex), 0, maxInt(len(rows)-1, 0))
+			}
 		} else {
 			m.UI.TaskOffset = 0
 		}

@@ -26,6 +26,9 @@ func TestDefaultKeyMap(t *testing.T) {
 		{key: "tab", action: ActionNextPanel},
 		{key: "shift+tab", action: ActionPreviousPanel},
 		{key: "enter", action: ActionSelect},
+		{key: "+", action: ActionExpandAll},
+		{key: "=", action: ActionExpandAll},
+		{key: "-", action: ActionCollapseAll},
 		{key: "space", action: ActionToggleGroup},
 		{key: "g", action: ActionFirst},
 		{key: "G", action: ActionLast},
@@ -356,6 +359,125 @@ func TestCollapsedGroupHeadersCanBeSelectedAndExpanded(t *testing.T) {
 	model, _ = model.Update(KeyMsg{Key: "enter"})
 	if model.VisibleTaskGroups()[0].Collapsed {
 		t.Fatal("enter did not expand the selected collapsed header")
+	}
+}
+
+func TestExpandAndCollapseAllHierarchyNodes(t *testing.T) {
+	model := New(testSnapshot())
+	model, _ = model.Update(KeyMsg{Key: "-"})
+
+	nodes := model.TreeNodes()
+	if len(nodes) != 2 {
+		t.Fatalf("collapsed hierarchy nodes = %d, want two providers", len(nodes))
+	}
+	for _, node := range nodes {
+		if node.Ref.Kind != TreeNodeProvider || node.Expanded {
+			t.Fatalf("collapsed hierarchy node = %#v, want collapsed provider", node)
+		}
+	}
+	if model.UI.SelectedNode.Kind != TreeNodeProvider || model.UI.SelectedNode.ProviderID != "work" {
+		t.Fatalf("selection after collapse all = %#v, want work provider", model.UI.SelectedNode)
+	}
+
+	model, _ = model.Update(KeyMsg{Key: "+"})
+	nodes = model.TreeNodes()
+	if len(nodes) != 6 {
+		t.Fatalf("expanded hierarchy nodes = %d, want providers, spaces, and lists", len(nodes))
+	}
+	for _, node := range nodes {
+		if node.Ref.Kind != TreeNodeProvider && node.Ref.Kind != TreeNodeSpace {
+			continue
+		}
+		if !node.Expanded {
+			t.Fatalf("expanded hierarchy node = %#v, want expanded", node)
+		}
+	}
+}
+
+func TestExpandAndCollapseAllTaskGroups(t *testing.T) {
+	snapshot := testSnapshot()
+	snapshot.Tasks = append(snapshot.Tasks, Task{
+		ID:         "done",
+		ProviderID: "work",
+		ListID:     "backend",
+		Title:      "Done task",
+		Status:     "done",
+		SyncState:  SyncStateLocal,
+	})
+	model := New(snapshot)
+	model.UI.Focus = PanelTasks
+	model.UI.GroupBy = TaskGroupStatus
+	model.selectTaskRef(TaskRef{ProviderID: "work", TaskID: "same"})
+	taskCount := len(model.VisibleTasks())
+
+	model, _ = model.Update(KeyMsg{Key: "-"})
+	groups := model.VisibleTaskGroups()
+	if len(groups) != 2 {
+		t.Fatalf("task groups = %d, want two", len(groups))
+	}
+	for _, group := range groups {
+		if !group.Collapsed {
+			t.Fatalf("task group = %#v, want collapsed", group)
+		}
+	}
+	if got := len(model.VisibleTasks()); got != 0 {
+		t.Fatalf("visible tasks after collapse all = %d, want zero", got)
+	}
+	if !model.UI.TaskHeaderSelected || model.UI.SelectedTask.TaskID != "same" {
+		t.Fatalf("task selection after collapse all = %#v, want selected hidden task", model.UI)
+	}
+
+	model, _ = model.Update(KeyMsg{Key: "+"})
+	for _, group := range model.VisibleTaskGroups() {
+		if group.Collapsed {
+			t.Fatalf("task group = %#v, want expanded", group)
+		}
+	}
+	if got := len(model.VisibleTasks()); got != taskCount {
+		t.Fatalf("visible tasks after expand all = %d, want %d", got, taskCount)
+	}
+	if model.UI.SelectedTask.TaskID != "same" || model.UI.TaskHeaderSelected {
+		t.Fatalf("task selection after expand all = %#v, want selected task row", model.UI)
+	}
+}
+
+func TestCollapsedTaskGroupHeadersScrollWhenTheyOverflow(t *testing.T) {
+	snapshot := Snapshot{
+		Providers: []Provider{{ID: "work", Name: "Work", Type: ProviderTypeLocal, SyncState: SyncStateLocal}},
+		Spaces:    []Space{{ID: "space", ProviderID: "work", Name: "Space", SyncState: SyncStateLocal}},
+		Lists:     []List{{ID: "list", ProviderID: "work", SpaceID: "space", Name: "List", SyncState: SyncStateLocal}},
+	}
+	for index := 0; index < 12; index++ {
+		snapshot.Tasks = append(snapshot.Tasks, Task{
+			ID:         TaskID(fmt.Sprintf("task-%02d", index)),
+			ProviderID: "work",
+			ListID:     "list",
+			Title:      fmt.Sprintf("Task %02d", index),
+			Status:     fmt.Sprintf("status-%02d", index),
+		})
+	}
+
+	model := New(snapshot)
+	model.UI.Focus = PanelTasks
+	model.UI.GroupBy = TaskGroupStatus
+	model.selectTaskAt(0)
+	model, _ = model.Update(WindowSizeMsg{Width: 100, Height: 12})
+	model, _ = model.Update(KeyMsg{Key: "-"})
+	for index := 0; index < 11; index++ {
+		model, _ = model.Update(KeyMsg{Key: "j"})
+	}
+	if model.UI.TaskOffset == 0 {
+		t.Fatal("collapsed task group headers did not advance the task offset")
+	}
+	if view := model.View(); !strings.Contains(view, "STATUS-11") {
+		t.Fatalf("plain renderer did not scroll to the selected collapsed group:\n%s", view)
+	}
+
+	charm := NewCharmModel(model, CharmOptions{})
+	updated, _ := charm.Update(tea.WindowSizeMsg{Width: 100, Height: 12})
+	charm = updated.(*CharmModel)
+	if view := charm.View(); !strings.Contains(view, "STATUS-11") {
+		t.Fatalf("Charm renderer did not keep the selected collapsed group visible:\n%s", view)
 	}
 }
 
