@@ -139,9 +139,19 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 
 	ui.SetState(UIState{
 		Panel:           string(foundationtui.PanelTasks),
+		ProviderID:      "work",
+		SpaceID:         "engineering",
+		ListID:          "backend",
 		GroupBy:         string(foundationtui.TaskGroupStatus),
 		CollapsedGroups: []string{" status:done ", "status:done", "assignee:alice"},
 	})
+	if ui.model.UI.ActiveProviderID != "work" || ui.model.UI.SelectedNode.ListID != "backend" {
+		t.Fatalf("restored selection = %#v, active provider = %q", ui.model.UI.SelectedNode, ui.model.UI.ActiveProviderID)
+	}
+	state = ui.State()
+	if state.ProviderID != "work" || state.SpaceID != "engineering" || state.ListID != "backend" {
+		t.Fatalf("restored opened list state = %#v, want work/engineering/backend", state)
+	}
 	if !ui.model.UI.CollapsedGroups["status:done"] || !ui.model.UI.CollapsedGroups["assignee:alice"] || len(ui.model.UI.CollapsedGroups) != 2 {
 		t.Fatalf("restored collapsed groups = %#v, want two unique keys", ui.model.UI.CollapsedGroups)
 	}

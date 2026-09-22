@@ -1306,7 +1306,7 @@ func (m Model) applyFilter(filter Filter, command AppCommand) (Model, Cmd) {
 }
 
 func (m Model) applyGrouping(mode TaskGroupMode, command AppCommand) (Model, Cmd) {
-	if mode != TaskGroupNone && mode != TaskGroupStatus && mode != TaskGroupAssignee && mode != TaskGroupTasksSubtasks {
+	if mode != TaskGroupNone && mode != TaskGroupStatus && mode != TaskGroupAssignee && mode != TaskGroupPriority && mode != TaskGroupTasksSubtasks {
 		m.Status = Status{Level: StatusError, Text: "unknown task group " + string(mode)}
 		return m, nil
 	}

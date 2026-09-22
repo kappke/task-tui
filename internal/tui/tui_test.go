@@ -475,11 +475,11 @@ func TestTaskGroupingByStatusAssigneeAndHierarchy(t *testing.T) {
 	parentID := TaskID("parent")
 	snapshot := testSnapshot()
 	snapshot.Tasks = []Task{
-		{ID: "open-b", ProviderID: "work", ListID: "backend", Title: "Open B", Status: "open", Assignee: "Bob"},
-		{ID: "done", ProviderID: "work", ListID: "backend", Title: "Done", Status: "done", Assignee: "Alice"},
+		{ID: "open-b", ProviderID: "work", ListID: "backend", Title: "Open B", Status: "open", Priority: PriorityHigh, Assignee: "Bob"},
+		{ID: "done", ProviderID: "work", ListID: "backend", Title: "Done", Status: "done", Priority: PriorityNormal, Assignee: "Alice"},
 		{ID: parentID, ProviderID: "work", ListID: "backend", Title: "Parent", Status: "open", Assignee: "Alice"},
 		{ID: "child", ProviderID: "work", ListID: "backend", ParentTaskID: &parentID, Title: "Child", Status: "open", Assignee: "Alice"},
-		{ID: "unassigned", ProviderID: "work", ListID: "backend", Title: "Unassigned", Status: "open"},
+		{ID: "unassigned", ProviderID: "work", ListID: "backend", Title: "Unassigned", Status: "open", Priority: PriorityNone},
 	}
 	model := New(snapshot)
 
@@ -490,6 +490,12 @@ func TestTaskGroupingByStatusAssigneeAndHierarchy(t *testing.T) {
 	}
 	if got := model.VisibleTasks()[0].Task.ID; got != "done" {
 		t.Fatalf("status grouping first task = %q, want done", got)
+	}
+
+	model.UI.GroupBy = TaskGroupPriority
+	priorityGroups := model.VisibleTaskGroups()
+	if len(priorityGroups) != 3 || priorityGroups[0].Label != "high" || priorityGroups[1].Label != "normal" || priorityGroups[2].Label != "None" {
+		t.Fatalf("priority groups = %#v, want high/normal/None", priorityGroups)
 	}
 
 	model.UI.GroupBy = TaskGroupAssignee
@@ -516,6 +522,7 @@ func TestTaskGroupingCommandPalette(t *testing.T) {
 	for input, want := range map[string]TaskGroupMode{
 		"group status":            TaskGroupStatus,
 		"group assignee":          TaskGroupAssignee,
+		"group priority":          TaskGroupPriority,
 		"group tasks":             TaskGroupTasksSubtasks,
 		"group by tasks/subtasks": TaskGroupTasksSubtasks,
 		"ungroup":                 TaskGroupNone,
@@ -561,6 +568,7 @@ func TestTaskGroupsCanBeCollapsedAndExpanded(t *testing.T) {
 	}{
 		{name: "status", mode: TaskGroupStatus},
 		{name: "assignee", mode: TaskGroupAssignee},
+		{name: "priority", mode: TaskGroupPriority},
 		{name: "tasks and subtasks", mode: TaskGroupTasksSubtasks},
 	}
 

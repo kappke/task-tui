@@ -304,7 +304,7 @@ func groupTaskRows(rows []TaskRow, mode TaskGroupMode) []TaskGroup {
 	}
 
 	switch mode {
-	case TaskGroupStatus, TaskGroupAssignee:
+	case TaskGroupStatus, TaskGroupAssignee, TaskGroupPriority:
 		groupsByKey := make(map[string]int, len(rows))
 		groups := make([]TaskGroup, 0, len(rows))
 		for _, row := range rows {
@@ -318,6 +318,9 @@ func groupTaskRows(rows []TaskRow, mode TaskGroupMode) []TaskGroup {
 			groups[groupIndex].Rows = append(groups[groupIndex].Rows, row)
 		}
 		sort.SliceStable(groups, func(left, right int) bool {
+			if mode == TaskGroupPriority {
+				return priorityRank(Priority(groups[left].Key)) > priorityRank(Priority(groups[right].Key))
+			}
 			return normalize(groups[left].Label) < normalize(groups[right].Label)
 		})
 		return groups
@@ -343,6 +346,11 @@ func taskGroupValue(row TaskRow, mode TaskGroupMode) (key, label string) {
 		}
 		if value == "" {
 			value = "Unassigned"
+		}
+	case TaskGroupPriority:
+		value = strings.TrimSpace(string(row.Task.Priority))
+		if value == "" || normalize(value) == string(PriorityNone) {
+			value = "None"
 		}
 	default:
 		value = "Tasks"

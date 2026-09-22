@@ -1334,6 +1334,7 @@ func (u *foundationUIController) SetState(state UIState) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.model.UI.Focus = foundationPanel(state.Panel)
+	u.model.UI.ActiveProviderID = foundationtui.ProviderID(state.ProviderID)
 	if u.model.UI.Focus == "" {
 		u.model.UI.Focus = foundationtui.PanelHierarchy
 	}
@@ -1345,6 +1346,15 @@ func (u *foundationUIController) SetState(state UIState) {
 		u.model.UI.TreeCursor = max(0, state.Cursor)
 	}
 	u.model.UI.SelectedNode = foundationNodeRef(state)
+	if state.ProviderID != "" && state.ListID != "" {
+		u.activeList = &foundationTaskScope{
+			providerID: ProviderID(state.ProviderID),
+			spaceID:    SpaceID(state.SpaceID),
+			listID:     ListID(state.ListID),
+		}
+	} else {
+		u.activeList = nil
+	}
 	u.model.UI.Filter = foundationtui.Filter{}
 	u.model.UI.FilterActive = false
 	if strings.TrimSpace(state.Filter) != "" {
@@ -1503,6 +1513,11 @@ func (u *foundationUIController) State() UIState {
 	state.ProviderID = string(ref.ProviderID)
 	state.SpaceID = string(ref.SpaceID)
 	state.ListID = string(ref.ListID)
+	if u.activeList != nil {
+		state.ProviderID = string(u.activeList.providerID)
+		state.SpaceID = string(u.activeList.spaceID)
+		state.ListID = string(u.activeList.listID)
+	}
 	if model.UI.FilterActive {
 		state.Filter = model.UI.Filter.String()
 	}
@@ -1665,11 +1680,15 @@ func (u *foundationUIController) teaCommand(ctx context.Context, input foundatio
 			}
 			var view View
 			var err error
-			if input.ListID != "" && u.loadList != nil {
+			if input.ListID != "" {
 				u.mu.Lock()
 				u.activeList = &foundationTaskScope{providerID: ProviderID(input.ProviderID), spaceID: SpaceID(input.SpaceID), listID: ListID(input.ListID)}
 				u.mu.Unlock()
-				view, err = u.loadList(ctx, ProviderID(input.ProviderID), ListID(input.ListID))
+				if u.loadList != nil {
+					view, err = u.loadList(ctx, ProviderID(input.ProviderID), ListID(input.ListID))
+				} else {
+					view, err = u.load(ctx)
+				}
 			} else {
 				view, err = u.load(ctx)
 			}

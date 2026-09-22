@@ -136,6 +136,7 @@ const (
 	TaskGroupNone          TaskGroupMode = ""
 	TaskGroupStatus        TaskGroupMode = "status"
 	TaskGroupAssignee      TaskGroupMode = "assignee"
+	TaskGroupPriority      TaskGroupMode = "priority"
 	TaskGroupTasksSubtasks TaskGroupMode = "tasks_subtasks"
 )
 
@@ -146,6 +147,7 @@ const (
 	GroupByNone          = TaskGroupNone
 	GroupByStatus        = TaskGroupStatus
 	GroupByAssignee      = TaskGroupAssignee
+	GroupByPriority      = TaskGroupPriority
 	GroupByTasksSubtasks = TaskGroupTasksSubtasks
 )
 

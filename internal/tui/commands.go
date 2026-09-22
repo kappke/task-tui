@@ -208,7 +208,7 @@ func ParseTaskGroupMode(input string) (TaskGroupMode, error) {
 		fields = fields[1:]
 	}
 	if len(fields) != 1 {
-		return TaskGroupNone, errors.New("group requires status, assignee, tasks, or none")
+		return TaskGroupNone, errors.New("group requires status, assignee, priority, tasks, or none")
 	}
 	switch fields[0] {
 	case "none", "off", "clear", "ungroup":
@@ -217,6 +217,8 @@ func ParseTaskGroupMode(input string) (TaskGroupMode, error) {
 		return TaskGroupStatus, nil
 	case "assignee", "assignees", "owner":
 		return TaskGroupAssignee, nil
+	case "priority", "priorities":
+		return TaskGroupPriority, nil
 	case "task", "tasks", "subtask", "subtasks", "hierarchy", "tasks/subtasks", "task/subtask", "tasks_subtasks":
 		return TaskGroupTasksSubtasks, nil
 	default:

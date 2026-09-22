@@ -24,7 +24,7 @@ var taskCommandNames = []string{"create", "edit", "complete", "delete"}
 
 var hierarchyCommandNames = []string{"create", "new"}
 
-var groupNames = []string{"status", "assignee", "tasks", "none"}
+var groupNames = []string{"status", "assignee", "priority", "tasks", "none"}
 
 func (m Model) commandCompletion() (prefix string, candidates []string, start, end int) {
 	input := m.UI.Input
