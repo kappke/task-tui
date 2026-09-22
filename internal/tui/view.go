@@ -427,13 +427,37 @@ func (m Model) modeLine(width int) string {
 		suffix = " enter submit | esc cancel"
 	case ModeEditTask:
 		prefix = "EDIT TASK"
-		suffix = " enter submit | esc cancel"
+		if m.UI.EditAllFields {
+			prefix += " " + editFieldLabel(m.UI.EditField)
+			suffix = " tab/enter next | final enter save | esc cancel"
+		} else {
+			suffix = " enter submit | esc cancel"
+		}
 	case ModeConfirm:
 		return fit("CONFIRM: "+safeText(m.UI.ConfirmPrompt)+"  [y/enter] yes  [n/esc] no", width)
 	default:
 		return ""
 	}
 	return fit(prefix+": "+inputWithCursor(m.UI.Input, m.UI.InputCursor)+suffix, width)
+}
+
+func editFieldLabel(field EditField) string {
+	switch field {
+	case EditFieldTitle:
+		return "TITLE"
+	case EditFieldDescription:
+		return "DESCRIPTION"
+	case EditFieldAssignee:
+		return "ASSIGNEE"
+	case EditFieldStatus:
+		return "STATUS"
+	case EditFieldPriority:
+		return "PRIORITY"
+	case EditFieldDue:
+		return "DUE (YYYY-MM-DD)"
+	default:
+		return ""
+	}
 }
 
 func (m Model) statusLine(width int) string {

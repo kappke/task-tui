@@ -100,7 +100,63 @@ func (s *foundationDataStore) snapshotWithTaskScope(ctx context.Context, provide
 		}
 		tasks = append(tasks, providerTasks...)
 	}
-	return viewFromDomain(providers, spaces, lists, tasks), nil
+	view := viewFromDomain(providers, spaces, lists, tasks)
+	options, err := s.editorOptions(ctx, spaces, lists)
+	if err != nil {
+		return View{}, err
+	}
+	view.EditorOptions = options
+	return view, nil
+}
+
+func (s *foundationDataStore) editorOptions(ctx context.Context, spaces []domain.Space, lists []domain.List) ([]TaskEditorOptions, error) {
+	spaceStatuses := make(map[domain.SpaceID][]string, len(spaces))
+	for _, space := range spaces {
+		metadata, err := s.store.ListMetadata(ctx, space.ProviderID, domain.EntityTypeSpace, string(space.ID))
+		if err != nil {
+			return nil, fmt.Errorf("list editor metadata for space %s: %w", space.ID, err)
+		}
+		spaceStatuses[space.ID], _ = statusNames(metadata)
+	}
+	options := make([]TaskEditorOptions, 0, len(lists))
+	for _, list := range lists {
+		metadata, err := s.store.ListMetadata(ctx, list.ProviderID, domain.EntityTypeList, string(list.ID))
+		if err != nil {
+			return nil, fmt.Errorf("list editor metadata for list %s: %w", list.ID, err)
+		}
+		statuses, hasListMetadata := statusNames(metadata)
+		if !hasListMetadata {
+			statuses = append([]string(nil), spaceStatuses[list.SpaceID]...)
+		}
+		options = append(options, TaskEditorOptions{
+			ProviderID: ProviderID(list.ProviderID), SpaceID: SpaceID(list.SpaceID), ListID: ListID(list.ID), Statuses: statuses,
+		})
+	}
+	return options, nil
+}
+
+func statusNames(metadata []domain.ProviderMetadata) ([]string, bool) {
+	for _, item := range metadata {
+		if item.Key != "clickup.statuses" {
+			continue
+		}
+		var value struct {
+			Statuses []struct {
+				Name string `json:"name"`
+			} `json:"statuses"`
+		}
+		if err := json.Unmarshal([]byte(item.Value), &value); err != nil {
+			return nil, false
+		}
+		result := make([]string, 0, len(value.Statuses))
+		for _, status := range value.Statuses {
+			if strings.TrimSpace(status.Name) != "" {
+				result = append(result, status.Name)
+			}
+		}
+		return result, true
+	}
+	return nil, false
 }
 
 func (s *foundationDataStore) SnapshotForList(ctx context.Context, providerID ProviderID, listID ListID) (View, error) {
@@ -355,6 +411,13 @@ func (p *cachedProvider) pull(ctx context.Context) error {
 		if conflict {
 			continue
 		}
+		if metadata, ok := p.Provider.(providerpkg.StatusMetadataProvider); ok {
+			for _, item := range metadata.SpaceStatusMetadata(storedSpace) {
+				if err := p.store.UpsertMetadata(ctx, item); err != nil {
+					return fmt.Errorf("store status metadata for space %s: %w", storedSpace.ID, err)
+				}
+			}
+		}
 		lists, err := p.Provider.FetchLists(ctx, storedSpace.ID)
 		if err != nil {
 			return fmt.Errorf("fetch lists for space %s: %w", storedSpace.ID, err)
@@ -374,6 +437,13 @@ func (p *cachedProvider) pull(ctx context.Context) error {
 			}
 			if conflict {
 				continue
+			}
+			if metadata, ok := p.Provider.(providerpkg.StatusMetadataProvider); ok {
+				for _, item := range metadata.ListStatusMetadata(storedList) {
+					if err := p.store.UpsertMetadata(ctx, item); err != nil {
+						return fmt.Errorf("store status metadata for list %s: %w", storedList.ID, err)
+					}
+				}
 			}
 			// FetchTasks accepts the local identity at the provider boundary. A
 			// ClickUp provider resolves it to the remote list ID before calling
@@ -1116,25 +1186,30 @@ func foundationCommand(input command.Command) (app.Command, error) {
 		}, nil
 	case command.KindUpdateTask:
 		patch := domain.TaskPatch{}
-		if input.Title != "" {
+		if input.Title != "" || input.EditAllFields {
 			value := input.Title
 			patch.Title = &value
 		}
-		if input.Description != "" {
+		if input.Description != "" || input.EditAllFields {
 			value := input.Description
 			patch.Description = &value
 		}
-		if input.Status != "" {
+		if input.EditAllFields {
+			value := input.Assignee
+			patch.Assignee = &value
+		}
+		if input.Status != "" || input.EditAllFields {
 			value := input.Status
 			patch.Status = &value
 		}
-		if input.Priority != "" {
+		if input.Priority != "" || input.EditAllFields {
 			value := domain.Priority(input.Priority)
 			patch.Priority = &value
 		}
 		if input.DueAt != nil {
 			patch.DueAt = cloneTime(input.DueAt)
 		}
+		patch.ClearDueAt = input.ClearDueAt
 		return app.PatchTaskCommand{TaskID: domain.TaskID(input.TaskID), Patch: patch}, nil
 	case command.KindCompleteTask:
 		if input.Completed != nil && !*input.Completed {
@@ -1810,15 +1885,18 @@ func foundationUICommand(input foundationtui.AppCommand) (command.Command, bool,
 		}, true, nil
 	case foundationtui.CommandUpdateTask:
 		return command.Command{
-			Kind:        command.KindUpdateTask,
-			ProviderID:  string(input.ProviderID),
-			ListID:      string(input.ListID),
-			TaskID:      string(input.TaskID),
-			Title:       input.Title,
-			Description: input.Description,
-			Status:      input.Status,
-			Priority:    string(input.Priority),
-			DueAt:       cloneTime(input.DueAt),
+			Kind:          command.KindUpdateTask,
+			ProviderID:    string(input.ProviderID),
+			ListID:        string(input.ListID),
+			TaskID:        string(input.TaskID),
+			Title:         input.Title,
+			Description:   input.Description,
+			Assignee:      input.Assignee,
+			Status:        input.Status,
+			Priority:      string(input.Priority),
+			DueAt:         cloneTime(input.DueAt),
+			ClearDueAt:    input.ClearDueAt,
+			EditAllFields: input.EditAllFields,
 		}, true, nil
 	case foundationtui.CommandCompleteTask:
 		completed := input.Completed
@@ -1932,12 +2010,21 @@ func foundationSnapshot(view View) foundationtui.Snapshot {
 			UpdatedAt:       value.UpdatedAt,
 		})
 	}
-	return foundationtui.SnapshotFromDomain(foundationtui.DomainSnapshot{
+	snapshot := foundationtui.SnapshotFromDomain(foundationtui.DomainSnapshot{
 		Providers: providers,
 		Spaces:    spaces,
 		Lists:     lists,
 		Tasks:     tasks,
 	})
+	for _, option := range view.EditorOptions {
+		snapshot.EditorOptions = append(snapshot.EditorOptions, foundationtui.TaskEditorOptions{
+			ProviderID: foundationtui.ProviderID(option.ProviderID),
+			SpaceID:    foundationtui.SpaceID(option.SpaceID),
+			ListID:     foundationtui.ListID(option.ListID),
+			Statuses:   append([]string(nil), option.Statuses...),
+		})
+	}
+	return snapshot
 }
 
 func max(left, right int) int {

@@ -37,12 +37,15 @@ type Command struct {
 	ListID     string
 	TaskID     string
 
-	Title       string
-	Description string
-	Status      string
-	Priority    string
-	DueAt       *time.Time
-	Completed   *bool
+	Title         string
+	Description   string
+	Assignee      string
+	Status        string
+	Priority      string
+	DueAt         *time.Time
+	ClearDueAt    bool
+	EditAllFields bool
+	Completed     *bool
 
 	// DestinationListID is used by explicit move and transfer commands. A
 	// normal move is only valid within the source provider.

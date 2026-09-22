@@ -463,6 +463,18 @@ func (c *Client) GetTask(ctx context.Context, taskID string) (wireTask, error) {
 	return response, nil
 }
 
+func (c *Client) GetListDetails(ctx context.Context, listID string) (wireListDetails, error) {
+	var response wireListDetails
+	path := "/list/" + url.PathEscape(listID)
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return wireListDetails{}, err
+	}
+	if response.ID.String() == "" {
+		return wireListDetails{}, c.malformedResponse(http.MethodGet, path, "list ID is missing")
+	}
+	return response, nil
+}
+
 func (c *Client) Task(ctx context.Context, taskID string) (wireTask, error) {
 	return c.GetTask(ctx, taskID)
 }

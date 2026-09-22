@@ -50,21 +50,24 @@ const (
 // AppCommand is the normalized contract between presentation and application
 // layers. ProviderID is carried on every provider-owned task operation.
 type AppCommand struct {
-	Kind        CommandKind
-	ProviderID  ProviderID
-	SpaceID     SpaceID
-	ListID      ListID
-	TaskID      TaskID
-	Title       string
-	Description string
-	Priority    Priority
-	DueAt       *time.Time
-	Query       string
-	Filter      Filter
-	GroupBy     TaskGroupMode
-	Completed   bool
-	Status      string
-	Raw         string
+	Kind          CommandKind
+	ProviderID    ProviderID
+	SpaceID       SpaceID
+	ListID        ListID
+	TaskID        TaskID
+	Title         string
+	Description   string
+	Assignee      string
+	Priority      Priority
+	DueAt         *time.Time
+	ClearDueAt    bool
+	Query         string
+	Filter        Filter
+	GroupBy       TaskGroupMode
+	Completed     bool
+	Status        string
+	Raw           string
+	EditAllFields bool
 }
 
 // Command is a concise alias for the presentation-to-application contract.

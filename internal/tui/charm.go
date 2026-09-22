@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -26,10 +29,22 @@ type CharmModel struct {
 	core    Model
 	options CharmOptions
 
-	input    textinput.Model
-	help     help.Model
-	helpKeys charmHelpKeyMap
-	viewport viewport.Model
+	input           textinput.Model
+	help            help.Model
+	helpKeys        charmHelpKeyMap
+	viewport        viewport.Model
+	pendingTaskEdit *pendingTaskEdit
+}
+
+type pendingTaskEdit struct {
+	path     string
+	original []byte
+	script   string
+}
+
+type taskEditorFinishedMsg struct {
+	path string
+	err  error
 }
 
 var _ tea.Model = (*CharmModel)(nil)
@@ -114,6 +129,14 @@ func (m *CharmModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if finished, ok := msg.(taskEditorFinishedMsg); ok {
+		return m, m.finishTaskEditor(finished)
+	}
+
+	if key, ok := msg.(tea.KeyMsg); ok && m.shouldOpenTaskEditor(key) {
+		return m, m.startTaskEditor()
+	}
+
 	var inputCmd tea.Cmd
 	if m.inputMode() {
 		m.input, inputCmd = m.input.Update(msg)
@@ -147,6 +170,150 @@ func (m *CharmModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		commands = append(commands, tea.Quit)
 	}
 	return m, tea.Batch(commands...)
+}
+
+func (m *CharmModel) shouldOpenTaskEditor(msg tea.KeyMsg) bool {
+	if m.pendingTaskEdit != nil || m.core.UI.Mode != ModeBrowse || m.core.UI.Focus != PanelTasks {
+		return false
+	}
+	key := charmKeyMessage(msg)
+	return key.name() == "enter" || key.name() == "e"
+}
+
+func (m *CharmModel) startTaskEditor() tea.Cmd {
+	row, ok := m.core.selectedTask()
+	if !ok {
+		m.core.Status = Status{Level: StatusWarning, Text: "Select a task before editing"}
+		return nil
+	}
+	original := []byte(RenderTaskDocument(row.Task))
+	file, err := os.CreateTemp("", "task-tui-*.md")
+	if err != nil {
+		m.core.Status = Status{Level: StatusError, Text: "Could not create task editor buffer: " + err.Error()}
+		return nil
+	}
+	path := file.Name()
+	if _, err := file.Write(original); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		m.core.Status = Status{Level: StatusError, Text: "Could not write task editor buffer: " + err.Error()}
+		return nil
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		m.core.Status = Status{Level: StatusError, Text: "Could not close task editor buffer: " + err.Error()}
+		return nil
+	}
+	script, err := m.createTaskEditorScript(row.Task)
+	if err != nil {
+		_ = os.Remove(path)
+		m.core.Status = Status{Level: StatusError, Text: "Could not create task editor configuration: " + err.Error()}
+		return nil
+	}
+	m.pendingTaskEdit = &pendingTaskEdit{path: path, original: original, script: script}
+	m.core.Status = Status{Level: StatusInfo, Text: "Editing task in Neovim; save the buffer to apply changes"}
+	return tea.ExecProcess(exec.Command("nvim", "-S", script, path), func(err error) tea.Msg {
+		return taskEditorFinishedMsg{path: path, err: err}
+	})
+}
+
+func (m *CharmModel) finishTaskEditor(finished taskEditorFinishedMsg) tea.Cmd {
+	pending := m.pendingTaskEdit
+	m.pendingTaskEdit = nil
+	defer os.Remove(finished.path)
+	if pending != nil && pending.script != "" {
+		defer os.Remove(pending.script)
+	}
+	if finished.err != nil {
+		m.core.Status = Status{Level: StatusError, Text: "Neovim exited with an error: " + finished.err.Error()}
+		return nil
+	}
+	data, err := os.ReadFile(finished.path)
+	if err != nil {
+		m.core.Status = Status{Level: StatusError, Text: "Could not read task editor buffer: " + err.Error()}
+		return nil
+	}
+	if pending != nil && bytes.Equal(data, pending.original) {
+		m.core.Status = Status{Level: StatusInfo, Text: "Task edit discarded"}
+		return nil
+	}
+	row, ok := m.core.selectedTask()
+	if !ok {
+		m.core.Status = Status{Level: StatusError, Text: "Selected task is no longer available"}
+		return nil
+	}
+	task, err := ParseTaskDocumentWithOptions(string(data), row.Task, m.taskEditorOptions(row.Task))
+	if err != nil {
+		m.core.Status = Status{Level: StatusError, Text: "Invalid task document: " + err.Error()}
+		return nil
+	}
+	if taskDocumentEqual(task, row.Task) {
+		m.core.Status = Status{Level: StatusInfo, Text: "Task edit discarded"}
+		return nil
+	}
+	command := AppCommand{
+		Kind:          CommandUpdateTask,
+		ProviderID:    task.ProviderID,
+		ListID:        task.ListID,
+		TaskID:        task.ID,
+		Title:         task.Title,
+		Description:   task.Description,
+		Assignee:      task.Assignee,
+		Status:        task.Status,
+		Priority:      task.Priority,
+		DueAt:         cloneTime(task.DueAt),
+		ClearDueAt:    task.DueAt == nil,
+		EditAllFields: true,
+	}
+	m.core.Status = Status{Level: StatusInfo, Text: "Task update requested locally; sync is asynchronous"}
+	return m.dispatch(m.core.emit(command))
+}
+
+func (m *CharmModel) taskEditorOptions(task Task) TaskEditorOptions {
+	for _, options := range m.core.Data.EditorOptions {
+		if options.ListID == task.ListID && options.ProviderID == task.ProviderID {
+			return options
+		}
+	}
+	return TaskEditorOptions{}
+}
+
+func (m *CharmModel) createTaskEditorScript(task Task) (string, error) {
+	options := m.taskEditorOptions(task)
+	values := append([]string{}, options.Statuses...)
+	values = append(values, "urgent", "high", "normal", "low")
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		quoted = append(quoted, "'"+strings.ReplaceAll(strings.ReplaceAll(value, "'", "''"), "\\", "\\\\")+"'")
+	}
+	content := "let g:task_tui_complete_values = [" + strings.Join(quoted, ",") + "]\n" +
+		"function! TaskTuiComplete(findstart, base) abort\n" +
+		"  if a:findstart\n" +
+		"    let line = getline('.')\n" +
+		"    let start = col('.') - 1\n" +
+		"    while start > 0 && line[start - 1] =~ '\\S'\n" +
+		"      let start -= 1\n" +
+		"    endwhile\n" +
+		"    return start\n" +
+		"  endif\n" +
+		`  return filter(copy(g:task_tui_complete_values), 'v:val =~? "^" . escape(a:base, "\\.*$^~[]")')` + "\n" +
+		"endfunction\n" +
+		"autocmd BufReadPost,BufNewFile * setlocal omnifunc=TaskTuiComplete\n"
+	file, err := os.CreateTemp("", "task-tui-*.vim")
+	if err != nil {
+		return "", err
+	}
+	path := file.Name()
+	if _, err := file.WriteString(content); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return path, nil
 }
 
 // View implements tea.Model and uses Lip Gloss for the full-window layout.
@@ -545,8 +712,12 @@ func (m *CharmModel) charmModeLine(width int) string {
 		prefix = "NEW LIST"
 		suffix = " enter submit | esc cancel"
 	case ModeEditTask:
-		prefix = "EDIT TASK"
-		suffix = " enter submit | esc cancel"
+		prefix = "EDIT TASK " + editFieldLabel(m.core.UI.EditField)
+		if m.core.UI.EditAllFields {
+			suffix = " tab/enter next | final enter save | esc cancel"
+		} else {
+			suffix = " enter submit | esc cancel"
+		}
 	default:
 		return ""
 	}
@@ -650,6 +821,7 @@ func newCharmDetailHelpKeyMap() charmHelpKeyMap {
 	short := []key.Binding{
 		bind([]string{"j", "k", "up", "down"}, "j/k", "scroll"),
 		bind([]string{"g", "G"}, "g/G", "top/bottom"),
+		bind([]string{"e"}, "e", "edit"),
 		bind([]string{"esc"}, "esc", "close"),
 		bind([]string{"q", "ctrl+c"}, "q", "quit"),
 	}

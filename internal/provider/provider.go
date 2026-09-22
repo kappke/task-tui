@@ -74,3 +74,10 @@ type Authentication = Authenticator
 
 // AuthProvider is a concise alias for the optional authentication contract.
 type AuthProvider = Authenticator
+
+// StatusMetadataProvider exposes provider-owned editor options without adding
+// provider-specific fields to the core hierarchy models.
+type StatusMetadataProvider interface {
+	SpaceStatusMetadata(domain.Space) []domain.ProviderMetadata
+	ListStatusMetadata(domain.List) []domain.ProviderMetadata
+}

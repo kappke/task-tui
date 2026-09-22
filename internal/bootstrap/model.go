@@ -169,9 +169,18 @@ type UIState struct {
 // View is the local snapshot supplied to the TUI. It is intentionally a
 // snapshot so rendering does not perform I/O or synchronize providers.
 type View struct {
-	Providers  []ProviderRecord
-	Spaces     []Space
-	Lists      []List
-	Tasks      []Task
-	SyncErrors map[ProviderID]string
+	Providers     []ProviderRecord
+	Spaces        []Space
+	Lists         []List
+	Tasks         []Task
+	EditorOptions []TaskEditorOptions
+	SyncErrors    map[ProviderID]string
+}
+
+// TaskEditorOptions contains provider-owned completion values for one list.
+type TaskEditorOptions struct {
+	ProviderID ProviderID
+	SpaceID    SpaceID
+	ListID     ListID
+	Statuses   []string
 }

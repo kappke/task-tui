@@ -55,10 +55,21 @@ const (
 // Snapshot is the cached, normalized data supplied by the application layer.
 // The TUI treats it as input state and never performs persistence itself.
 type Snapshot struct {
-	Providers []Provider
-	Spaces    []Space
-	Lists     []List
-	Tasks     []Task
+	Providers     []Provider
+	Spaces        []Space
+	Lists         []List
+	Tasks         []Task
+	EditorOptions []TaskEditorOptions
+}
+
+// TaskEditorOptions contains cached values used by the external editor's
+// buffer-local completion. An empty status list means no provider vocabulary is
+// available and the parser should retain offline-friendly behavior.
+type TaskEditorOptions struct {
+	ProviderID ProviderID
+	SpaceID    SpaceID
+	ListID     ListID
+	Statuses   []string
 }
 
 // Data is a readable alias for integrations that call their local cache data
@@ -173,6 +184,18 @@ const (
 	ModeConfirm     Mode = "confirm"
 )
 
+// EditField identifies the editable fields shown by the task detail editor.
+type EditField int
+
+const (
+	EditFieldTitle EditField = iota
+	EditFieldDescription
+	EditFieldAssignee
+	EditFieldStatus
+	EditFieldPriority
+	EditFieldDue
+)
+
 // UIState contains only presentation state. Domain objects remain in Data.
 type UIState struct {
 	Focus                   Panel
@@ -202,6 +225,9 @@ type UIState struct {
 	InputCursor             int
 	InputOrigin             string
 	InputOriginSearchActive bool
+	EditTask                Task
+	EditField               EditField
+	EditAllFields           bool
 	CommandCompletion       []string
 	CommandCompletionIndex  int
 	CommandCompletionStart  int
@@ -308,6 +334,10 @@ func cloneSnapshot(in Snapshot) Snapshot {
 	out.Spaces = append([]Space(nil), in.Spaces...)
 	out.Lists = append([]List(nil), in.Lists...)
 	out.Tasks = append([]Task(nil), in.Tasks...)
+	out.EditorOptions = append([]TaskEditorOptions(nil), in.EditorOptions...)
+	for index := range out.EditorOptions {
+		out.EditorOptions[index].Statuses = append([]string(nil), in.EditorOptions[index].Statuses...)
+	}
 
 	for i := range out.Providers {
 		out.Providers[i].Configuration = cloneRawMessage(in.Providers[i].Configuration)

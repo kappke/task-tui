@@ -54,10 +54,11 @@ type spacesResponse struct {
 }
 
 type wireSpace struct {
-	ID       wireString `json:"id"`
-	Name     string     `json:"name"`
-	TeamID   string     `json:"-"`
-	TeamName string     `json:"-"`
+	ID       wireString   `json:"id"`
+	Name     string       `json:"name"`
+	Statuses []wireStatus `json:"statuses"`
+	TeamID   string       `json:"-"`
+	TeamName string       `json:"-"`
 }
 
 type foldersResponse struct {
@@ -75,6 +76,12 @@ type listsResponse struct {
 type wireList struct {
 	ID   wireString `json:"id"`
 	Name string     `json:"name"`
+}
+
+type wireListDetails struct {
+	ID               wireString   `json:"id"`
+	OverrideStatuses bool         `json:"override_statuses"`
+	Statuses         []wireStatus `json:"statuses"`
 }
 
 type tasksResponse struct {

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -135,6 +136,76 @@ func TestTaskDetailViewOpensScrollsAndCloses(t *testing.T) {
 	model, _ = model.Update(KeyMsg{Key: "esc"})
 	if model.UI.Mode != ModeBrowse || model.UI.DetailOffset != 0 {
 		t.Fatalf("close detail: mode=%q offset=%d", model.UI.Mode, model.UI.DetailOffset)
+	}
+}
+
+func TestTaskDocumentRoundTripPreservesMetadataAndParsesEdits(t *testing.T) {
+	task := testSnapshot().Tasks[0]
+	document := RenderTaskDocument(task)
+	document = strings.Replace(document, `title: "Fix auth"`, `title: "Updated auth"`, 1)
+	document = strings.Replace(document, "fix auth regression; shared", "A longer body\nwith two lines.", 1)
+	document = strings.Replace(document, `due_at: null`, `due_at: "2026-09-21T12:00:00Z"`, 1)
+
+	updated, err := ParseTaskDocument(document, task)
+	if err != nil {
+		t.Fatalf("ParseTaskDocument: %v", err)
+	}
+	if updated.ID != task.ID || updated.ProviderID != task.ProviderID || updated.ListID != task.ListID {
+		t.Fatalf("identity changed: %#v", updated)
+	}
+	if updated.Title != "Updated auth" || updated.Description != "A longer body\nwith two lines." {
+		t.Fatalf("editable text = title %q, description %q", updated.Title, updated.Description)
+	}
+	if updated.DueAt == nil || updated.DueAt.Format(time.RFC3339) != "2026-09-21T12:00:00Z" {
+		t.Fatalf("due date = %v", updated.DueAt)
+	}
+}
+
+func TestTaskEditorAppliesSavedBufferAndDiscardsUnchangedBuffer(t *testing.T) {
+	var received AppCommand
+	model := NewCharmModel(New(testSnapshot()), CharmOptions{OnCommand: func(command AppCommand) tea.Cmd {
+		received = command
+		return nil
+	}})
+	row, ok := model.core.selectedTask()
+	if !ok {
+		t.Fatal("no selected task")
+	}
+	original := []byte(RenderTaskDocument(row.Task))
+	file, err := os.CreateTemp("", "task-tui-test-*.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := file.Name()
+	_ = file.Close()
+	defer os.Remove(path)
+	changed := strings.Replace(string(original), `title: "Fix auth"`, `title: "Saved auth"`, 1)
+	if err := os.WriteFile(path, []byte(changed), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model.pendingTaskEdit = &pendingTaskEdit{path: path, original: original}
+	if command := model.finishTaskEditor(taskEditorFinishedMsg{path: path}); command != nil {
+		_ = command()
+	}
+	if received.Title != "Saved auth" || received.Kind != CommandUpdateTask {
+		t.Fatalf("saved task command = %#v", received)
+	}
+
+	file, err = os.CreateTemp("", "task-tui-test-*.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path = file.Name()
+	if _, err := file.Write(original); err != nil {
+		t.Fatal(err)
+	}
+	_ = file.Close()
+	model.pendingTaskEdit = &pendingTaskEdit{path: path, original: original}
+	if command := model.finishTaskEditor(taskEditorFinishedMsg{path: path}); command != nil {
+		t.Fatal("unchanged buffer emitted a task command")
+	}
+	if !strings.Contains(model.core.Status.Text, "discarded") {
+		t.Fatalf("unchanged buffer status = %q", model.core.Status.Text)
 	}
 }
 
@@ -934,23 +1005,20 @@ func TestCharmModelUsesBubbleTeaMessagesAndRendersPanels(t *testing.T) {
 
 func TestCharmModelRendersTaskDetails(t *testing.T) {
 	model := NewCharmModel(New(testSnapshot()), CharmOptions{})
+	defer func() {
+		if model.pendingTaskEdit != nil {
+			_ = os.Remove(model.pendingTaskEdit.path)
+		}
+	}()
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyTab})
 	model = updated.(*CharmModel)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(*CharmModel)
-	if model.CoreModel().UI.Mode != ModeDetail {
-		t.Fatalf("mode = %q, want %q", model.CoreModel().UI.Mode, ModeDetail)
+	if model.CoreModel().UI.Mode != ModeBrowse || model.pendingTaskEdit == nil {
+		t.Fatalf("mode = %q, pending editor=%v", model.CoreModel().UI.Mode, model.pendingTaskEdit != nil)
 	}
-	view := model.View()
-	for _, value := range []string{"TASK DETAIL", "DESCRIPTION", "fix auth regression; shared"} {
-		if !strings.Contains(view, value) {
-			t.Fatalf("detail view does not contain %q:\n%s", value, view)
-		}
-	}
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEscape})
-	model = updated.(*CharmModel)
-	if model.CoreModel().UI.Mode != ModeBrowse {
-		t.Fatalf("mode after escape = %q, want %q", model.CoreModel().UI.Mode, ModeBrowse)
+	if data, err := os.ReadFile(model.pendingTaskEdit.path); err != nil || !strings.Contains(string(data), "fix auth regression; shared") {
+		t.Fatalf("editor buffer = %q, error=%v", data, err)
 	}
 }
 

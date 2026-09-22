@@ -2,6 +2,7 @@ package clickup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -60,6 +61,27 @@ type Provider struct {
 	remoteListResolver  any
 	localListResolver   any
 	remoteSpaceResolver any
+	spaceStatuses       map[string][]wireStatus
+	listStatuses        map[string]listStatusMetadata
+}
+
+type listStatusMetadata struct {
+	override bool
+	statuses []wireStatus
+}
+
+type statusMetadataValue struct {
+	Statuses         []StatusOption `json:"statuses"`
+	OverrideStatuses bool           `json:"override_statuses,omitempty"`
+}
+
+// StatusOption is a provider-neutral completion option with optional display
+// metadata retained for editor integrations.
+type StatusOption struct {
+	Name  string `json:"name"`
+	Type  string `json:"type,omitempty"`
+	Order int    `json:"order"`
+	Color string `json:"color,omitempty"`
 }
 
 // New constructs a provider from a client, provider identity, or
@@ -172,8 +194,12 @@ func newProvider(config ProviderConfig) *Provider {
 		remoteListResolver:  config.RemoteListResolver,
 		localListResolver:   config.LocalListResolver,
 		remoteSpaceResolver: config.RemoteSpaceResolver,
+		spaceStatuses:       make(map[string][]wireStatus),
+		listStatuses:        make(map[string]listStatusMetadata),
 	}
 }
+
+var _ provider.StatusMetadataProvider = (*Provider)(nil)
 
 func (p *Provider) ID() domain.ProviderID {
 	return p.id
@@ -226,6 +252,9 @@ func (p *Provider) FetchSpaces(ctx context.Context) ([]domain.Space, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fetch ClickUp spaces: %w", err)
 	}
+	for _, space := range spaces {
+		p.spaceStatuses[space.ID.String()] = append([]wireStatus(nil), space.Statuses...)
+	}
 	return p.mapper.MapSpaces(spaces), nil
 }
 
@@ -241,7 +270,47 @@ func (p *Provider) FetchLists(ctx context.Context, spaceID domain.SpaceID) ([]do
 	if err != nil {
 		return nil, fmt.Errorf("fetch ClickUp lists for space %s: %w", spaceID, err)
 	}
+	for _, list := range lists {
+		details, err := p.client.GetListDetails(ctx, list.ID.String())
+		if err != nil {
+			// List summaries are still useful offline when the detail endpoint is
+			// unavailable or an older test/server does not implement it.
+			continue
+		}
+		p.listStatuses[list.ID.String()] = listStatusMetadata{
+			override: details.OverrideStatuses,
+			statuses: append([]wireStatus(nil), details.Statuses...),
+		}
+	}
 	return p.mapper.MapLists(lists, spaceID), nil
+}
+
+func (p *Provider) SpaceStatusMetadata(space domain.Space) []domain.ProviderMetadata {
+	if p == nil || space.RemoteID == nil {
+		return nil
+	}
+	statuses := p.spaceStatuses[*space.RemoteID]
+	return []domain.ProviderMetadata{statusMetadata(space.ProviderID, domain.EntityTypeSpace, string(space.ID), statuses, false)}
+}
+
+func (p *Provider) ListStatusMetadata(list domain.List) []domain.ProviderMetadata {
+	if p == nil || list.RemoteID == nil {
+		return nil
+	}
+	metadata, ok := p.listStatuses[*list.RemoteID]
+	if !ok {
+		return nil
+	}
+	return []domain.ProviderMetadata{statusMetadata(list.ProviderID, domain.EntityTypeList, string(list.ID), metadata.statuses, metadata.override)}
+}
+
+func statusMetadata(providerID domain.ProviderID, entityType domain.EntityType, entityID string, statuses []wireStatus, override bool) domain.ProviderMetadata {
+	options := make([]StatusOption, 0, len(statuses))
+	for index, status := range statuses {
+		options = append(options, StatusOption{Name: status.Status, Type: status.Type, Order: index, Color: status.Color})
+	}
+	value, _ := json.Marshal(statusMetadataValue{Statuses: options, OverrideStatuses: override})
+	return domain.ProviderMetadata{ProviderID: providerID, EntityType: entityType, EntityID: entityID, Key: "clickup.statuses", Value: string(value)}
 }
 
 func (p *Provider) FetchTasks(ctx context.Context, listID domain.ListID) ([]domain.Task, error) {

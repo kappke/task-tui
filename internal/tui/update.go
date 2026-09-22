@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -451,6 +452,8 @@ func (m Model) updateDetail(key KeyMsg) (Model, Cmd) {
 		m.UI.DetailOffset = m.maxDetailOffset()
 	case ActionCancel:
 		m.closeDetail()
+	case ActionEdit:
+		m.beginDetailEdit()
 	case ActionQuit:
 		m.UI.Quitting = true
 		m.Status = Status{Level: StatusInfo, Text: "Quit requested"}
@@ -975,8 +978,89 @@ func (m *Model) beginEdit() bool {
 	m.UI.Input = row.Task.Title
 	m.UI.InputCursor = runeCount(m.UI.Input)
 	m.UI.InputOrigin = m.UI.Input
+	m.UI.EditAllFields = false
 	m.Status = Status{Level: StatusInfo, Text: "Edit task title; press enter to submit"}
 	return true
+}
+
+func (m *Model) beginDetailEdit() {
+	row, ok := m.selectedTask()
+	if !ok {
+		m.Status = Status{Level: StatusWarning, Text: "Select a task before editing"}
+		return
+	}
+	m.UI.Mode = ModeEditTask
+	m.UI.EditTask = cloneTask(row.Task)
+	m.UI.EditField = EditFieldTitle
+	m.UI.EditAllFields = true
+	m.setEditInput()
+	m.Status = Status{Level: StatusInfo, Text: "Edit task fields; tab/enter moves between fields"}
+}
+
+func (m *Model) setEditInput() {
+	switch m.UI.EditField {
+	case EditFieldTitle:
+		m.UI.Input = m.UI.EditTask.Title
+	case EditFieldDescription:
+		m.UI.Input = m.UI.EditTask.Description
+	case EditFieldAssignee:
+		m.UI.Input = m.UI.EditTask.Assignee
+	case EditFieldStatus:
+		m.UI.Input = m.UI.EditTask.Status
+	case EditFieldPriority:
+		m.UI.Input = string(m.UI.EditTask.Priority)
+	case EditFieldDue:
+		m.UI.Input = ""
+		if m.UI.EditTask.DueAt != nil {
+			m.UI.Input = m.UI.EditTask.DueAt.Format("2006-01-02")
+		}
+	}
+	m.UI.InputCursor = runeCount(m.UI.Input)
+}
+
+func (m *Model) commitEditInput() {
+	switch m.UI.EditField {
+	case EditFieldTitle:
+		m.UI.EditTask.Title = strings.TrimSpace(m.UI.Input)
+	case EditFieldDescription:
+		m.UI.EditTask.Description = m.UI.Input
+	case EditFieldAssignee:
+		m.UI.EditTask.Assignee = strings.TrimSpace(m.UI.Input)
+	case EditFieldStatus:
+		m.UI.EditTask.Status = strings.TrimSpace(m.UI.Input)
+	case EditFieldPriority:
+		m.UI.EditTask.Priority = Priority(strings.TrimSpace(m.UI.Input))
+	case EditFieldDue:
+		value := strings.TrimSpace(m.UI.Input)
+		m.UI.EditTask.DueAt = nil
+		if value != "" {
+			if due, err := parseEditDue(value); err == nil {
+				m.UI.EditTask.DueAt = &due
+			}
+		}
+	}
+}
+
+func parseEditDue(value string) (time.Time, error) {
+	for _, layout := range []string{time.DateOnly, time.RFC3339, "2006-01-02 15:04"} {
+		if due, err := time.Parse(layout, value); err == nil {
+			return due.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("due date must be YYYY-MM-DD or RFC3339")
+}
+
+func (m *Model) moveEditField(delta int) {
+	m.commitEditInput()
+	field := int(m.UI.EditField) + delta
+	if field < int(EditFieldTitle) {
+		field = int(EditFieldDue)
+	}
+	if field > int(EditFieldDue) {
+		field = int(EditFieldTitle)
+	}
+	m.UI.EditField = EditField(field)
+	m.setEditInput()
 }
 
 func (m *Model) beginSearch() {
@@ -1026,18 +1110,34 @@ func (m Model) updateInput(key KeyMsg) (Model, Cmd) {
 			return m, nil
 		}
 	}
+	if m.UI.Mode == ModeEditTask && m.UI.EditAllFields && m.UI.EditField == EditFieldDescription && keyName == "ctrl+j" {
+		m.insertInputRune('\n')
+		return m, nil
+	}
 	switch keyName {
 	case "esc", "escape":
 		m.cancelInput()
 		return m, nil
 	case "enter":
+		if m.UI.Mode == ModeEditTask && m.UI.EditAllFields && m.UI.EditField != EditFieldDue {
+			m.moveEditField(1)
+			return m, nil
+		}
 		return m.submitInput()
 	case "tab":
+		if m.UI.Mode == ModeEditTask && m.UI.EditAllFields {
+			m.moveEditField(1)
+			return m, nil
+		}
 		if m.UI.Mode == ModeCommand {
 			m.completeCommand(false)
 		}
 		return m, nil
 	case "shift+tab":
+		if m.UI.Mode == ModeEditTask && m.UI.EditAllFields {
+			m.moveEditField(-1)
+			return m, nil
+		}
 		if m.UI.Mode == ModeCommand {
 			m.completeCommand(true)
 		}
@@ -1129,6 +1229,8 @@ func (m *Model) cancelInput() {
 	m.UI.InputCursor = 0
 	m.UI.InputOrigin = ""
 	m.UI.InputOriginSearchActive = false
+	m.UI.EditTask = Task{}
+	m.UI.EditAllFields = false
 	m.UI.HasPending = false
 	m.UI.PendingCommand = AppCommand{}
 	m.UI.ConfirmPrompt = ""
@@ -1398,7 +1500,47 @@ func (m Model) submitCreateTitle(title string, command AppCommand) (Model, Cmd) 
 }
 
 func (m Model) submitEdit() (Model, Cmd) {
+	if m.UI.EditAllFields {
+		return m.submitDetailEdit()
+	}
 	return m.submitEditTitle(strings.TrimSpace(m.UI.Input), AppCommand{Kind: CommandUpdateTask})
+}
+
+func (m Model) submitDetailEdit() (Model, Cmd) {
+	m.commitEditInput()
+	if strings.TrimSpace(m.UI.EditTask.Title) == "" {
+		m.Status = Status{Level: StatusError, Text: "Task title cannot be empty"}
+		return m, nil
+	}
+	if m.UI.EditField == EditFieldDue && strings.TrimSpace(m.UI.Input) != "" {
+		due, err := parseEditDue(strings.TrimSpace(m.UI.Input))
+		if err != nil {
+			m.Status = Status{Level: StatusError, Text: err.Error()}
+			return m, nil
+		}
+		m.UI.EditTask.DueAt = &due
+	}
+	command := AppCommand{
+		Kind:          CommandUpdateTask,
+		ProviderID:    m.UI.EditTask.ProviderID,
+		ListID:        m.UI.EditTask.ListID,
+		TaskID:        m.UI.EditTask.ID,
+		Title:         m.UI.EditTask.Title,
+		Description:   m.UI.EditTask.Description,
+		Assignee:      m.UI.EditTask.Assignee,
+		Status:        m.UI.EditTask.Status,
+		Priority:      m.UI.EditTask.Priority,
+		DueAt:         cloneTime(m.UI.EditTask.DueAt),
+		ClearDueAt:    m.UI.EditTask.DueAt == nil,
+		EditAllFields: true,
+	}
+	m.UI.Mode = ModeDetail
+	m.UI.Input = ""
+	m.UI.InputCursor = 0
+	m.UI.EditTask = Task{}
+	m.UI.EditAllFields = false
+	m.Status = Status{Level: StatusInfo, Text: "Edit requested locally; sync is asynchronous"}
+	return m, m.emit(command)
 }
 
 func (m Model) submitEditTitle(title string, command AppCommand) (Model, Cmd) {
@@ -1487,6 +1629,8 @@ func (m *Model) cancelBrowseView() {
 func (m *Model) closeDetail() {
 	m.UI.Mode = ModeBrowse
 	m.UI.DetailOffset = 0
+	m.UI.EditTask = Task{}
+	m.UI.EditAllFields = false
 	m.Status = Status{Level: StatusInfo, Text: "Closed task details"}
 }
 
