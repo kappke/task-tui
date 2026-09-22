@@ -2039,6 +2039,11 @@ type foundationGraph struct {
 	handler command.Handler
 	sync    SyncController
 	ui      UIController
+
+	cliStore     *sqlite.Store
+	cliProviders *app.Registry
+	cliService   *app.Service
+	cliEngine    *foundationsync.Engine
 }
 
 func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal, logger *slog.Logger) (*foundationGraph, error) {
@@ -2158,10 +2163,14 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal, lo
 		return nil, err
 	}
 	return &foundationGraph{
-		store:   newFoundationDataStore(store),
-		handler: handler,
-		sync:    syncController,
-		ui:      ui,
+		store:        newFoundationDataStore(store),
+		handler:      handler,
+		sync:         syncController,
+		ui:           ui,
+		cliStore:     store,
+		cliProviders: providerRegistry,
+		cliService:   service,
+		cliEngine:    engine,
 	}, nil
 }
 

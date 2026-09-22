@@ -12,7 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kappke/task-tui/internal/app"
 	"github.com/kappke/task-tui/internal/command"
+	"github.com/kappke/task-tui/internal/storage/sqlite"
+	foundationsync "github.com/kappke/task-tui/internal/sync"
 )
 
 // Options controls Build. Zero options use the local-first defaults.
@@ -62,6 +65,11 @@ type Runtime struct {
 	repo     *Repository
 	app      *Application
 	engine   *SyncEngine
+
+	cliStore     *sqlite.Store
+	cliProviders *app.Registry
+	cliService   *app.Service
+	cliEngine    *foundationsync.Engine
 
 	mu            sync.Mutex
 	phase         runtimePhase
@@ -142,15 +150,19 @@ func Build(ctx context.Context, options Options) (*Runtime, error) {
 		return nil, fmt.Errorf("build runtime foundation graph: %w", err)
 	}
 	return &Runtime{
-		config:      cfg,
-		store:       graph.store,
-		handler:     graph.handler,
-		sync:        graph.sync,
-		ui:          graph.ui,
-		logger:      logger,
-		logSink:     logSink,
-		phase:       runtimeNew,
-		closeLogger: closeLogger,
+		config:       cfg,
+		store:        graph.store,
+		handler:      graph.handler,
+		sync:         graph.sync,
+		ui:           graph.ui,
+		logger:       logger,
+		logSink:      logSink,
+		cliStore:     graph.cliStore,
+		cliProviders: graph.cliProviders,
+		cliService:   graph.cliService,
+		cliEngine:    graph.cliEngine,
+		phase:        runtimeNew,
+		closeLogger:  closeLogger,
 	}, nil
 }
 
