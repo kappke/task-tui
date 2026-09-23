@@ -21,6 +21,9 @@ type CommandKind string
 
 const (
 	CommandLoadCached     CommandKind = "load_cached"
+	CommandFetchLists     CommandKind = "fetch_lists"
+	CommandFetchTasks     CommandKind = "fetch_tasks"
+	CommandFetchTask      CommandKind = "fetch_task"
 	CommandCreateSpace    CommandKind = "create_space"
 	CommandCreateList     CommandKind = "create_list"
 	CommandCreateTask     CommandKind = "create_task"
@@ -68,6 +71,7 @@ type AppCommand struct {
 	Status        string
 	Raw           string
 	EditAllFields bool
+	FetchRemote   bool
 }
 
 // Command is a concise alias for the presentation-to-application contract.

@@ -148,7 +148,7 @@ func (m *CharmModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if key, ok := msg.(tea.KeyMsg); ok && m.shouldOpenTaskEditor(key) {
-		return m, m.startTaskEditor()
+		return m, m.startTaskEditor(charmKeyMessage(key).name() == "enter")
 	}
 
 	var inputCmd tea.Cmd
@@ -175,11 +175,6 @@ func (m *CharmModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case SyncStateMsg:
 		m.refreshing = value.State == SyncStateSyncing
 		if !m.refreshing {
-			m.refreshFrame = 0
-		}
-	case CommandResultMsg:
-		if value.Command.Kind == CommandRefresh {
-			m.refreshing = true
 			m.refreshFrame = 0
 		}
 	}
@@ -213,7 +208,7 @@ func (m *CharmModel) shouldOpenTaskEditor(msg tea.KeyMsg) bool {
 	return key.name() == "enter" || key.name() == "e"
 }
 
-func (m *CharmModel) startTaskEditor() tea.Cmd {
+func (m *CharmModel) startTaskEditor(fetchTask bool) tea.Cmd {
 	row, ok := m.core.selectedTask()
 	if !ok {
 		m.core.Status = Status{Level: StatusWarning, Text: "Select a task before editing"}
@@ -245,9 +240,19 @@ func (m *CharmModel) startTaskEditor() tea.Cmd {
 	}
 	m.pendingTaskEdit = &pendingTaskEdit{path: path, original: original, script: script}
 	m.core.Status = Status{Level: StatusInfo, Text: "Editing task in Neovim; save the buffer to apply changes"}
-	return tea.ExecProcess(exec.Command("nvim", "-S", script, path), func(err error) tea.Msg {
+	commands := make([]tea.Cmd, 0, 2)
+	if fetchTask {
+		commands = append(commands, m.dispatch(m.core.emit(AppCommand{
+			Kind:       CommandFetchTask,
+			ProviderID: row.Task.ProviderID,
+			ListID:     row.Task.ListID,
+			TaskID:     row.Task.ID,
+		})))
+	}
+	commands = append(commands, tea.ExecProcess(exec.Command("nvim", "-S", script, path), func(err error) tea.Msg {
 		return taskEditorFinishedMsg{path: path, err: err}
-	})
+	}))
+	return tea.Batch(commands...)
 }
 
 func (m *CharmModel) finishTaskEditor(finished taskEditorFinishedMsg) tea.Cmd {

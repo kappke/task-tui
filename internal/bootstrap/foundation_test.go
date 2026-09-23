@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -45,6 +46,83 @@ func TestBuildUsesFoundationGraphAndRendersCachedProviders(t *testing.T) {
 	}
 	if count := strings.Count(output.String(), "TASK MANAGER"); count != 1 {
 		t.Fatalf("headless render count = %d, want one frame", count)
+	}
+}
+
+func TestRuntimeStartDoesNotStartSyncWorkers(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Database.Path = filepath.Join(t.TempDir(), "tasktui.db")
+	cfg.Logging.Path = filepath.Join(t.TempDir(), "tasktui.log")
+	cfg.ClickUp.Enabled = true
+	cfg.Sync.Enabled = true
+	var output bytes.Buffer
+	runtime, err := Build(context.Background(), Options{
+		Config:   cfg,
+		Headless: true,
+		Input:    bytes.NewReader(nil),
+		Output:   &output,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if err := runtime.Start(context.Background()); err != nil {
+		t.Fatalf("Runtime.Start() error = %v", err)
+	}
+	defer func() { _ = runtime.Shutdown(context.Background()) }()
+
+	worker, ok := runtime.cliEngine.Worker("clickup")
+	if !ok {
+		t.Fatal("ClickUp worker was not constructed")
+	}
+	if runtime.cliEngine.Running() || worker.Running() {
+		t.Fatal("runtime startup started a provider sync worker")
+	}
+}
+
+func TestFoundationSnapshotLoadsMoreThanTwoHundredTasksForSelectedList(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	providerID := domain.ProviderID("clickup-work")
+	if _, err := store.UpsertProvider(ctx, domain.Provider{ID: providerID, Type: domain.ProviderTypeClickUp, Name: "Work", Enabled: true}); err != nil {
+		t.Fatalf("insert provider: %v", err)
+	}
+	now := time.Now().UTC()
+	space, err := store.UpsertSpace(ctx, domain.Space{ID: "space", ProviderID: providerID, Name: "Work", SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		t.Fatalf("insert space: %v", err)
+	}
+	list, err := store.UpsertList(ctx, domain.List{ID: "list", ProviderID: providerID, SpaceID: space.ID, Name: "Inbox", SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		t.Fatalf("insert list: %v", err)
+	}
+	for index := range 205 {
+		if _, err := store.UpsertTask(ctx, domain.Task{
+			ID:         domain.TaskID(fmt.Sprintf("task-%03d", index)),
+			ProviderID: providerID,
+			ListID:     list.ID,
+			Title:      fmt.Sprintf("Task %03d", index),
+			Status:     "todo",
+			Priority:   domain.PriorityNormal,
+			SyncState:  domain.SyncStateSynced,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}); err != nil {
+			t.Fatalf("insert task %d: %v", index, err)
+		}
+	}
+
+	view, err := newFoundationDataStore(store).SnapshotForList(ctx, ProviderID(providerID), ListID(list.ID))
+	if err != nil {
+		t.Fatalf("SnapshotForList() error = %v", err)
+	}
+	if len(view.Tasks) != 205 {
+		t.Fatalf("selected-list snapshot task count = %d, want 205", len(view.Tasks))
 	}
 }
 
@@ -162,9 +240,10 @@ func TestFoundationUILoadsTheRequestedListInsteadOfPersistedList(t *testing.T) {
 	newView := View{Tasks: []Task{{ID: "new-task", ProviderID: "work", ListID: "new-list", Title: "New"}}}
 	loaderCalls := 0
 	listLoaderCalls := 0
+	handler := &foundationCaptureHandler{}
 	ui, err := newFoundationUIControllerWithListLoader(
 		NewStreamTerminal(bytes.NewBuffer(nil), &bytes.Buffer{}, false),
-		foundationNoopHandler{},
+		handler,
 		func(context.Context) (View, error) {
 			loaderCalls++
 			return oldView, nil
@@ -183,9 +262,10 @@ func TestFoundationUILoadsTheRequestedListInsteadOfPersistedList(t *testing.T) {
 	}
 
 	message := ui.teaCommand(context.Background(), foundationtui.AppCommand{
-		Kind:       foundationtui.CommandLoadCached,
-		ProviderID: "work",
-		ListID:     "new-list",
+		Kind:        foundationtui.CommandLoadCached,
+		ProviderID:  "work",
+		ListID:      "new-list",
+		FetchRemote: true,
 	})()
 	snapshot, ok := message.(foundationtui.SnapshotMsg)
 	if !ok || len(snapshot.Data.Tasks) != 1 || snapshot.Data.Tasks[0].ID != "new-task" {
@@ -193,6 +273,9 @@ func TestFoundationUILoadsTheRequestedListInsteadOfPersistedList(t *testing.T) {
 	}
 	if loaderCalls != 0 || listLoaderCalls != 1 {
 		t.Fatalf("loader calls = generic %d, scoped %d", loaderCalls, listLoaderCalls)
+	}
+	if len(handler.commands) != 1 || handler.commands[0].Kind != command.KindFetchTasks || handler.commands[0].ProviderID != "work" || handler.commands[0].ListID != "new-list" {
+		t.Fatalf("remote open-list requests = %#v, want work/new-list tasks", handler.commands)
 	}
 }
 
@@ -290,6 +373,86 @@ func TestFoundationUICommandRefreshPreservesListID(t *testing.T) {
 	}
 	if translated.Kind != command.KindRefresh || translated.ProviderID != "clickup" || translated.ListID != "list-local" {
 		t.Fatalf("refresh translation = %#v", translated)
+	}
+}
+
+func TestCachedProviderFetchesOnlyTheRequestedHierarchyScope(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	providerID := domain.ProviderID("clickup-work")
+	if _, err := store.UpsertProvider(ctx, domain.Provider{ID: providerID, Type: domain.ProviderTypeClickUp, Name: "Work", Enabled: true}); err != nil {
+		t.Fatalf("insert provider: %v", err)
+	}
+	now := time.Now().UTC()
+	spaceRemoteIDs := []string{"space-remote-a", "space-remote-b"}
+	listRemoteIDs := []string{"list-remote-a", "list-remote-b"}
+	spaces := []domain.Space{
+		{ID: "space-a", ProviderID: providerID, RemoteID: &spaceRemoteIDs[0], Name: "A", SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now},
+		{ID: "space-b", ProviderID: providerID, RemoteID: &spaceRemoteIDs[1], Name: "B", SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now},
+	}
+	lists := []domain.List{
+		{ID: "list-a", ProviderID: providerID, SpaceID: spaces[0].ID, RemoteID: &listRemoteIDs[0], Name: "A", SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now},
+		{ID: "list-b", ProviderID: providerID, SpaceID: spaces[1].ID, RemoteID: &listRemoteIDs[1], Name: "B", SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now},
+	}
+	for _, space := range spaces {
+		if _, err := store.UpsertSpace(ctx, space); err != nil {
+			t.Fatalf("insert space %s: %v", space.ID, err)
+		}
+	}
+	for _, list := range lists {
+		if _, err := store.UpsertList(ctx, list); err != nil {
+			t.Fatalf("insert list %s: %v", list.ID, err)
+		}
+	}
+
+	taskRemoteIDs := []string{"task-remote-a", "task-remote-b"}
+	fake := &foundationTestProvider{
+		id: providerID,
+		spaces: []domain.Space{
+			{ID: "mapped-space-a", ProviderID: providerID, RemoteID: &spaceRemoteIDs[0], Name: "A", SyncState: domain.SyncStateSynced},
+			{ID: "mapped-space-b", ProviderID: providerID, RemoteID: &spaceRemoteIDs[1], Name: "B", SyncState: domain.SyncStateSynced},
+		},
+		lists: map[domain.SpaceID][]domain.List{
+			spaces[0].ID: {{ID: "mapped-list-a", ProviderID: providerID, SpaceID: spaces[0].ID, RemoteID: &listRemoteIDs[0], Name: "A", SyncState: domain.SyncStateSynced}},
+			spaces[1].ID: {{ID: "mapped-list-b", ProviderID: providerID, SpaceID: spaces[1].ID, RemoteID: &listRemoteIDs[1], Name: "B", SyncState: domain.SyncStateSynced}},
+		},
+		tasks: map[domain.ListID][]domain.Task{
+			lists[0].ID: {{ID: "task-a", ProviderID: providerID, ListID: lists[0].ID, RemoteID: &taskRemoteIDs[0], Title: "Task A", Status: "todo", Priority: domain.PriorityNormal, SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now}},
+			lists[1].ID: {{ID: "task-b", ProviderID: providerID, ListID: lists[1].ID, RemoteID: &taskRemoteIDs[1], Title: "Task B", Status: "todo", Priority: domain.PriorityNormal, SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now}},
+		},
+	}
+	cached := newCachedProvider(fake, store)
+
+	if err := cached.FetchListsIntoCache(ctx, spaces[0].ID); err != nil {
+		t.Fatalf("fetch selected space lists: %v", err)
+	}
+	if fake.spaceFetches != 0 || len(fake.listFetches) != 1 || fake.listFetches[0] != spaces[0].ID || len(fake.taskFetches) != 0 {
+		t.Fatalf("selected-space fetch calls: spaces=%d lists=%v tasks=%v", fake.spaceFetches, fake.listFetches, fake.taskFetches)
+	}
+
+	if err := cached.FetchListsIntoCache(ctx, ""); err != nil {
+		t.Fatalf("fetch provider lists: %v", err)
+	}
+	if fake.spaceFetches != 1 || len(fake.listFetches) != 3 || len(fake.taskFetches) != 0 {
+		t.Fatalf("provider list fetch calls: spaces=%d lists=%v tasks=%v", fake.spaceFetches, fake.listFetches, fake.taskFetches)
+	}
+
+	if err := cached.FetchTasksIntoCache(ctx, lists[0].ID); err != nil {
+		t.Fatalf("fetch selected list tasks: %v", err)
+	}
+	if len(fake.taskFetches) != 1 || fake.taskFetches[0] != lists[0].ID {
+		t.Fatalf("task fetch calls = %v, want only %s", fake.taskFetches, lists[0].ID)
+	}
+	if err := cached.FetchTaskIntoCache(ctx, "task-a"); err != nil {
+		t.Fatalf("fetch selected task: %v", err)
+	}
+	if len(fake.taskDetailFetches) != 1 || fake.taskDetailFetches[0] != "task-a" {
+		t.Fatalf("task detail fetch calls = %v, want only task-a", fake.taskDetailFetches)
 	}
 }
 
@@ -655,16 +818,29 @@ func TestFoundationSyncMessageKeepsOperationFailureVisible(t *testing.T) {
 }
 
 type foundationTestProvider struct {
-	id      domain.ProviderID
-	spaces  []domain.Space
-	lists   map[domain.SpaceID][]domain.List
-	tasks   map[domain.ListID][]domain.Task
-	created domain.Task
+	id                domain.ProviderID
+	spaces            []domain.Space
+	lists             map[domain.SpaceID][]domain.List
+	tasks             map[domain.ListID][]domain.Task
+	created           domain.Task
+	spaceFetches      int
+	listFetches       []domain.SpaceID
+	taskFetches       []domain.ListID
+	taskDetailFetches []domain.TaskID
 }
 
 type foundationNoopHandler struct{}
 
+type foundationCaptureHandler struct {
+	commands []command.Command
+}
+
 func (foundationNoopHandler) Handle(context.Context, command.Command) (command.Event, error) {
+	return command.Event{}, nil
+}
+
+func (h *foundationCaptureHandler) Handle(_ context.Context, value command.Command) (command.Event, error) {
+	h.commands = append(h.commands, value)
 	return command.Event{}, nil
 }
 
@@ -688,18 +864,22 @@ func (p *foundationTestProvider) Capabilities() domain.Capabilities {
 }
 
 func (p *foundationTestProvider) FetchSpaces(context.Context) ([]domain.Space, error) {
+	p.spaceFetches++
 	return p.spaces, nil
 }
 
 func (p *foundationTestProvider) FetchLists(_ context.Context, spaceID domain.SpaceID) ([]domain.List, error) {
+	p.listFetches = append(p.listFetches, spaceID)
 	return p.lists[spaceID], nil
 }
 
 func (p *foundationTestProvider) FetchTasks(_ context.Context, listID domain.ListID) ([]domain.Task, error) {
+	p.taskFetches = append(p.taskFetches, listID)
 	return p.tasks[listID], nil
 }
 
 func (p *foundationTestProvider) FetchTask(_ context.Context, taskID domain.TaskID) (domain.Task, error) {
+	p.taskDetailFetches = append(p.taskDetailFetches, taskID)
 	for _, tasks := range p.tasks {
 		for _, task := range tasks {
 			if task.ID == taskID {

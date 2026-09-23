@@ -102,7 +102,7 @@ func TestSwitchingToTasksLoadsTheHighlightedList(t *testing.T) {
 		t.Fatal("switching to the personal task panel did not request its tasks")
 	}
 	message := commandMessage(t, command)
-	if message.Kind != CommandLoadCached || message.ProviderID != "personal" || message.ListID != "today" {
+	if message.Kind != CommandLoadCached || message.ProviderID != "personal" || message.ListID != "today" || message.FetchRemote {
 		t.Fatalf("navigation load command = %#v, want personal/today", message)
 	}
 
@@ -114,8 +114,11 @@ func TestTaskDetailViewOpensScrollsAndCloses(t *testing.T) {
 	model := New(snapshot)
 	model, _ = model.Update(KeyMsg{Key: "tab"})
 	model, command := model.Update(KeyMsg{Key: "enter"})
-	if command != nil || model.UI.Mode != ModeDetail {
+	if command == nil || model.UI.Mode != ModeDetail {
 		t.Fatalf("open detail: mode=%q command=%v", model.UI.Mode, command)
+	}
+	if message := commandMessage(t, command); message.Kind != CommandFetchTask || message.ProviderID != "work" || message.TaskID != "same" {
+		t.Fatalf("open detail fetch = %#v, want work/same", message)
 	}
 	view := model.View()
 	for _, value := range []string{"TASK DETAIL", "TITLE: Fix auth", "PROVIDER: Work (work)", "DESCRIPTION"} {
@@ -283,7 +286,7 @@ func TestFilterAndCommandPalette(t *testing.T) {
 	model, _ = typeInput(model, "refresh")
 	model, command = model.Update(KeyMsg{Key: "enter"})
 	message, ok := command().(CommandMsg)
-	if !ok || message.Command.Kind != CommandRefresh || message.Command.ProviderID != "personal" {
+	if !ok || message.Command.Kind != CommandFetchLists || message.Command.ProviderID != "personal" || message.Command.SpaceID != "home" {
 		t.Fatalf("palette refresh command = %#v", message)
 	}
 }
@@ -302,8 +305,30 @@ func TestRefreshUsesSelectedTaskListWhenHierarchySelectionIsProvider(t *testing.
 	if !ok {
 		t.Fatalf("refresh command type = %T", result)
 	}
-	if message.Command.Kind != CommandRefresh || message.Command.ProviderID != "work" || message.Command.ListID != "backend" {
+	if message.Command.Kind != CommandFetchTasks || message.Command.ProviderID != "work" || message.Command.ListID != "backend" {
 		t.Fatalf("refresh command = %#v, want work/backend", message.Command)
+	}
+}
+
+func TestRefreshFetchesOnlyTheFocusedPaneScope(t *testing.T) {
+	model := New(testSnapshot())
+	model, command := model.Update(KeyMsg{Key: "r"})
+	if command == nil {
+		t.Fatal("hierarchy refresh did not emit a fetch")
+	}
+	message := commandMessage(t, command)
+	if message.Kind != CommandFetchLists || message.ProviderID != "work" || message.SpaceID != "engineering" || message.ListID != "" {
+		t.Fatalf("hierarchy refresh = %#v, want work/engineering lists", message)
+	}
+
+	model.UI.Focus = PanelTasks
+	model, command = model.Update(KeyMsg{Key: "r"})
+	if command == nil {
+		t.Fatal("task refresh did not emit a fetch")
+	}
+	message = commandMessage(t, command)
+	if message.Kind != CommandFetchTasks || message.ProviderID != "work" || message.ListID != "backend" || message.SpaceID != "" {
+		t.Fatalf("task refresh = %#v, want work/backend tasks", message)
 	}
 }
 
@@ -485,7 +510,7 @@ func TestOpeningListEmitsScopedLocalLoad(t *testing.T) {
 		t.Fatal("opening list did not request local page")
 	}
 	message := commandMessage(t, command)
-	if message.Kind != CommandLoadCached || message.ProviderID != "work" || message.SpaceID != "engineering" || message.ListID != "backend" {
+	if message.Kind != CommandLoadCached || message.ProviderID != "work" || message.SpaceID != "engineering" || message.ListID != "backend" || !message.FetchRemote {
 		t.Fatalf("load command = %#v", message)
 	}
 }
@@ -1046,6 +1071,32 @@ func TestCharmModelRendersTaskDetails(t *testing.T) {
 	}
 	if data, err := os.ReadFile(model.pendingTaskEdit.path); err != nil || !strings.Contains(string(data), "fix auth regression; shared") {
 		t.Fatalf("editor buffer = %q, error=%v", data, err)
+	}
+}
+
+func TestCharmEnterFetchesOpenedTask(t *testing.T) {
+	var requested []AppCommand
+	model := NewCharmModel(New(testSnapshot()), CharmOptions{
+		OnCommand: func(command AppCommand) tea.Cmd {
+			requested = append(requested, command)
+			return nil
+		},
+	})
+	defer func() {
+		if model.pendingTaskEdit != nil {
+			_ = os.Remove(model.pendingTaskEdit.path)
+			if model.pendingTaskEdit.script != "" {
+				_ = os.Remove(model.pendingTaskEdit.script)
+			}
+		}
+	}()
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = updated.(*CharmModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(*CharmModel)
+	if len(requested) != 2 || requested[1].Kind != CommandFetchTask || requested[1].ProviderID != "work" || requested[1].TaskID != "same" {
+		t.Fatalf("task fetch requests = %#v, want work/same", requested)
 	}
 }
 

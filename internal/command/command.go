@@ -17,6 +17,9 @@ type Kind string
 const (
 	KindQuit         Kind = "quit"
 	KindRefresh      Kind = "refresh"
+	KindFetchLists   Kind = "fetch_lists"
+	KindFetchTasks   Kind = "fetch_tasks"
+	KindFetchTask    Kind = "fetch_task"
 	KindSearch       Kind = "search"
 	KindCreateSpace  Kind = "create_space"
 	KindCreateList   Kind = "create_list"
@@ -88,6 +91,18 @@ func (c Command) Validate() error {
 	switch c.Kind {
 	case KindQuit, KindRefresh:
 		return nil
+	case KindFetchLists:
+		if strings.TrimSpace(c.ProviderID) == "" {
+			return fmt.Errorf("%w: provider is required to fetch lists", ErrInvalid)
+		}
+	case KindFetchTasks:
+		if strings.TrimSpace(c.ProviderID) == "" || strings.TrimSpace(c.ListID) == "" {
+			return fmt.Errorf("%w: provider and list are required to fetch tasks", ErrInvalid)
+		}
+	case KindFetchTask:
+		if strings.TrimSpace(c.ProviderID) == "" || strings.TrimSpace(c.TaskID) == "" {
+			return fmt.Errorf("%w: provider and task are required to fetch a task", ErrInvalid)
+		}
 	case KindSearch:
 		if strings.TrimSpace(c.Query) == "" {
 			return fmt.Errorf("%w: search query is empty", ErrInvalid)

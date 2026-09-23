@@ -65,11 +65,29 @@ func (s *Store) listTasksByListID(ctx context.Context, listID string) ([]Task, e
 }
 
 func (s *Store) listTasksPage(ctx context.Context, providerID, listID string, limit, offset int) ([]Task, error) {
-	return taskQuery(ctx, s.db, taskSelect+" WHERE provider_id = ? AND is_deleted = 0 AND (list_id = ? OR EXISTS (SELECT 1 FROM task_list_memberships m WHERE m.provider_id = tasks.provider_id AND m.task_id = tasks.id AND m.list_id = ?)) ORDER BY due_at IS NULL, due_at, created_at, id LIMIT ? OFFSET ?", providerID, listID, listID, limit, offset)
+	query := taskSelect + " WHERE provider_id = ? AND is_deleted = 0 AND (list_id = ? OR EXISTS (SELECT 1 FROM task_list_memberships m WHERE m.provider_id = tasks.provider_id AND m.task_id = tasks.id AND m.list_id = ?)) ORDER BY due_at IS NULL, due_at, created_at, id"
+	args := []any{providerID, listID, listID}
+	if limit > 0 {
+		query += " LIMIT ? OFFSET ?"
+		args = append(args, limit, offset)
+	} else if offset > 0 {
+		query += " LIMIT -1 OFFSET ?"
+		args = append(args, offset)
+	}
+	return taskQuery(ctx, s.db, query, args...)
 }
 
 func (s *Store) listAllTasksPage(ctx context.Context, providerID string, limit, offset int) ([]Task, error) {
-	return taskQuery(ctx, s.db, taskSelect+" WHERE provider_id = ? AND is_deleted = 0 ORDER BY due_at IS NULL, due_at, created_at, id LIMIT ? OFFSET ?", providerID, limit, offset)
+	query := taskSelect + " WHERE provider_id = ? AND is_deleted = 0 ORDER BY due_at IS NULL, due_at, created_at, id"
+	args := []any{providerID}
+	if limit > 0 {
+		query += " LIMIT ? OFFSET ?"
+		args = append(args, limit, offset)
+	} else if offset > 0 {
+		query += " LIMIT -1 OFFSET ?"
+		args = append(args, offset)
+	}
+	return taskQuery(ctx, s.db, query, args...)
 }
 
 func (s *Store) listAllTasks(ctx context.Context, providerID string) ([]Task, error) {

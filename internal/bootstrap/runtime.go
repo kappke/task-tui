@@ -14,7 +14,6 @@ import (
 
 	"github.com/kappke/task-tui/internal/app"
 	"github.com/kappke/task-tui/internal/command"
-	"github.com/kappke/task-tui/internal/domain"
 	"github.com/kappke/task-tui/internal/storage/sqlite"
 	foundationsync "github.com/kappke/task-tui/internal/sync"
 )
@@ -75,7 +74,6 @@ type Runtime struct {
 	mu            sync.Mutex
 	phase         runtimePhase
 	uiInitialized bool
-	syncStarted   bool
 	shutdownErr   error
 	closeLogger   func() error
 }
@@ -201,9 +199,8 @@ func hasPartialDependencies(dependencies *RuntimeDependencies) bool {
 	return dependencies.Store != nil || dependencies.Handler != nil || dependencies.Sync != nil || dependencies.UI != nil
 }
 
-// Start performs the local-first startup sequence. The initial snapshot is
-// rendered before Sync.Start is called, so a provider can never delay the first
-// usable frame.
+// Start performs the local-first startup sequence without starting provider
+// synchronization. Remote fetches are requested explicitly by TUI actions.
 func (r *Runtime) Start(ctx context.Context) error {
 	if r == nil {
 		return errors.New("start runtime: nil runtime")
@@ -237,9 +234,6 @@ func (r *Runtime) Start(ctx context.Context) error {
 		r.failStart()
 		return fmt.Errorf("load UI state: %w", err)
 	}
-	if scoped, ok := r.sync.(taskScopeInitializer); ok {
-		scoped.SetTaskScope(ProviderID(state.ProviderID), domain.ListID(state.ListID))
-	}
 	view, err := r.store.Snapshot(ctx)
 	if err != nil {
 		r.failStart()
@@ -251,13 +245,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 		r.failStart()
 		return fmt.Errorf("render initial cached view: %w", err)
 	}
-	if err := r.sync.Start(ctx); err != nil {
-		r.failStart()
-		return fmt.Errorf("start sync workers: %w", err)
-	}
-	logContext(ctx, r.logger, slog.LevelInfo, "sync workers started")
 	r.mu.Lock()
-	r.syncStarted = true
 	r.phase = runtimeRunning
 	r.mu.Unlock()
 	return nil
@@ -293,8 +281,8 @@ func (r *Runtime) Run(ctx context.Context) error {
 	return cleanupErr
 }
 
-// Shutdown persists UI state, stops workers, closes the store, and restores
-// terminal state in that order. It is idempotent.
+// Shutdown persists UI state, stops outstanding sync requests, closes the
+// store, and restores terminal state in that order. It is idempotent.
 func (r *Runtime) Shutdown(ctx context.Context) error {
 	if r == nil {
 		return nil
@@ -314,7 +302,6 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 	}
 	r.phase = runtimeShuttingDown
 	uiInitialized := r.uiInitialized
-	syncStarted := r.syncStarted
 	r.mu.Unlock()
 	logContext(ctx, r.logger, slog.LevelInfo, "runtime shutdown")
 
@@ -328,14 +315,11 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("save UI state: %w", err))
 		}
 	}
-	if syncStarted {
+	if r.sync != nil {
 		if err := r.sync.Stop(ctx); err != nil {
-			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("stop sync workers: %w", err))
-			// A store must not be closed while a worker may still be using it.
-			// Stop once more with a non-cancelable context to preserve that
-			// invariant even when the caller's cleanup deadline expires.
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("stop sync requests: %w", err))
 			if retryErr := r.sync.Stop(context.Background()); retryErr != nil {
-				shutdownErr = errors.Join(shutdownErr, fmt.Errorf("finish sync workers: %w", retryErr))
+				shutdownErr = errors.Join(shutdownErr, fmt.Errorf("finish sync requests: %w", retryErr))
 			}
 		}
 	}
