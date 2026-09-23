@@ -91,7 +91,7 @@ func (s *foundationDataStore) snapshotWithTaskScope(ctx context.Context, provide
 		lists = append(lists, providerLists...)
 		var providerTasks []domain.Task
 		if listID != "" && providerID == provider.ID.String() {
-			providerTasks, err = s.store.ListTasksByListPage(ctx, provider.ID, domain.ListID(listID), foundationTaskPageSize, 0)
+			providerTasks, err = s.store.ListTasksByListPage(ctx, provider.ID, domain.ListID(listID), 0, 0)
 		} else if listID == "" {
 			providerTasks, err = s.store.ListTasksByProviderPage(ctx, provider.ID, foundationTaskPageSize, 0)
 		}
@@ -440,6 +440,7 @@ type cachedProvider struct {
 	providerpkg.Provider
 	store      *sqlite.Store
 	logger     *slog.Logger
+	pullMu     sync.Mutex
 	activeMu   sync.RWMutex
 	activeList domain.ListID
 	scopeSet   bool
@@ -473,7 +474,7 @@ func (p *cachedProvider) SetActiveTaskList(listID domain.ListID) {
 	}
 	p.activeMu.Lock()
 	p.activeList = resolvedID
-	p.scopeSet = true
+	p.scopeSet = requestedID != ""
 	p.activeMu.Unlock()
 	p.logger.Info("active ClickUp task list set", "requested_list_id", requestedID, "local_list_id", resolvedID)
 }
@@ -509,10 +510,43 @@ func (p *cachedProvider) Pull(ctx context.Context) error {
 	if err := p.check(ctx); err != nil {
 		return err
 	}
+	p.pullMu.Lock()
+	defer p.pullMu.Unlock()
+	return p.runPull(ctx, func() error { return p.pull(ctx) })
+}
+
+func (p *cachedProvider) FetchListsIntoCache(ctx context.Context, requestedSpaceID domain.SpaceID) error {
+	if err := p.check(ctx); err != nil {
+		return err
+	}
+	p.pullMu.Lock()
+	defer p.pullMu.Unlock()
+	return p.runPull(ctx, func() error { return p.pullLists(ctx, requestedSpaceID) })
+}
+
+func (p *cachedProvider) FetchTasksIntoCache(ctx context.Context, requestedListID domain.ListID) error {
+	if err := p.check(ctx); err != nil {
+		return err
+	}
+	p.pullMu.Lock()
+	defer p.pullMu.Unlock()
+	return p.runPull(ctx, func() error { return p.pullTasks(ctx, requestedListID) })
+}
+
+func (p *cachedProvider) FetchTaskIntoCache(ctx context.Context, requestedTaskID domain.TaskID) error {
+	if err := p.check(ctx); err != nil {
+		return err
+	}
+	p.pullMu.Lock()
+	defer p.pullMu.Unlock()
+	return p.runPull(ctx, func() error { return p.pullTask(ctx, requestedTaskID) })
+}
+
+func (p *cachedProvider) runPull(ctx context.Context, pull func() error) error {
 	if err := p.store.UpdateProviderSyncState(ctx, p.ID(), domain.SyncStateSyncing, nil, nil, nil); err != nil {
 		return fmt.Errorf("mark provider %s syncing: %w", p.ID(), err)
 	}
-	if err := p.pull(ctx); err != nil {
+	if err := pull(); err != nil {
 		stateCtx, cancel := persistenceContext(ctx)
 		stateErr := p.store.UpdateProviderSyncState(stateCtx, p.ID(), domain.SyncStateFailed, nil, err, nil)
 		cancel()
@@ -528,89 +562,167 @@ func (p *cachedProvider) Pull(ctx context.Context) error {
 	return nil
 }
 
-func (p *cachedProvider) pull(ctx context.Context) error {
+func (p *cachedProvider) pullLists(ctx context.Context, requestedSpaceID domain.SpaceID) error {
+	var spaces []domain.Space
+	var seenSpaces map[string]struct{}
+	if requestedSpaceID != "" {
+		space, err := p.store.GetSpaceByProvider(ctx, p.ID(), requestedSpaceID)
+		if err != nil {
+			return fmt.Errorf("resolve space %s: %w", requestedSpaceID, err)
+		}
+		spaces = append(spaces, space)
+	} else {
+		var err error
+		spaces, seenSpaces, err = p.pullSpaces(ctx)
+		if err != nil {
+			return err
+		}
+	}
+
+	for _, space := range spaces {
+		_, seenLists, err := p.pullListsForSpace(ctx, space)
+		if err != nil {
+			return err
+		}
+		if err := p.reconcileMissingLists(ctx, space.ID, seenLists); err != nil {
+			return err
+		}
+	}
+	if requestedSpaceID == "" {
+		if err := p.reconcileMissingSpaces(ctx, seenSpaces); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *cachedProvider) pullSpaces(ctx context.Context) ([]domain.Space, map[string]struct{}, error) {
 	p.reportProgress("fetching spaces")
-	p.logger.Info("ClickUp pull started", "provider_id", p.ID())
-	spaces, err := p.Provider.FetchSpaces(ctx)
+	remoteSpaces, err := p.Provider.FetchSpaces(ctx)
 	if err != nil {
 		p.logger.Error("ClickUp space fetch failed", "provider_id", p.ID(), "error", SafeErrorText(err))
+		return nil, nil, err
+	}
+	p.logger.Info("ClickUp spaces fetched", "provider_id", p.ID(), "spaces", len(remoteSpaces))
+	spaces := make([]domain.Space, 0, len(remoteSpaces))
+	seen := make(map[string]struct{}, len(remoteSpaces))
+	for _, space := range remoteSpaces {
+		if space.ProviderID != p.ID() {
+			return nil, nil, fmt.Errorf("%w: space %s belongs to %s, provider is %s", domain.ErrProviderMismatch, space.ID, space.ProviderID, p.ID())
+		}
+		stored, conflict, err := p.reconcileSpace(ctx, space)
+		if err != nil {
+			return nil, nil, fmt.Errorf("store space %s: %w", space.ID, err)
+		}
+		spaces = append(spaces, stored)
+		if space.RemoteID != nil {
+			seen[*space.RemoteID] = struct{}{}
+		}
+		if metadata, ok := p.Provider.(providerpkg.StatusMetadataProvider); ok && !conflict {
+			for _, item := range metadata.SpaceStatusMetadata(stored) {
+				if err := p.store.UpsertMetadata(ctx, item); err != nil {
+					return nil, nil, fmt.Errorf("store status metadata for space %s: %w", stored.ID, err)
+				}
+			}
+		}
+	}
+	return spaces, seen, nil
+}
+
+func (p *cachedProvider) pullListsForSpace(ctx context.Context, space domain.Space) ([]domain.List, map[string]struct{}, error) {
+	p.reportProgress("fetching lists from space " + space.ID.String())
+	p.logger.Info("fetching ClickUp lists", "provider_id", p.ID(), "space_id", space.ID)
+	lists, err := p.Provider.FetchLists(ctx, space.ID)
+	if err != nil {
+		p.logger.Error("ClickUp list fetch failed", "provider_id", p.ID(), "space_id", space.ID, "error", SafeErrorText(err))
+		return nil, nil, fmt.Errorf("fetch lists for space %s: %w", space.ID, err)
+	}
+	p.logger.Info("ClickUp lists fetched", "provider_id", p.ID(), "space_id", space.ID, "lists", len(lists))
+	storedLists := make([]domain.List, 0, len(lists))
+	seen := make(map[string]struct{}, len(lists))
+	for _, list := range lists {
+		if list.ProviderID != p.ID() || list.SpaceID != space.ID {
+			return nil, nil, fmt.Errorf("%w: list %s has invalid provider or parent", domain.ErrProviderMismatch, list.ID)
+		}
+		stored, conflict, err := p.reconcileList(ctx, list)
+		if err != nil {
+			return nil, nil, fmt.Errorf("store list %s: %w", list.ID, err)
+		}
+		storedLists = append(storedLists, stored)
+		if list.RemoteID != nil {
+			seen[*list.RemoteID] = struct{}{}
+		}
+		if metadata, ok := p.Provider.(providerpkg.StatusMetadataProvider); ok && !conflict {
+			for _, item := range metadata.ListStatusMetadata(stored) {
+				if err := p.store.UpsertMetadata(ctx, item); err != nil {
+					return nil, nil, fmt.Errorf("store status metadata for list %s: %w", stored.ID, err)
+				}
+			}
+		}
+	}
+	return storedLists, seen, nil
+}
+
+func (p *cachedProvider) pullTasks(ctx context.Context, requestedListID domain.ListID) error {
+	list, err := p.store.GetListByProvider(ctx, p.ID(), requestedListID)
+	if err != nil {
+		return fmt.Errorf("resolve list %s: %w", requestedListID, err)
+	}
+	return p.pullTasksForList(ctx, list)
+}
+
+func (p *cachedProvider) pullTasksForList(ctx context.Context, list domain.List) error {
+	p.reportProgress("fetching tasks from list " + list.ID.String())
+	tasks, err := p.Provider.FetchTasks(ctx, list.ID)
+	if err != nil {
+		return fmt.Errorf("fetch tasks for list %s: %w", list.ID, err)
+	}
+	seenTasks := make(map[string]struct{}, len(tasks))
+	if err := p.reconcileTasks(ctx, list.ID, tasks, seenTasks); err != nil {
 		return err
 	}
-	p.logger.Info("ClickUp spaces fetched", "provider_id", p.ID(), "spaces", len(spaces))
-	seenSpaces := make(map[string]struct{}, len(spaces))
+	return p.reconcileMissingTasks(ctx, list.ID, seenTasks)
+}
+
+func (p *cachedProvider) pullTask(ctx context.Context, requestedTaskID domain.TaskID) error {
+	task, err := p.store.GetTaskByProvider(ctx, p.ID(), requestedTaskID)
+	if err != nil {
+		return fmt.Errorf("resolve task %s: %w", requestedTaskID, err)
+	}
+	remote, err := p.Provider.FetchTask(ctx, task.ID)
+	if err != nil {
+		return fmt.Errorf("fetch task %s: %w", task.ID, err)
+	}
+	if remote.ID != task.ID || remote.ProviderID != p.ID() || remote.ListID != task.ListID {
+		return fmt.Errorf("%w: fetched task %s has invalid identity or parent", domain.ErrProviderMismatch, task.ID)
+	}
+	if _, _, err := p.reconcileTask(ctx, remote); err != nil {
+		return fmt.Errorf("store task %s: %w", task.ID, err)
+	}
+	return nil
+}
+
+func (p *cachedProvider) pull(ctx context.Context) error {
+	p.logger.Info("ClickUp pull started", "provider_id", p.ID())
+	spaces, seenSpaces, err := p.pullSpaces(ctx)
+	if err != nil {
+		return err
+	}
+	// Provider-wide pulls visit every home list so shared memberships and tasks
+	// moved out of a list can be reconciled. Interactive list refreshes use the
+	// scoped pullTasks path instead.
 	for _, space := range spaces {
-		if space.ProviderID != p.ID() {
-			return fmt.Errorf("%w: space %s belongs to %s, provider is %s", domain.ErrProviderMismatch, space.ID, space.ProviderID, p.ID())
-		}
-		storedSpace, conflict, err := p.reconcileSpace(ctx, space)
+		lists, seenLists, err := p.pullListsForSpace(ctx, space)
 		if err != nil {
-			return fmt.Errorf("store space %s: %w", space.ID, err)
+			return err
 		}
-		if space.RemoteID != nil {
-			seenSpaces[*space.RemoteID] = struct{}{}
-		}
-		if metadata, ok := p.Provider.(providerpkg.StatusMetadataProvider); ok {
-			if !conflict {
-				for _, item := range metadata.SpaceStatusMetadata(storedSpace) {
-					if err := p.store.UpsertMetadata(ctx, item); err != nil {
-						return fmt.Errorf("store status metadata for space %s: %w", storedSpace.ID, err)
-					}
-				}
-			}
-		}
-		p.reportProgress("fetching lists from space " + storedSpace.ID.String())
-		lists, err := p.Provider.FetchLists(ctx, storedSpace.ID)
-		if err != nil {
-			p.logger.Error("ClickUp list fetch failed", "provider_id", p.ID(), "space_id", storedSpace.ID, "error", SafeErrorText(err))
-			return fmt.Errorf("fetch lists for space %s: %w", storedSpace.ID, err)
-		}
-		p.logger.Info("ClickUp lists fetched", "provider_id", p.ID(), "space_id", storedSpace.ID, "lists", len(lists))
-		seenLists := make(map[string]struct{}, len(lists))
-		// The ClickUp list endpoint is home-list scoped, so a selected-list
-		// refresh must scan other home lists to discover secondary memberships.
 		for _, list := range lists {
-			if list.ProviderID != p.ID() || list.SpaceID != storedSpace.ID {
-				return fmt.Errorf("%w: list %s has invalid provider or parent", domain.ErrProviderMismatch, list.ID)
-			}
-			list.SpaceID = storedSpace.ID
-			storedList, conflict, err := p.reconcileList(ctx, list)
-			if err != nil {
-				return fmt.Errorf("store list %s: %w", list.ID, err)
-			}
-			if list.RemoteID != nil {
-				seenLists[*list.RemoteID] = struct{}{}
-			}
-			if metadata, ok := p.Provider.(providerpkg.StatusMetadataProvider); ok {
-				if !conflict {
-					for _, item := range metadata.ListStatusMetadata(storedList) {
-						if err := p.store.UpsertMetadata(ctx, item); err != nil {
-							return fmt.Errorf("store status metadata for list %s: %w", storedList.ID, err)
-						}
-					}
-				}
-			}
-			activeList := p.activeTaskList()
-			scopeSet := p.hasActiveTaskScope()
-			p.logger.Debug("refreshing list memberships", "active_list_scope", scopeSet, "active_list_id", activeList, "home_list_id", storedList.ID, "remote_list_id", remoteIDText(storedList.RemoteID))
-			p.reportProgress("fetching tasks from list " + storedList.ID.String())
-			p.logger.Info("fetching ClickUp tasks", "list_id", storedList.ID, "remote_list_id", remoteIDText(storedList.RemoteID))
-			// FetchTasks accepts the local identity at the provider boundary. A
-			// ClickUp provider resolves it to the remote list ID before calling
-			// the API; the pre-upsert mapper ID is not a local identity.
-			tasks, err := p.Provider.FetchTasks(ctx, storedList.ID)
-			if err != nil {
-				p.logger.Error("ClickUp task fetch failed", "provider_id", p.ID(), "list_id", storedList.ID, "remote_list_id", remoteIDText(list.RemoteID), "error", SafeErrorText(err))
-				return fmt.Errorf("fetch tasks for list %s: %w", storedList.ID, err)
-			}
-			seenTasks := make(map[string]struct{}, len(tasks))
-			if err := p.reconcileTasks(ctx, storedList.ID, tasks, seenTasks); err != nil {
-				return err
-			}
-			if err := p.reconcileMissingTasks(ctx, storedList.ID, seenTasks); err != nil {
+			p.logger.Info("fetching ClickUp tasks", "list_id", list.ID, "remote_list_id", remoteIDText(list.RemoteID))
+			if err := p.pullTasksForList(ctx, list); err != nil {
 				return err
 			}
 		}
-		if err := p.reconcileMissingLists(ctx, storedSpace.ID, seenLists); err != nil {
+		if err := p.reconcileMissingLists(ctx, space.ID, seenLists); err != nil {
 			return err
 		}
 	}
@@ -1170,171 +1282,180 @@ func persistenceContext(ctx context.Context) (context.Context, context.CancelFun
 	return context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 }
 
-// foundationSyncController owns the foundation engine and a tracked refresh
-// loop. Refresh requests never run network I/O on the terminal goroutine.
+// foundationSyncController runs only explicitly requested remote operations.
 type foundationSyncController struct {
-	engine  *foundationsync.Engine
-	enabled bool
-	scopes  map[ProviderID]func(domain.ListID)
+	engine   *foundationsync.Engine
+	enabled  bool
+	fetchers map[ProviderID]*cachedProvider
+	events   chan foundationsync.Event
 
-	mu       sync.Mutex
-	started  bool
-	cancel   context.CancelFunc
-	requests chan domain.ProviderID
-	done     chan struct{}
+	mu        sync.Mutex
+	closing   bool
+	active    sync.WaitGroup
+	cancelers map[uint64]context.CancelFunc
+	nextID    uint64
 }
 
 var _ SyncController = (*foundationSyncController)(nil)
 
-func newFoundationSyncController(engine *foundationsync.Engine, enabled bool) *foundationSyncController {
+func newFoundationSyncController(engine *foundationsync.Engine, enabled bool, fetchers map[ProviderID]*cachedProvider, events chan foundationsync.Event) *foundationSyncController {
+	if events == nil {
+		events = make(chan foundationsync.Event, 64)
+	}
 	return &foundationSyncController{
-		engine:  engine,
-		enabled: enabled,
-		scopes:  make(map[ProviderID]func(domain.ListID)),
+		engine:    engine,
+		enabled:   enabled,
+		fetchers:  fetchers,
+		events:    events,
+		cancelers: make(map[uint64]context.CancelFunc),
 	}
-}
-
-func (s *foundationSyncController) RegisterTaskScope(providerID ProviderID, setter func(domain.ListID)) {
-	if s == nil || setter == nil {
-		return
-	}
-	s.scopes[providerID] = setter
-}
-
-func (s *foundationSyncController) SetTaskScope(providerID ProviderID, listID domain.ListID) {
-	if s == nil {
-		return
-	}
-	if setter := s.scopes[providerID]; setter != nil {
-		setter(listID)
-	}
-}
-
-func (s *foundationSyncController) TriggerList(providerID ProviderID, listID domain.ListID) error {
-	s.SetTaskScope(providerID, listID)
-	return s.Trigger(providerID)
 }
 
 func (s *foundationSyncController) Events() <-chan foundationsync.Event {
-	if s == nil || s.engine == nil {
+	if s == nil {
 		return nil
 	}
-	return s.engine.Events()
-}
-
-func (s *foundationSyncController) Start(ctx context.Context) error {
-	if s == nil || s.engine == nil || !s.enabled {
-		return nil
-	}
-	if ctx == nil {
-		return errors.New("foundation sync controller: nil context")
-	}
-	s.mu.Lock()
-	if s.started {
-		s.mu.Unlock()
-		return errors.New("foundation sync controller is already started")
-	}
-	s.mu.Unlock()
-	if err := s.engine.Start(ctx); err != nil {
-		return err
-	}
-	runCtx, cancel := context.WithCancel(ctx)
-	s.mu.Lock()
-	if s.started {
-		s.mu.Unlock()
-		cancel()
-		return errors.New("foundation sync controller is already started")
-	}
-	s.started = true
-	s.cancel = cancel
-	s.requests = make(chan domain.ProviderID, 16)
-	s.done = make(chan struct{})
-	requests := s.requests
-	done := s.done
-	s.mu.Unlock()
-	go s.runRefreshLoop(runCtx, requests, done)
-	return nil
+	return s.events
 }
 
 func (s *foundationSyncController) Stop(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	if ctx == nil {
+		return errors.New("stop foundation sync requests: nil context")
+	}
+	s.mu.Lock()
+	s.closing = true
+	cancelers := make([]context.CancelFunc, 0, len(s.cancelers))
+	for _, cancel := range s.cancelers {
+		cancelers = append(cancelers, cancel)
+	}
+	s.mu.Unlock()
+	for _, cancel := range cancelers {
+		cancel()
+	}
+	done := make(chan struct{})
+	go func() {
+		s.active.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("stop foundation sync requests: %w", ctx.Err())
+	}
+}
+
+func (s *foundationSyncController) Trigger(ctx context.Context, providerID ProviderID, listID domain.ListID) error {
 	if s == nil || s.engine == nil || !s.enabled {
 		return nil
 	}
 	if ctx == nil {
-		return errors.New("foundation sync controller: nil context")
+		return errors.New("request provider sync: nil context")
 	}
-	s.mu.Lock()
-	if !s.started {
-		s.mu.Unlock()
-		return nil
-	}
-	cancel := s.cancel
-	done := s.done
-	s.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	select {
-	case <-done:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	stopErr := s.engine.Stop(ctx)
-	if stopErr != nil && ctx.Err() != nil && errors.Is(stopErr, ctx.Err()) {
-		return stopErr
-	}
-	s.mu.Lock()
-	s.started = false
-	s.cancel = nil
-	s.done = nil
-	s.requests = nil
-	s.mu.Unlock()
-	return stopErr
-}
-
-func (s *foundationSyncController) Trigger(providerID ProviderID) error {
-	if s == nil || !s.enabled {
-		return nil
-	}
-	s.mu.Lock()
-	if !s.started {
-		s.mu.Unlock()
-		return nil
-	}
-	requests := s.requests
-	s.mu.Unlock()
 	if providerID != "" {
-		if _, ok := s.engine.Worker(domain.ProviderID(providerID)); !ok {
+		worker, ok := s.engine.Worker(domain.ProviderID(providerID))
+		if !ok {
 			return nil
 		}
-		select {
-		case requests <- domain.ProviderID(providerID):
-		default:
+		if fetcher := s.fetchers[providerID]; fetcher != nil {
+			fetcher.SetActiveTaskList(listID)
 		}
-		return nil
+		return s.schedule(ctx, providerID, worker.SyncOnce, false)
 	}
 	for _, status := range s.engine.Statuses() {
-		select {
-		case requests <- status.ProviderID:
-		default:
-			return nil
+		worker, ok := s.engine.Worker(status.ProviderID)
+		if !ok {
+			continue
+		}
+		if fetcher := s.fetchers[ProviderID(status.ProviderID)]; fetcher != nil {
+			fetcher.SetActiveTaskList("")
+		}
+		if err := s.schedule(ctx, ProviderID(status.ProviderID), worker.SyncOnce, false); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-func (s *foundationSyncController) runRefreshLoop(ctx context.Context, requests <-chan domain.ProviderID, done chan<- struct{}) {
-	defer close(done)
-	for {
-		select {
-		case <-ctx.Done():
+func (s *foundationSyncController) Fetch(ctx context.Context, input command.Command) error {
+	if s == nil || !s.enabled {
+		return nil
+	}
+	if ctx == nil {
+		return errors.New("request scoped fetch: nil context")
+	}
+	fetcher := s.fetchers[ProviderID(input.ProviderID)]
+	if fetcher == nil {
+		return nil
+	}
+	var fetch func(context.Context) error
+	switch input.Kind {
+	case command.KindFetchLists:
+		spaceID := domain.SpaceID(input.SpaceID)
+		fetch = func(ctx context.Context) error { return fetcher.FetchListsIntoCache(ctx, spaceID) }
+	case command.KindFetchTasks:
+		listID := domain.ListID(input.ListID)
+		fetch = func(ctx context.Context) error { return fetcher.FetchTasksIntoCache(ctx, listID) }
+	case command.KindFetchTask:
+		taskID := domain.TaskID(input.TaskID)
+		fetch = func(ctx context.Context) error { return fetcher.FetchTaskIntoCache(ctx, taskID) }
+	default:
+		return fmt.Errorf("request scoped fetch: unsupported command %q", input.Kind)
+	}
+	return s.schedule(ctx, ProviderID(input.ProviderID), fetch, true)
+}
+
+func (s *foundationSyncController) schedule(ctx context.Context, providerID ProviderID, run func(context.Context) error, report bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		return errors.New("sync requests are shutting down")
+	}
+	s.nextID++
+	id := s.nextID
+	runCtx, cancel := context.WithCancel(ctx)
+	s.cancelers[id] = cancel
+	s.active.Add(1)
+	s.mu.Unlock()
+
+	if report {
+		s.emit(foundationsync.Event{ProviderID: domain.ProviderID(providerID), Kind: foundationsync.EventSyncStarted, State: foundationsync.WorkerRunning, At: time.Now().UTC()})
+	}
+	go func() {
+		defer s.active.Done()
+		defer cancel()
+		defer func() {
+			s.mu.Lock()
+			delete(s.cancelers, id)
+			s.mu.Unlock()
+		}()
+
+		err := run(runCtx)
+		if !report || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return
-		case providerID := <-requests:
-			worker, ok := s.engine.Worker(providerID)
-			if ok {
-				_ = worker.SyncOnce(ctx)
-			}
 		}
+		if err != nil {
+			s.emit(foundationsync.Event{ProviderID: domain.ProviderID(providerID), Kind: foundationsync.EventSyncFailed, State: foundationsync.WorkerFailed, Err: err, At: time.Now().UTC()})
+			return
+		}
+		s.emit(foundationsync.Event{ProviderID: domain.ProviderID(providerID), Kind: foundationsync.EventSyncCompleted, State: foundationsync.WorkerSynced, At: time.Now().UTC()})
+	}()
+	return nil
+}
+
+func (s *foundationSyncController) emit(event foundationsync.Event) {
+	if s == nil || s.events == nil {
+		return
+	}
+	select {
+	case s.events <- event:
+	default:
 	}
 }
 
@@ -1370,9 +1491,17 @@ func (h *foundationHandler) Handle(ctx context.Context, input command.Command) (
 	if input.Kind == command.KindQuit {
 		return command.Event{Kind: command.EventQuit}, nil
 	}
+	if input.Kind == command.KindFetchLists || input.Kind == command.KindFetchTasks || input.Kind == command.KindFetchTask {
+		if h.sync != nil {
+			if err := h.sync.Fetch(ctx, input); err != nil {
+				return command.Event{}, err
+			}
+		}
+		return command.Event{Kind: command.EventRefresh}, nil
+	}
 	if input.Kind == command.KindRefresh {
 		if h.sync != nil {
-			if err := h.sync.TriggerList(ProviderID(input.ProviderID), domain.ListID(input.ListID)); err != nil {
+			if err := h.sync.Trigger(ctx, ProviderID(input.ProviderID), domain.ListID(input.ListID)); err != nil {
 				return command.Event{}, err
 			}
 		}
@@ -1499,7 +1628,7 @@ func commandEvent(event app.Event) command.Event {
 
 // foundationUIController adapts the framework-neutral presentation model to
 // the bootstrap terminal lifecycle. It evaluates emitted commands only after
-// the model has accepted the input, so local navigation never performs I/O.
+// the model accepts input; passive navigation uses cached local data.
 type foundationUIController struct {
 	terminal Terminal
 	handler  command.Handler
@@ -1922,6 +2051,16 @@ func (u *foundationUIController) teaCommand(ctx context.Context, input foundatio
 			if u.load == nil {
 				return nil
 			}
+			if input.FetchRemote {
+				_, err := u.handler.Handle(ctx, command.Command{
+					Kind:       command.KindFetchTasks,
+					ProviderID: string(input.ProviderID),
+					ListID:     string(input.ListID),
+				})
+				if err != nil {
+					return foundationtui.ErrorMsg{Err: err, Text: SafeErrorText(err)}
+				}
+			}
 			var view View
 			var err error
 			if input.ListID != "" {
@@ -2104,7 +2243,7 @@ func foundationSyncMessage(event foundationsync.Event) (foundationtui.SyncStateM
 	default:
 		return foundationtui.SyncStateMsg{}, false, false
 	}
-	return message, true, false
+	return message, false, true
 }
 
 func foundationPanel(value string) foundationtui.Panel {
@@ -2196,6 +2335,12 @@ func foundationUICommand(input foundationtui.AppCommand) (command.Command, bool,
 		}, true, nil
 	case foundationtui.CommandSearch:
 		return command.Command{Kind: command.KindSearch, Query: input.Query}, true, nil
+	case foundationtui.CommandFetchLists:
+		return command.Command{Kind: command.KindFetchLists, ProviderID: string(input.ProviderID), SpaceID: string(input.SpaceID)}, true, nil
+	case foundationtui.CommandFetchTasks:
+		return command.Command{Kind: command.KindFetchTasks, ProviderID: string(input.ProviderID), ListID: string(input.ListID)}, true, nil
+	case foundationtui.CommandFetchTask:
+		return command.Command{Kind: command.KindFetchTask, ProviderID: string(input.ProviderID), ListID: string(input.ListID), TaskID: string(input.TaskID)}, true, nil
 	case foundationtui.CommandRefresh:
 		return command.Command{Kind: command.KindRefresh, ProviderID: string(input.ProviderID), ListID: string(input.ListID)}, true, nil
 	case foundationtui.CommandQuit:
@@ -2342,7 +2487,7 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal, lo
 	taskRepository := sqlite.NewTaskRepository(store)
 	localProvider := localpkg.NewWithStores(spaceRepository, listRepository, taskRepository)
 	providers := make([]providerpkg.Provider, 0, 2)
-	taskScopeSetters := make(map[ProviderID]func(domain.ListID))
+	fetchers := make(map[ProviderID]*cachedProvider)
 	providers = append(providers, localProvider)
 	if err := upsertFoundationProvider(ctx, store, domain.Provider{
 		ID:        localProvider.ID(),
@@ -2375,7 +2520,7 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal, lo
 		})
 		cached := newCachedProvider(clickupProvider, store, logger)
 		providers = append(providers, cached)
-		taskScopeSetters[ProviderID(clickupProvider.ID())] = cached.SetActiveTaskList
+		fetchers[ProviderID(clickupProvider.ID())] = cached
 		configuration, marshalErr := json.Marshal(struct {
 			BaseURL     string `json:"base_url"`
 			WorkspaceID string `json:"workspace_id,omitempty"`
@@ -2433,15 +2578,21 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal, lo
 		}
 		logContext(ctx, logger, level, "sync event", args...)
 	}
-	engine, err := foundationsync.NewEngine(store, providers, foundationsync.EngineOptions{Worker: workerOptions})
+	syncEvents := make(chan foundationsync.Event, 64)
+	engine, err := foundationsync.NewEngine(store, providers, foundationsync.EngineOptions{
+		Worker: workerOptions,
+		EventSink: func(event foundationsync.Event) {
+			select {
+			case syncEvents <- event:
+			default:
+			}
+		},
+	})
 	if err != nil {
 		closeStore()
 		return nil, fmt.Errorf("create foundation sync engine: %w", err)
 	}
-	syncController := newFoundationSyncController(engine, cfg.Sync.Enabled)
-	for providerID, setter := range taskScopeSetters {
-		syncController.RegisterTaskScope(providerID, setter)
-	}
+	syncController := newFoundationSyncController(engine, cfg.Sync.Enabled, fetchers, syncEvents)
 	handler := newFoundationHandler(service, syncController)
 	ui, err := newFoundationUIControllerWithListLoader(terminal, handler, func(ctx context.Context) (View, error) {
 		return newFoundationDataStore(store).Snapshot(ctx)

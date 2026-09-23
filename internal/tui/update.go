@@ -401,12 +401,22 @@ func (m Model) applyCommandResult(event CommandResultMsg) Model {
 		m.Status = Status{Level: StatusInfo, Text: "Refreshing ClickUp data..."}
 		return m
 	}
+	if event.Command.Kind == CommandFetchLists || event.Command.Kind == CommandFetchTasks || event.Command.Kind == CommandFetchTask {
+		m.Status = Status{Level: StatusInfo, Text: text}
+		return m
+	}
 	m.Status = Status{Level: StatusSuccess, Text: text}
 	return m
 }
 
 func commandResultText(command AppCommand) string {
 	switch command.Kind {
+	case CommandFetchLists:
+		return "Refreshing lists..."
+	case CommandFetchTasks:
+		return "Refreshing tasks..."
+	case CommandFetchTask:
+		return "Refreshing task details..."
 	case CommandCreateSpace:
 		return "Space created"
 	case CommandCreateList:
@@ -471,6 +481,8 @@ func (m Model) updateDetail(key KeyMsg) (Model, Cmd) {
 		m.UI.DetailOffset = m.maxDetailOffset()
 	case ActionCancel:
 		m.closeDetail()
+	case ActionRefresh:
+		return m, m.refreshFocusedPane()
 	case ActionEdit:
 		m.beginDetailEdit()
 	case ActionQuit:
@@ -551,19 +563,7 @@ func (m Model) updateBrowse(key KeyMsg, action Action) (Model, Cmd) {
 	case ActionFilter:
 		m.beginFilter()
 	case ActionRefresh:
-		ref := m.UI.SelectedNode
-		command := AppCommand{Kind: CommandRefresh, ProviderID: ref.ProviderID, ListID: ref.ListID}
-		// The hierarchy selection can remain on the provider while focus is in
-		// the task panel. Use the selected task's list in that case so refresh
-		// remains scoped to the list the user is viewing.
-		if command.ListID == "" {
-			if row, ok := m.selectedTask(); ok {
-				command.ProviderID = row.Task.ProviderID
-				command.ListID = row.Task.ListID
-			}
-		}
-		m.Status = Status{Level: StatusInfo, Text: "Refresh requested; local data remains available"}
-		return m, m.emit(command)
+		return m, m.refreshFocusedPane()
 	case ActionCommand:
 		m.beginCommand()
 	case ActionCancel:
@@ -812,6 +812,35 @@ func (m *Model) loadSelectedList() Cmd {
 	})
 }
 
+func (m *Model) refreshFocusedPane() Cmd {
+	ref := m.UI.SelectedNode
+	if m.UI.Focus == PanelHierarchy {
+		if ref.ProviderID == "" {
+			m.Status = Status{Level: StatusWarning, Text: "Select a provider before refreshing lists"}
+			return nil
+		}
+		m.Status = Status{Level: StatusInfo, Text: "List refresh requested; cached data remains available"}
+		return m.emit(AppCommand{
+			Kind:       CommandFetchLists,
+			ProviderID: ref.ProviderID,
+			SpaceID:    ref.SpaceID,
+		})
+	}
+
+	providerID := ref.ProviderID
+	listID := ref.ListID
+	if row, ok := m.selectedTask(); ok && listID == "" {
+		providerID = row.Task.ProviderID
+		listID = row.Task.ListID
+	}
+	if providerID == "" || listID == "" {
+		m.Status = Status{Level: StatusWarning, Text: "Select a list before refreshing tasks"}
+		return nil
+	}
+	m.Status = Status{Level: StatusInfo, Text: "Task refresh requested; cached data remains available"}
+	return m.emit(AppCommand{Kind: CommandFetchTasks, ProviderID: providerID, ListID: listID})
+}
+
 func (m *Model) selectCurrent() Cmd {
 	if m.UI.Focus == PanelTasks {
 		if m.UI.TaskHeaderSelected {
@@ -826,7 +855,12 @@ func (m *Model) selectCurrent() Cmd {
 		m.UI.Mode = ModeDetail
 		m.UI.DetailOffset = 0
 		m.Status = Status{Level: StatusInfo, Text: "Opened task details: " + row.Task.Title}
-		return nil
+		return m.emit(AppCommand{
+			Kind:       CommandFetchTask,
+			ProviderID: row.Task.ProviderID,
+			ListID:     row.Task.ListID,
+			TaskID:     row.Task.ID,
+		})
 	}
 	node, ok := m.currentNode()
 	if !ok {
@@ -836,12 +870,16 @@ func (m *Model) selectCurrent() Cmd {
 	if node.Ref.Kind == TreeNodeList {
 		m.UI.Focus = PanelTasks
 		m.Status = Status{Level: StatusInfo, Text: "Opened " + node.Name}
-		return m.emit(AppCommand{Kind: CommandLoadCached, ProviderID: node.Ref.ProviderID, SpaceID: node.Ref.SpaceID, ListID: node.Ref.ListID})
+		return m.emit(AppCommand{Kind: CommandLoadCached, ProviderID: node.Ref.ProviderID, SpaceID: node.Ref.SpaceID, ListID: node.Ref.ListID, FetchRemote: true})
 	}
+	expanded := !node.Expanded
 	m.UI.ExpandedNodes = cloneExpanded(m.UI.ExpandedNodes)
-	m.UI.ExpandedNodes[node.Ref] = !node.Expanded
-	m.Status = Status{Level: StatusInfo, Text: expansionText(node, !node.Expanded)}
-	return nil
+	m.UI.ExpandedNodes[node.Ref] = expanded
+	m.Status = Status{Level: StatusInfo, Text: expansionText(node, expanded)}
+	if !expanded {
+		return nil
+	}
+	return m.emit(AppCommand{Kind: CommandFetchLists, ProviderID: node.Ref.ProviderID, SpaceID: node.Ref.SpaceID})
 }
 
 func (m *Model) setAllExpanded(expanded bool) {
@@ -1414,17 +1452,9 @@ func (m Model) submitPalette() (Model, Cmd) {
 	case CommandMoveTask, CommandAddTaskToList, CommandRemoveTaskFromList:
 		return m.submitTaskListCommand(command)
 	case CommandRefresh:
-		command.ProviderID = m.UI.SelectedNode.ProviderID
-		if command.ListID == "" {
-			if row, ok := m.selectedTask(); ok {
-				command.ProviderID = row.Task.ProviderID
-				command.ListID = row.Task.ListID
-			}
-		}
 		m.UI.Mode = ModeBrowse
 		m.UI.Input = ""
-		m.Status = Status{Level: StatusInfo, Text: "Refresh requested; local data remains available"}
-		return m, m.emit(command)
+		return m, m.refreshFocusedPane()
 	case CommandQuit:
 		m.UI.Quitting = true
 		m.UI.Mode = ModeBrowse

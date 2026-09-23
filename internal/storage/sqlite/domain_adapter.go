@@ -589,12 +589,9 @@ func (s *Store) ListTasksByProvider(ctx context.Context, providerID domain.Provi
 	return result, nil
 }
 
-// ListTasksByListPage returns a bounded local task page for startup and list
-// opening. A non-positive limit uses the repository's normal unbounded query.
+// ListTasksByListPage returns a local task page for one provider-owned list. A
+// non-positive limit returns all matching tasks.
 func (s *Store) ListTasksByListPage(ctx context.Context, providerID domain.ProviderID, listID domain.ListID, limit, offset int) ([]domain.Task, error) {
-	if limit <= 0 {
-		return s.ListTasks(ctx, listID)
-	}
 	tasks, err := s.listTasksPage(ctx, providerID.String(), listID.String(), limit, offset)
 	if err != nil {
 		return nil, err
@@ -606,11 +603,9 @@ func (s *Store) ListTasksByListPage(ctx context.Context, providerID domain.Provi
 	return result, nil
 }
 
-// ListTasksByProviderPage returns a bounded local task page for one provider.
+// ListTasksByProviderPage returns a local task page for one provider. A
+// non-positive limit returns all matching tasks.
 func (s *Store) ListTasksByProviderPage(ctx context.Context, providerID domain.ProviderID, limit, offset int) ([]domain.Task, error) {
-	if limit <= 0 {
-		return s.ListTasksByProvider(ctx, providerID)
-	}
 	tasks, err := s.listAllTasksPage(ctx, providerID.String(), limit, offset)
 	if err != nil {
 		return nil, err
