@@ -52,6 +52,16 @@ type MoveTaskCommand struct {
 	DestinationListID ListID
 }
 
+type AddTaskToListCommand struct {
+	TaskID TaskID
+	ListID ListID
+}
+
+type RemoveTaskFromListCommand struct {
+	TaskID TaskID
+	ListID ListID
+}
+
 type CopyTaskCommand struct {
 	SourceTaskID      TaskID
 	DestinationListID ListID
@@ -70,17 +80,19 @@ type FilterTasksCommand struct {
 	Filter TaskFilter
 }
 
-func (CreateSpaceCommand) isCommand()  {}
-func (CreateListCommand) isCommand()   {}
-func (CreateTaskCommand) isCommand()   {}
-func (PatchTaskCommand) isCommand()    {}
-func (CompleteTaskCommand) isCommand() {}
-func (DeleteTaskCommand) isCommand()   {}
-func (MoveTaskCommand) isCommand()     {}
-func (CopyTaskCommand) isCommand()     {}
-func (TransferTaskCommand) isCommand() {}
-func (SearchTasksCommand) isCommand()  {}
-func (FilterTasksCommand) isCommand()  {}
+func (CreateSpaceCommand) isCommand()        {}
+func (CreateListCommand) isCommand()         {}
+func (CreateTaskCommand) isCommand()         {}
+func (PatchTaskCommand) isCommand()          {}
+func (CompleteTaskCommand) isCommand()       {}
+func (DeleteTaskCommand) isCommand()         {}
+func (MoveTaskCommand) isCommand()           {}
+func (AddTaskToListCommand) isCommand()      {}
+func (RemoveTaskFromListCommand) isCommand() {}
+func (CopyTaskCommand) isCommand()           {}
+func (TransferTaskCommand) isCommand()       {}
+func (SearchTasksCommand) isCommand()        {}
+func (FilterTasksCommand) isCommand()        {}
 
 type UpdateTaskCommand = PatchTaskCommand
 
@@ -211,6 +223,18 @@ func (s *Service) Execute(ctx context.Context, command Command) (Event, error) {
 			return nil, fmt.Errorf("execute move task command: %w", err)
 		}
 		return TaskMoved{Task: task}, nil
+	case AddTaskToListCommand:
+		task, err := s.AddTaskToList(ctx, command.TaskID, command.ListID)
+		if err != nil {
+			return nil, fmt.Errorf("execute add task to list command: %w", err)
+		}
+		return TaskUpdated{Task: task}, nil
+	case RemoveTaskFromListCommand:
+		task, err := s.RemoveTaskFromList(ctx, command.TaskID, command.ListID)
+		if err != nil {
+			return nil, fmt.Errorf("execute remove task from list command: %w", err)
+		}
+		return TaskUpdated{Task: task}, nil
 	case CopyTaskCommand:
 		source, err := s.GetTask(ctx, command.SourceTaskID)
 		if err != nil {

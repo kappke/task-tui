@@ -24,8 +24,20 @@ func (s *Store) createTask(ctx context.Context, task Task) (Task, error) {
 			return Task{}, err
 		}
 	}
-	if err := s.insertTask(ctx, nil, task); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Task{}, fmt.Errorf("sqlite: begin task creation %q: %w", task.ID, err)
+	}
+	if err := s.insertTask(ctx, tx, task); err != nil {
+		_ = tx.Rollback()
 		return Task{}, fmt.Errorf("sqlite: create task %q: %w", task.ID, err)
+	}
+	if err := replaceTaskMemberships(ctx, tx, task); err != nil {
+		_ = tx.Rollback()
+		return Task{}, fmt.Errorf("sqlite: create task %q memberships: %w", task.ID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("sqlite: commit task creation %q: %w", task.ID, err)
 	}
 	return s.getTask(ctx, s.db, task.ID, task.ProviderID)
 }
@@ -47,7 +59,11 @@ func (s *Store) getTaskByRemoteID(ctx context.Context, providerID, remoteID stri
 	if err != nil {
 		return Task{}, queryError("get task by remote id", providerID+"/"+remoteID, err)
 	}
-	return task, nil
+	tasks := []Task{task}
+	if err := loadTaskMemberships(ctx, s.db, tasks); err != nil {
+		return Task{}, fmt.Errorf("sqlite: get task by remote id memberships: %w", err)
+	}
+	return tasks[0], nil
 }
 
 func (s *Store) listTasks(ctx context.Context, providerID, listID string) ([]Task, error) {
@@ -98,11 +114,16 @@ func (s *Store) upsertTask(ctx context.Context, task Task) (Task, error) {
 			return Task{}, err
 		}
 	}
-	if err := s.insertTask(ctx, nil, task); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Task{}, fmt.Errorf("sqlite: begin task upsert %q: %w", task.ID, err)
+	}
+	if err := s.insertTask(ctx, tx, task); err != nil {
 		if !isConstraintError(err) {
+			_ = tx.Rollback()
 			return Task{}, fmt.Errorf("sqlite: upsert task %q: %w", task.ID, err)
 		}
-		if _, updateErr := s.db.ExecContext(ctx, `
+		if _, updateErr := tx.ExecContext(ctx, `
 			UPDATE tasks SET list_id = ?, remote_id = ?, parent_task_id = ?, assignee = ?, title = ?,
 				description = ?, status = ?, priority = ?, time_estimate_ms = ?, time_tracked_ms = ?, due_at = ?, completed_at = ?,
 				sync_state = ?, remote_updated_at = ?, is_deleted = ?, deleted_at = ?, updated_at = ?
@@ -127,8 +148,16 @@ func (s *Store) upsertTask(ctx context.Context, task Task) (Task, error) {
 			task.ProviderID,
 			task.ID,
 		); updateErr != nil {
+			_ = tx.Rollback()
 			return Task{}, fmt.Errorf("sqlite: upsert task %q: %w", task.ID, updateErr)
 		}
+	}
+	if err := replaceTaskMemberships(ctx, tx, task); err != nil {
+		_ = tx.Rollback()
+		return Task{}, fmt.Errorf("sqlite: upsert task %q memberships: %w", task.ID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Task{}, fmt.Errorf("sqlite: commit task upsert %q: %w", task.ID, err)
 	}
 	return s.getTaskByProvider(ctx, task.ProviderID, task.ID)
 }
@@ -178,6 +207,13 @@ func (s *Store) mutateTask(ctx context.Context, task Task, intent *SyncOperation
 	if err != nil {
 		return Task{}, err
 	}
+	if len(task.ListIDs) == 0 {
+		if task.ListID != existing.ListID {
+			task.ListIDs = []string{task.ListID}
+		} else {
+			task.ListIDs = append([]string(nil), existing.ListIDs...)
+		}
+	}
 	task = mergeTaskTimes(task, existing)
 	if task.SyncState == "" {
 		task.SyncState = existing.SyncState
@@ -198,6 +234,9 @@ func (s *Store) mutateTask(ctx context.Context, task Task, intent *SyncOperation
 	}()
 	if err = updateTaskTx(ctx, tx, task); err != nil {
 		return Task{}, fmt.Errorf("sqlite: update task %q: %w", task.ID, err)
+	}
+	if err = replaceTaskMemberships(ctx, tx, task); err != nil {
+		return Task{}, fmt.Errorf("sqlite: update task %q memberships: %w", task.ID, err)
 	}
 	if intent != nil {
 		var prepared SyncOperation
@@ -242,6 +281,9 @@ func (s *Store) createTaskWithQueue(ctx context.Context, task Task, intent *Sync
 	}()
 	if err := s.insertTask(ctx, tx, task); err != nil {
 		return Task{}, fmt.Errorf("sqlite: create task %q: %w", task.ID, err)
+	}
+	if err := replaceTaskMemberships(ctx, tx, task); err != nil {
+		return Task{}, fmt.Errorf("sqlite: create task %q memberships: %w", task.ID, err)
 	}
 	if intent != nil {
 		prepared, err := prepareTaskIntent(*intent, task)
@@ -323,6 +365,79 @@ func (s *Store) insertTask(ctx context.Context, tx *sql.Tx, task Task) error {
 	return err
 }
 
+func replaceTaskMemberships(ctx context.Context, tx *sql.Tx, task Task) error {
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM task_list_memberships WHERE provider_id = ? AND task_id = ?`,
+		task.ProviderID, task.ID,
+	); err != nil {
+		return err
+	}
+	for _, listID := range task.ListIDs {
+		if listID == task.ListID {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO task_list_memberships (provider_id, task_id, list_id)
+			VALUES (?, ?, ?)`, task.ProviderID, task.ID, listID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func loadTaskMemberships(ctx context.Context, queryer queryer, tasks []Task) error {
+	if len(tasks) == 0 {
+		return nil
+	}
+	indexes := make(map[string]int, len(tasks))
+	ids := make([]string, 0, len(tasks))
+	for index := range tasks {
+		tasks[index].ListIDs = []string{tasks[index].ListID}
+		indexes[tasks[index].ProviderID+"\x00"+tasks[index].ID] = index
+		ids = append(ids, tasks[index].ID)
+	}
+	for start := 0; start < len(ids); start += 500 {
+		end := start + 500
+		if end > len(ids) {
+			end = len(ids)
+		}
+		rows, err := queryer.QueryContext(ctx,
+			`SELECT provider_id, task_id, list_id FROM task_list_memberships WHERE task_id IN (`+placeholders(end-start)+`) ORDER BY task_id, list_id`,
+			stringArgs(ids[start:end])...,
+		)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var providerID, taskID, listID string
+			if err := rows.Scan(&providerID, &taskID, &listID); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			index, ok := indexes[providerID+"\x00"+taskID]
+			if ok && listID != tasks[index].ListID {
+				tasks[index].ListIDs = append(tasks[index].ListIDs, listID)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func stringArgs(values []string) []any {
+	args := make([]any, len(values))
+	for index, value := range values {
+		args[index] = value
+	}
+	return args
+}
+
 func (s *Store) resolveTaskID(ctx context.Context, task *Task) error {
 	if task.ID != "" {
 		return nil
@@ -356,7 +471,11 @@ func (s *Store) getTask(ctx context.Context, queryer queryer, id, providerID str
 	if err != nil {
 		return Task{}, queryError("get task", id, err)
 	}
-	return task, nil
+	tasks := []Task{task}
+	if err := loadTaskMemberships(ctx, queryer, tasks); err != nil {
+		return Task{}, fmt.Errorf("sqlite: get task memberships %q: %w", id, err)
+	}
+	return tasks[0], nil
 }
 
 func taskQuery(ctx context.Context, queryer queryer, query string, args ...any) ([]Task, error) {
@@ -375,6 +494,12 @@ func taskQuery(ctx context.Context, queryer queryer, query string, args ...any) 
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("sqlite: list tasks: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("sqlite: close task rows: %w", err)
+	}
+	if err := loadTaskMemberships(ctx, queryer, tasks); err != nil {
+		return nil, fmt.Errorf("sqlite: load task memberships: %w", err)
 	}
 	return tasks, nil
 }
@@ -406,8 +531,8 @@ func (s *Store) searchTaskRecords(ctx context.Context, search TaskSearch) ([]Tas
 	}
 	if value := strings.TrimSpace(queryText); value != "" {
 		pattern := "%" + escapeLike(value) + "%"
-		query += " AND (t.title LIKE ? ESCAPE '\\' COLLATE NOCASE OR t.description LIKE ? ESCAPE '\\' COLLATE NOCASE OR l.name LIKE ? ESCAPE '\\' COLLATE NOCASE OR s.name LIKE ? ESCAPE '\\' COLLATE NOCASE OR p.name LIKE ? ESCAPE '\\' COLLATE NOCASE)"
-		args = append(args, pattern, pattern, pattern, pattern, pattern)
+		query += " AND (t.title LIKE ? ESCAPE '\\' COLLATE NOCASE OR t.description LIKE ? ESCAPE '\\' COLLATE NOCASE OR l.name LIKE ? ESCAPE '\\' COLLATE NOCASE OR EXISTS (SELECT 1 FROM task_list_memberships m JOIN lists ml ON ml.provider_id = m.provider_id AND ml.id = m.list_id WHERE m.provider_id = t.provider_id AND m.task_id = t.id AND ml.name LIKE ? ESCAPE '\\' COLLATE NOCASE) OR s.name LIKE ? ESCAPE '\\' COLLATE NOCASE OR EXISTS (SELECT 1 FROM task_list_memberships m JOIN lists ml ON ml.provider_id = m.provider_id AND ml.id = m.list_id JOIN spaces ms ON ms.provider_id = ml.provider_id AND ms.id = ml.space_id WHERE m.provider_id = t.provider_id AND m.task_id = t.id AND ms.name LIKE ? ESCAPE '\\' COLLATE NOCASE) OR p.name LIKE ? ESCAPE '\\' COLLATE NOCASE)"
+		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern, pattern)
 	}
 	if filter.ProviderID != "" {
 		query += " AND t.provider_id = ?"
@@ -420,12 +545,12 @@ func (s *Store) searchTaskRecords(ctx context.Context, search TaskSearch) ([]Tas
 		}
 	}
 	if filter.SpaceID != "" {
-		query += " AND l.space_id = ?"
-		args = append(args, filter.SpaceID)
+		query += " AND (l.space_id = ? OR EXISTS (SELECT 1 FROM task_list_memberships m JOIN lists ml ON ml.provider_id = m.provider_id AND ml.id = m.list_id WHERE m.provider_id = t.provider_id AND m.task_id = t.id AND ml.space_id = ?))"
+		args = append(args, filter.SpaceID, filter.SpaceID)
 	}
 	if filter.ListID != "" {
-		query += " AND t.list_id = ?"
-		args = append(args, filter.ListID)
+		query += " AND (t.list_id = ? OR EXISTS (SELECT 1 FROM task_list_memberships m WHERE m.provider_id = t.provider_id AND m.task_id = t.id AND m.list_id = ?))"
+		args = append(args, filter.ListID, filter.ListID)
 	}
 	if filter.Status != "" {
 		query += " AND t.status = ?"
@@ -498,6 +623,19 @@ func (s *Store) searchTaskRecords(ctx context.Context, search TaskSearch) ([]Tas
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("sqlite: search tasks: %w", err)
 	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("sqlite: close task search rows: %w", err)
+	}
+	tasks := make([]Task, 0, len(results))
+	for _, result := range results {
+		tasks = append(tasks, result.Task)
+	}
+	if err := loadTaskMemberships(ctx, s.db, tasks); err != nil {
+		return nil, fmt.Errorf("sqlite: load searched task memberships: %w", err)
+	}
+	for index := range results {
+		results[index].Task.ListIDs = tasks[index].ListIDs
+	}
 	return results, nil
 }
 
@@ -532,6 +670,27 @@ func prepareTask(task Task) (Task, error) {
 	}
 	if task.ListID == "" {
 		return Task{}, fmt.Errorf("sqlite: task list id is empty")
+	}
+	if len(task.ListIDs) == 0 {
+		task.ListIDs = []string{task.ListID}
+	} else {
+		seen := make(map[string]struct{}, len(task.ListIDs))
+		primaryIncluded := false
+		for _, listID := range task.ListIDs {
+			if strings.TrimSpace(listID) == "" {
+				return Task{}, fmt.Errorf("sqlite: task list membership is empty")
+			}
+			if _, exists := seen[listID]; exists {
+				return Task{}, fmt.Errorf("sqlite: duplicate task list membership %q", listID)
+			}
+			seen[listID] = struct{}{}
+			if listID == task.ListID {
+				primaryIncluded = true
+			}
+		}
+		if !primaryIncluded {
+			return Task{}, fmt.Errorf("sqlite: task primary list is missing from memberships")
+		}
 	}
 	task.RemoteID = normalizeRemoteID(task.RemoteID)
 	if task.Status == "" {

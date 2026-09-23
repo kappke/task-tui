@@ -320,6 +320,7 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (Task, 
 		ID:           TaskID(id),
 		ProviderID:   input.ProviderID,
 		ListID:       input.ListID,
+		ListIDs:      append([]ListID(nil), input.ListIDs...),
 		ParentTaskID: parentID,
 		Title:        input.Title,
 		Description:  input.Description,
@@ -330,6 +331,16 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (Task, 
 		SyncState:    stateFor(provider),
 		CreatedAt:    now,
 		UpdatedAt:    now,
+	}
+	if len(task.ListIDs) == 0 {
+		task.ListIDs = []ListID{task.ListID}
+	}
+	task, err = task.NormalizeListMemberships()
+	if err != nil {
+		return Task{}, fmt.Errorf("create task: %w", err)
+	}
+	if err := s.validateTaskLists(ctx, task); err != nil {
+		return Task{}, fmt.Errorf("create task: %w", err)
 	}
 	intent, err := makeIntent(provider, EntityTypeTask, id, OperationCreate, domain.NewTaskCreateMutationPayload(task))
 	if err != nil {
@@ -390,6 +401,20 @@ func (s *Service) PatchTask(ctx context.Context, id TaskID, patch TaskPatch) (Ta
 		}
 		if destination.ProviderID != task.ProviderID {
 			return Task{}, fmt.Errorf("patch task %s from provider %s to list %s owned by provider %s: %w: %w", id, task.ProviderID, *patch.ListID, destination.ProviderID, ErrCrossProviderMove, ErrProviderMismatch)
+		}
+	}
+	for _, listID := range append(append([]ListID(nil), patch.AddListIDs...), patch.RemoveListIDs...) {
+		list, err := s.loadList(ctx, listID)
+		if err != nil {
+			return Task{}, fmt.Errorf("patch task %s list %s: %w", id, listID, err)
+		}
+		if list.ProviderID != task.ProviderID {
+			return Task{}, fmt.Errorf("patch task %s and list %s: %w", id, listID, ErrProviderMismatch)
+		}
+	}
+	for _, listID := range patch.RemoveListIDs {
+		if !task.HasList(listID) {
+			return Task{}, fmt.Errorf("remove task %s from list %s: %w", id, listID, ErrNotFound)
 		}
 	}
 	updated, err := ApplyTaskPatch(task, patch, now)
@@ -497,7 +522,7 @@ func (s *Service) MoveTask(ctx context.Context, id TaskID, destinationListID Lis
 	if task.ProviderID != destination.ProviderID {
 		return Task{}, fmt.Errorf("move task %s from provider %s to list %s owned by provider %s: %w: %w", id, task.ProviderID, destinationListID, destination.ProviderID, ErrCrossProviderMove, ErrProviderMismatch)
 	}
-	if task.ListID == destinationListID {
+	if task.ListID == destinationListID && len(task.Memberships()) == 1 {
 		return task, nil
 	}
 	provider, err := s.provider(ctx, task.ProviderID)
@@ -508,7 +533,10 @@ func (s *Service) MoveTask(ctx context.Context, id TaskID, destinationListID Lis
 		return Task{}, fmt.Errorf("move task %s: %w", id, err)
 	}
 	moved := cloneTask(task)
-	moved.ListID = destinationListID
+	moved, err = moved.MoveToList(destinationListID)
+	if err != nil {
+		return Task{}, fmt.Errorf("move task %s: %w", id, err)
+	}
 	moved.UpdatedAt = s.now()
 	moved.SyncState = stateFor(provider)
 	patch := TaskPatch{ListID: &destinationListID}
@@ -524,6 +552,18 @@ func (s *Service) MoveTask(ctx context.Context, id TaskID, destinationListID Lis
 		return Task{}, fmt.Errorf("persist move for task %s: %w", id, err)
 	}
 	return cloneTask(saved), nil
+}
+
+// AddTaskToList adds a same-provider list membership without moving the task
+// out of its other lists.
+func (s *Service) AddTaskToList(ctx context.Context, id TaskID, listID ListID) (Task, error) {
+	return s.PatchTask(ctx, id, TaskPatch{AddListIDs: []ListID{listID}})
+}
+
+// RemoveTaskFromList removes one list membership. The final membership cannot
+// be removed; callers should use DeleteTask to remove the task itself.
+func (s *Service) RemoveTaskFromList(ctx context.Context, id TaskID, listID ListID) (Task, error) {
+	return s.PatchTask(ctx, id, TaskPatch{RemoveListIDs: []ListID{listID}})
 }
 
 func (s *Service) CopyTask(ctx context.Context, sourceID TaskID, destinationListID ListID) (Task, error) {
@@ -796,6 +836,9 @@ func (s *Service) loadTask(ctx context.Context, id TaskID) (Task, error) {
 	if err := ValidateTaskProvider(task, list); err != nil {
 		return Task{}, fmt.Errorf("load task %s: %w", id, err)
 	}
+	if err := s.validateTaskLists(ctx, task); err != nil {
+		return Task{}, fmt.Errorf("load task %s lists: %w", id, err)
+	}
 	if task.ParentTaskID != nil {
 		if *task.ParentTaskID == "" {
 			return Task{}, fmt.Errorf("load task %s: %w: parent id is empty", id, ErrInvalidParent)
@@ -822,6 +865,19 @@ func (s *Service) loadTask(ctx context.Context, id TaskID) (Task, error) {
 		}
 	}
 	return cloneTask(task), nil
+}
+
+func (s *Service) validateTaskLists(ctx context.Context, task Task) error {
+	for _, listID := range task.Memberships() {
+		list, err := s.loadList(ctx, listID)
+		if err != nil {
+			return fmt.Errorf("load task list %s: %w", listID, err)
+		}
+		if list.ProviderID != task.ProviderID {
+			return fmt.Errorf("task %s list %s: %w", task.ID, listID, ErrProviderMismatch)
+		}
+	}
+	return nil
 }
 
 func (s *Service) provider(ctx context.Context, id ProviderID) (Provider, error) {
@@ -948,5 +1004,32 @@ func validateSavedTask(expected, saved Task) error {
 	if saved.ID != expected.ID || saved.ProviderID != expected.ProviderID || saved.ListID != expected.ListID {
 		return fmt.Errorf("%w: repository changed task identity, ownership, or parent", ErrInvalidEntity)
 	}
+	expectedMemberships, err := expected.NormalizeListMemberships()
+	if err != nil {
+		return fmt.Errorf("%w: invalid expected task memberships: %v", ErrInvalidEntity, err)
+	}
+	savedMemberships, err := saved.NormalizeListMemberships()
+	if err != nil {
+		return fmt.Errorf("%w: invalid saved task memberships: %v", ErrInvalidEntity, err)
+	}
+	if !sameListMemberships(expectedMemberships.ListIDs, savedMemberships.ListIDs) {
+		return fmt.Errorf("%w: repository changed task list memberships", ErrInvalidEntity)
+	}
 	return nil
+}
+
+func sameListMemberships(left, right []ListID) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	members := make(map[ListID]struct{}, len(left))
+	for _, listID := range left {
+		members[listID] = struct{}{}
+	}
+	for _, listID := range right {
+		if _, ok := members[listID]; !ok {
+			return false
+		}
+	}
+	return true
 }

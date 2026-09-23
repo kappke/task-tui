@@ -259,7 +259,12 @@ func getTask(ctx context.Context, runtime *bootstrap.Runtime, args []string, std
 	if common.json {
 		return writeJSON(stdout, task)
 	}
-	fmt.Fprintf(stdout, "id: %s\nprovider: %s\nlist: %s\nremote_id: %s\ntitle: %s\nstatus: %s\npriority: %s\nsync: %s\n", task.ID, task.ProviderID, task.ListID, optional(task.RemoteID), task.Title, task.Status, task.Priority, task.SyncState)
+	memberships := task.Memberships()
+	listIDs := make([]string, 0, len(memberships))
+	for _, listID := range memberships {
+		listIDs = append(listIDs, string(listID))
+	}
+	fmt.Fprintf(stdout, "id: %s\nprovider: %s\nlist: %s\nlists: %s\nremote_id: %s\ntitle: %s\nstatus: %s\npriority: %s\nsync: %s\n", task.ID, task.ProviderID, task.ListID, strings.Join(listIDs, ", "), optional(task.RemoteID), task.Title, task.Status, task.Priority, task.SyncState)
 	if task.Description != "" {
 		fmt.Fprintf(stdout, "description: %s\n", task.Description)
 	}

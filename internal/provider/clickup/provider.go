@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -329,16 +330,9 @@ func (p *Provider) FetchTasks(ctx context.Context, listID domain.ListID) ([]doma
 	}
 	mapped := p.mapper.MapTasksContext(ctx, tasks, listID)
 	for index := range mapped {
-		memberships := make([]domain.ListID, 0, len(tasks[index].Lists)+1)
-		for _, remoteList := range tasks[index].Lists {
-			resolved, resolveErr := p.resolveListLocalID(ctx, remoteList.ID.String())
-			if resolveErr != nil {
-				continue
-			}
-			memberships = append(memberships, resolved)
-		}
-		memberships = append(memberships, listID)
-		mapped[index].ListIDs = uniqueListIDs(memberships)
+		primaryListID := p.taskPrimaryListID(ctx, tasks[index], listID)
+		mapped[index].ListID = primaryListID
+		mapped[index].ListIDs = p.resolveTaskListIDs(ctx, tasks[index], primaryListID, listID)
 	}
 	return mapped, nil
 }
@@ -369,6 +363,10 @@ func (p *Provider) FetchTask(ctx context.Context, taskID domain.TaskID) (domain.
 	}
 	task, err := p.client.GetTask(ctx, remoteTaskID)
 	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return domain.Task{}, fmt.Errorf("fetch ClickUp task %s: %w", remoteTaskID, domain.ErrNotFound)
+		}
 		return domain.Task{}, fmt.Errorf("fetch ClickUp task %s: %w", remoteTaskID, err)
 	}
 	listID, err := p.resolveListLocalID(ctx, task.List.ID.String())
@@ -376,8 +374,34 @@ func (p *Provider) FetchTask(ctx context.Context, taskID domain.TaskID) (domain.
 		return domain.Task{}, fmt.Errorf("resolve ClickUp list %s: %w", task.List.ID, err)
 	}
 	result := p.mapper.MapTaskContext(ctx, task, listID)
+	result.ListIDs = p.resolveTaskListIDs(ctx, task, listID)
 	result.ID = taskID
 	return result, nil
+}
+
+func (p *Provider) taskPrimaryListID(ctx context.Context, task wireTask, fallback domain.ListID) domain.ListID {
+	remoteID := strings.TrimSpace(task.List.ID.String())
+	if remoteID == "" || p.localListResolver == nil {
+		return fallback
+	}
+	primary, err := p.resolveListLocalID(ctx, remoteID)
+	if err != nil {
+		return fallback
+	}
+	return primary
+}
+
+func (p *Provider) resolveTaskListIDs(ctx context.Context, task wireTask, primary domain.ListID, included ...domain.ListID) []domain.ListID {
+	memberships := make([]domain.ListID, 0, len(task.Lists)+1+len(included))
+	memberships = append(memberships, primary)
+	for _, remoteList := range task.Lists {
+		resolved, err := p.resolveListLocalID(ctx, remoteList.ID.String())
+		if err == nil {
+			memberships = append(memberships, resolved)
+		}
+	}
+	memberships = append(memberships, included...)
+	return uniqueListIDs(memberships)
 }
 
 func (p *Provider) resolveListLocalID(ctx context.Context, remoteID string) (domain.ListID, error) {
@@ -435,6 +459,10 @@ func (p *Provider) CreateTask(ctx context.Context, task domain.Task) (domain.Tas
 		return domain.Task{}, err
 	}
 	task.ProviderID = p.id
+	task, err := task.NormalizeListMemberships()
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("create ClickUp task memberships: %w", err)
+	}
 
 	listID := domainListID(task)
 	remoteListID, err := p.resolveListRemoteID(ctx, listID)
@@ -449,23 +477,56 @@ func (p *Provider) CreateTask(ctx context.Context, task domain.Task) (domain.Tas
 	if err != nil {
 		return domain.Task{}, fmt.Errorf("create ClickUp task in list %s: %w", remoteListID, err)
 	}
+	remoteTaskID := created.ID.String()
 	result := p.mapper.MapTaskContext(ctx, created, listID)
+	result.ListIDs = task.Memberships()
 	if task.ID != "" {
 		result.ID = task.ID
 	}
+	for _, listID := range task.Memberships() {
+		if listID == task.ListID {
+			continue
+		}
+		additionalRemoteListID, resolveErr := p.resolveListRemoteID(ctx, listID)
+		if resolveErr != nil {
+			return p.rollbackCreatedTask(ctx, result, remoteTaskID,
+				fmt.Errorf("resolve additional ClickUp list %s: %w", listID, resolveErr))
+		}
+		if err := p.client.AddTaskToList(ctx, additionalRemoteListID, remoteTaskID); err != nil {
+			return p.rollbackCreatedTask(ctx, result, remoteTaskID,
+				fmt.Errorf("add ClickUp task %s to list %s: %w", remoteTaskID, additionalRemoteListID, err))
+		}
+	}
 	return result, nil
+}
+
+func (p *Provider) rollbackCreatedTask(ctx context.Context, created domain.Task, remoteTaskID string, operationErr error) (domain.Task, error) {
+	if err := p.client.DeleteTask(ctx, remoteTaskID); err == nil {
+		return domain.Task{}, operationErr
+	} else {
+		return created, errors.Join(operationErr, fmt.Errorf("delete partially created ClickUp task %s: %w", remoteTaskID, err))
+	}
 }
 
 func (p *Provider) UpdateTask(ctx context.Context, task domain.Task) (domain.Task, error) {
 	if err := p.validateTaskProvider(task); err != nil {
 		return domain.Task{}, err
 	}
+	normalized, err := task.NormalizeListMemberships()
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("update ClickUp task memberships: %w", err)
+	}
+	task = normalized
 	remoteID := domainRemoteID(task)
 	if remoteID == "" {
 		return domain.Task{}, ErrRemoteIDMissing
 	}
 	if err := p.ensureReady(); err != nil {
 		return domain.Task{}, err
+	}
+	current, err := p.client.GetTask(ctx, remoteID)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("fetch ClickUp task %s before update: %w", remoteID, err)
 	}
 
 	payload, err := p.updatePayload(ctx, task)
@@ -480,14 +541,63 @@ func (p *Provider) UpdateTask(ctx context.Context, task domain.Task) (domain.Tas
 	if err != nil {
 		return domain.Task{}, fmt.Errorf("update ClickUp task %s: %w", remoteID, err)
 	}
-	if updated.List.ID.String() != "" && updated.List.ID.String() != remoteListID {
+	if current.List.ID.String() != "" && current.List.ID.String() != remoteListID {
 		if err := p.client.MoveTask(ctx, remoteID, remoteListID); err != nil {
 			return domain.Task{}, fmt.Errorf("move ClickUp task %s to list %s: %w", remoteID, remoteListID, err)
 		}
 	}
+	if err := p.syncTaskListMemberships(ctx, remoteID, current, task, remoteListID); err != nil {
+		return domain.Task{}, err
+	}
 	result := p.mapper.MapTaskContext(ctx, updated, domainListID(task))
+	result.ListIDs = task.Memberships()
 	result.ID = task.ID
 	return result, nil
+}
+
+func (p *Provider) syncTaskListMemberships(ctx context.Context, remoteTaskID string, current wireTask, task domain.Task, homeRemoteListID string) error {
+	currentIDs := make(map[string]struct{}, len(current.Lists)+1)
+	if current.List.ID.String() != "" {
+		currentIDs[current.List.ID.String()] = struct{}{}
+	}
+	for _, list := range current.Lists {
+		if list.ID.String() != "" {
+			currentIDs[list.ID.String()] = struct{}{}
+		}
+	}
+	currentIDs[homeRemoteListID] = struct{}{}
+
+	desiredIDs := make(map[string]struct{}, len(task.Memberships()))
+	for _, listID := range task.Memberships() {
+		remoteListID, err := p.resolveListRemoteID(ctx, listID)
+		if err != nil {
+			return fmt.Errorf("resolve ClickUp list %s: %w", listID, err)
+		}
+		desiredIDs[remoteListID] = struct{}{}
+	}
+	for listID := range desiredIDs {
+		if listID == homeRemoteListID {
+			continue
+		}
+		if _, exists := currentIDs[listID]; exists {
+			continue
+		}
+		if err := p.client.AddTaskToList(ctx, listID, remoteTaskID); err != nil {
+			return fmt.Errorf("add ClickUp task %s to list %s: %w", remoteTaskID, listID, err)
+		}
+	}
+	for listID := range currentIDs {
+		if listID == homeRemoteListID {
+			continue
+		}
+		if _, exists := desiredIDs[listID]; exists {
+			continue
+		}
+		if err := p.client.RemoveTaskFromList(ctx, listID, remoteTaskID); err != nil {
+			return fmt.Errorf("remove ClickUp task %s from list %s: %w", remoteTaskID, listID, err)
+		}
+	}
+	return nil
 }
 
 func (p *Provider) DeleteTask(ctx context.Context, task domain.Task) error {

@@ -572,9 +572,7 @@ func (s *Store) ListByList(ctx context.Context, listID domain.ListID) ([]domain.
 	}
 	result := make([]domain.Task, 0, len(tasks))
 	for _, task := range tasks {
-		value := domainTask(task)
-		value.ListID = listID
-		result = append(result, value)
+		result = append(result, domainTask(task))
 	}
 	return result, nil
 }
@@ -603,9 +601,7 @@ func (s *Store) ListTasksByListPage(ctx context.Context, providerID domain.Provi
 	}
 	result := make([]domain.Task, 0, len(tasks))
 	for _, task := range tasks {
-		value := domainTask(task)
-		value.ListID = listID
-		result = append(result, value)
+		result = append(result, domainTask(task))
 	}
 	return result, nil
 }
@@ -670,36 +666,7 @@ func (s *Store) UpsertTask(ctx context.Context, task domain.Task) (domain.Task, 
 		return domain.Task{}, adaptError(err, false)
 	}
 	task.ID = domain.TaskID(upserted.ID)
-	if err := s.syncTaskListMemberships(ctx, task); err != nil {
-		return domain.Task{}, err
-	}
 	return domainTask(upserted), nil
-}
-
-func (s *Store) syncTaskListMemberships(ctx context.Context, task domain.Task) error {
-	listIDs := task.ListIDs
-	if len(listIDs) == 0 {
-		listIDs = []domain.ListID{task.ListID}
-	}
-	if len(task.ListIDs) > 0 {
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM task_list_memberships WHERE provider_id = ? AND task_id = ?`, task.ProviderID, task.ID); err != nil {
-			return fmt.Errorf("sqlite: clear task %s list memberships: %w", task.ID, err)
-		}
-	}
-	seen := make(map[domain.ListID]struct{}, len(listIDs))
-	for _, listID := range listIDs {
-		if listID == "" {
-			continue
-		}
-		if _, ok := seen[listID]; ok {
-			continue
-		}
-		seen[listID] = struct{}{}
-		if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO task_list_memberships(provider_id, task_id, list_id) VALUES (?, ?, ?)`, task.ProviderID, task.ID, listID); err != nil {
-			return fmt.Errorf("sqlite: save task %s list membership %s: %w", task.ID, listID, err)
-		}
-	}
-	return nil
 }
 
 func (s *Store) DeleteTask(ctx context.Context, id domain.TaskID) error {
@@ -723,6 +690,11 @@ func taskRecord(task domain.Task) (Task, error) {
 	if task.Status == "" {
 		task.Status = "todo"
 	}
+	var err error
+	task, err = task.NormalizeListMemberships()
+	if err != nil {
+		return Task{}, err
+	}
 	task = task.NormalizeUTC()
 	if err := task.Validate(); err != nil {
 		return Task{}, err
@@ -736,6 +708,7 @@ func taskRecord(task domain.Task) (Task, error) {
 		ID:              task.ID.String(),
 		ProviderID:      task.ProviderID.String(),
 		ListID:          task.ListID.String(),
+		ListIDs:         listIDsToStrings(task.ListIDs),
 		RemoteID:        copyStringPointer(task.RemoteID),
 		ParentTaskID:    parentTaskID,
 		Assignee:        task.Assignee,
@@ -755,19 +728,22 @@ func taskRecord(task domain.Task) (Task, error) {
 }
 
 func (s *Store) taskRecordForUpdate(ctx context.Context, task domain.Task) (Task, error) {
+	existing, err := s.getTaskByID(ctx, task.ID.String())
+	if err != nil {
+		return Task{}, adaptError(err, false)
+	}
+	if existing.ProviderID != task.ProviderID.String() {
+		return Task{}, fmt.Errorf("%w: task provider is immutable", domain.ErrProviderMismatch)
+	}
+	if len(task.ListIDs) == 0 {
+		task.ListIDs = stringListIDsToDomain(existing.ListIDs)
+	}
 	record, err := taskRecord(task)
 	if err != nil {
 		return Task{}, err
 	}
 	if err := s.validateTaskParents(ctx, record); err != nil {
 		return Task{}, err
-	}
-	existing, err := s.getTaskByID(ctx, record.ID)
-	if err != nil {
-		return Task{}, adaptError(err, false)
-	}
-	if existing.ProviderID != record.ProviderID {
-		return Task{}, fmt.Errorf("%w: task provider is immutable", domain.ErrProviderMismatch)
 	}
 	if existing.IsDeleted {
 		record.IsDeleted = true
@@ -786,6 +762,7 @@ func domainTask(task Task) domain.Task {
 		ID:              domain.TaskID(task.ID),
 		ProviderID:      domain.ProviderID(task.ProviderID),
 		ListID:          domain.ListID(task.ListID),
+		ListIDs:         stringListIDsToDomain(task.ListIDs),
 		RemoteID:        copyStringPointer(task.RemoteID),
 		ParentTaskID:    parentTaskID,
 		Assignee:        task.Assignee,
@@ -966,12 +943,14 @@ func (s *Store) validateListParent(ctx context.Context, list List) error {
 }
 
 func (s *Store) validateTaskParents(ctx context.Context, task Task) error {
-	list, err := s.getListByID(ctx, task.ListID)
-	if err != nil {
-		return adaptError(err, false)
-	}
-	if list.ProviderID != task.ProviderID {
-		return fmt.Errorf("%w: task %s and list %s", domain.ErrProviderMismatch, task.ID, task.ListID)
+	for _, listID := range task.ListIDs {
+		list, err := s.getListByID(ctx, listID)
+		if err != nil {
+			return adaptError(err, false)
+		}
+		if list.ProviderID != task.ProviderID {
+			return fmt.Errorf("%w: task %s and list %s", domain.ErrProviderMismatch, task.ID, listID)
+		}
 	}
 	if task.ParentTaskID == nil {
 		return nil
@@ -987,6 +966,22 @@ func (s *Store) validateTaskParents(ctx context.Context, task Task) error {
 		return fmt.Errorf("%w: task %s and parent %s", domain.ErrProviderMismatch, task.ID, *task.ParentTaskID)
 	}
 	return nil
+}
+
+func listIDsToStrings(values []domain.ListID) []string {
+	result := make([]string, len(values))
+	for index, value := range values {
+		result[index] = value.String()
+	}
+	return result
+}
+
+func stringListIDsToDomain(values []string) []domain.ListID {
+	result := make([]domain.ListID, len(values))
+	for index, value := range values {
+		result[index] = domain.ListID(value)
+	}
+	return result
 }
 
 func (s *Store) tombstoneByID(ctx context.Context, table, id string) error {

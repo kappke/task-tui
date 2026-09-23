@@ -728,10 +728,11 @@ func (q *foundationTestQueue) PendingCount(context.Context, domain.ProviderID) (
 }
 
 type foundationTestProvider struct {
-	id      domain.ProviderID
-	created int
-	remote  string
-	updated []domain.Task
+	id        domain.ProviderID
+	created   int
+	remote    string
+	createErr error
+	updated   []domain.Task
 }
 
 func (p *foundationTestProvider) ID() domain.ProviderID { return p.id }
@@ -763,7 +764,7 @@ func (p *foundationTestProvider) CreateTask(_ context.Context, task domain.Task)
 	if p.remote != "" {
 		task.RemoteID = &p.remote
 	}
-	return task, nil
+	return task, p.createErr
 }
 
 func (p *foundationTestProvider) UpdateTask(_ context.Context, task domain.Task) (domain.Task, error) {
@@ -814,5 +815,32 @@ func TestFoundationProviderPropagatesCreatedRemoteIdentity(t *testing.T) {
 	}
 	if len(provider.updated) != 1 || provider.updated[0].RemoteID == nil || *provider.updated[0].RemoteID != "remote-task-1" {
 		t.Fatalf("updated task remote identity = %+v, want remote-task-1", provider.updated)
+	}
+}
+
+func TestFoundationProviderRetriesPartialTaskCreateAsUpdate(t *testing.T) {
+	partialErr := errors.New("additional list membership failed")
+	provider := &foundationTestProvider{id: "work", remote: "remote-task-1", createErr: partialErr}
+	adapted := AdaptProvider(provider).(*FoundationProvider)
+	payload, err := json.Marshal(domain.Task{
+		ID: "task-1", ProviderID: "work", ListID: "list-1", ListIDs: []domain.ListID{"list-1", "list-2"},
+		Title: "task", Status: "open", Priority: domain.PriorityNormal,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation := Operation{
+		ID: "create", ProviderID: "work", EntityType: EntityTask, EntityID: "task-1",
+		Operation: OperationCreate, Payload: payload,
+	}
+	if err := adapted.Push(context.Background(), operation); !errors.Is(err, partialErr) {
+		t.Fatalf("partial create Push() error = %v", err)
+	}
+	provider.createErr = nil
+	if err := adapted.Push(context.Background(), operation); err != nil {
+		t.Fatalf("retry Push() error = %v", err)
+	}
+	if provider.created != 1 || len(provider.updated) != 1 || provider.updated[0].RemoteID == nil || *provider.updated[0].RemoteID != "remote-task-1" {
+		t.Fatalf("partial create retry state: created=%d updated=%+v", provider.created, provider.updated)
 	}
 }

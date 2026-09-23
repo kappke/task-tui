@@ -454,8 +454,16 @@ func (p *FoundationProvider) pushTask(ctx context.Context, operation Operation, 
 	}
 	switch operation.Type() {
 	case OperationCreate:
+		p.identityMu.Lock()
+		remoteID := p.remoteIDs[task.ID.String()]
+		p.identityMu.Unlock()
+		if remoteID != "" {
+			task.RemoteID = &remoteID
+			_, err := p.provider.UpdateTask(ctx, task)
+			return err
+		}
 		created, err := p.provider.CreateTask(ctx, task)
-		if err == nil && created.RemoteID != nil && *created.RemoteID != "" {
+		if created.RemoteID != nil && *created.RemoteID != "" {
 			p.identityMu.Lock()
 			p.remoteIDs[task.ID.String()] = *created.RemoteID
 			p.identityMu.Unlock()

@@ -495,7 +495,7 @@ func TestCachedProviderReconcilesRemoteIDsWithLocalIDs(t *testing.T) {
 	}
 }
 
-func TestUIStateNormalizesRemoteListAndRestartPullKeepsScope(t *testing.T) {
+func TestUIStateNormalizesRemoteListAndRestartRefreshFindsSharedTasks(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "tasktui.db")
 	store, err := sqlite.Open(path)
@@ -547,8 +547,8 @@ func TestUIStateNormalizesRemoteListAndRestartPullKeepsScope(t *testing.T) {
 		spaces: []domain.Space{{ID: "fetched-space", ProviderID: providerID, RemoteID: &spaceRemote, Name: "Work", SyncState: domain.SyncStateSynced}},
 		lists:  map[domain.SpaceID][]domain.List{space.ID: {{ID: "mapped-selected", ProviderID: providerID, SpaceID: space.ID, RemoteID: &selectedRemote, Name: "Selected", SyncState: domain.SyncStateSynced}, {ID: "mapped-other", ProviderID: providerID, SpaceID: space.ID, RemoteID: &otherRemote, Name: "Other", SyncState: domain.SyncStateSynced}}},
 		tasks: map[domain.ListID][]domain.Task{
-			selected.ID: {{ID: "mapped-selected-task", ProviderID: providerID, ListID: selected.ID, RemoteID: &selectedTaskRemote, Title: "Selected task", Status: "todo", Priority: domain.PriorityNormal, SyncState: domain.SyncStateSynced}},
-			other.ID:    {{ID: "mapped-other-task", ProviderID: providerID, ListID: other.ID, RemoteID: &otherTaskRemote, Title: "Other task", Status: "todo", Priority: domain.PriorityNormal, SyncState: domain.SyncStateSynced}},
+			selected.ID: {{ID: "mapped-selected-task", ProviderID: providerID, ListID: selected.ID, ListIDs: []domain.ListID{selected.ID}, RemoteID: &selectedTaskRemote, Title: "Selected task", Status: "todo", Priority: domain.PriorityNormal, SyncState: domain.SyncStateSynced}},
+			other.ID:    {{ID: "mapped-other-task", ProviderID: providerID, ListID: other.ID, ListIDs: []domain.ListID{other.ID, selected.ID}, RemoteID: &otherTaskRemote, Title: "Other task", Status: "todo", Priority: domain.PriorityNormal, SyncState: domain.SyncStateSynced}},
 		},
 	}
 	cached := newCachedProvider(fake, store)
@@ -560,8 +560,24 @@ func TestUIStateNormalizesRemoteListAndRestartPullKeepsScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tasks) != 1 || tasks[0].Title != "Selected task" || tasks[0].ListID != selected.ID {
-		t.Fatalf("scoped restart pull tasks = %#v, want only selected list task", tasks)
+	if len(tasks) != 2 {
+		t.Fatalf("restart refresh tasks = %#v, want tasks from each home list", tasks)
+	}
+	selectedTasks, err := store.ListByList(ctx, selected.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selectedTasks) != 2 {
+		t.Fatalf("selected list tasks = %#v, want shared task from other home list", selectedTasks)
+	}
+	var shared domain.Task
+	for _, task := range selectedTasks {
+		if task.Title == "Other task" {
+			shared = task
+		}
+	}
+	if shared.ID == "" || shared.ListID != other.ID || !shared.HasList(selected.ID) {
+		t.Fatalf("shared task = %#v, want other home list and selected membership", shared)
 	}
 }
 
@@ -655,11 +671,12 @@ func TestFoundationSyncMessageKeepsOperationFailureVisible(t *testing.T) {
 }
 
 type foundationTestProvider struct {
-	id      domain.ProviderID
-	spaces  []domain.Space
-	lists   map[domain.SpaceID][]domain.List
-	tasks   map[domain.ListID][]domain.Task
-	created domain.Task
+	id           domain.ProviderID
+	spaces       []domain.Space
+	lists        map[domain.SpaceID][]domain.List
+	tasks        map[domain.ListID][]domain.Task
+	fetchedTasks map[domain.TaskID]domain.Task
+	created      domain.Task
 }
 
 type foundationNoopHandler struct{}
@@ -700,6 +717,9 @@ func (p *foundationTestProvider) FetchTasks(_ context.Context, listID domain.Lis
 }
 
 func (p *foundationTestProvider) FetchTask(_ context.Context, taskID domain.TaskID) (domain.Task, error) {
+	if task, ok := p.fetchedTasks[taskID]; ok {
+		return task, nil
+	}
 	for _, tasks := range p.tasks {
 		for _, task := range tasks {
 			if task.ID == taskID {
@@ -719,3 +739,76 @@ func (p *foundationTestProvider) UpdateTask(context.Context, domain.Task) (domai
 }
 
 func (p *foundationTestProvider) DeleteTask(context.Context, domain.Task) error { return nil }
+
+func TestScopedRefreshKeepsTaskThatMovedOutOfCurrentList(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	providerID := domain.ProviderID("clickup-work")
+	if _, err := store.CreateProvider(ctx, domain.Provider{ID: providerID, Type: domain.ProviderTypeClickUp, Name: "Work", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	space, err := store.CreateSpace(ctx, domain.Space{ID: "space", ProviderID: providerID, Name: "Work", SyncState: domain.SyncStateSynced})
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentList, err := store.CreateList(ctx, domain.List{ID: "current-list", ProviderID: providerID, SpaceID: space.ID, RemoteID: bootstrapStringPointer("remote-current"), Name: "Current", SyncState: domain.SyncStateSynced})
+	if err != nil {
+		t.Fatal(err)
+	}
+	homeList, err := store.CreateList(ctx, domain.List{ID: "home-list", ProviderID: providerID, SpaceID: space.ID, RemoteID: bootstrapStringPointer("remote-home"), Name: "Home", SyncState: domain.SyncStateSynced})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteTaskID := "remote-task"
+	task, err := store.CreateTask(ctx, domain.Task{
+		ID: "task", ProviderID: providerID, ListID: currentList.ID, ListIDs: []domain.ListID{currentList.ID},
+		RemoteID: &remoteTaskID, Title: "Move me", Status: "todo", Priority: domain.PriorityNormal,
+		SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &foundationTestProvider{
+		id:     providerID,
+		spaces: []domain.Space{{ID: space.ID, ProviderID: providerID, RemoteID: bootstrapStringPointer("remote-space"), Name: space.Name, SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now}},
+		lists:  map[domain.SpaceID][]domain.List{space.ID: {currentList, homeList}},
+		tasks: map[domain.ListID][]domain.Task{
+			currentList.ID: {{
+				ID: task.ID, ProviderID: providerID, ListID: currentList.ID, ListIDs: []domain.ListID{currentList.ID},
+				RemoteID: &remoteTaskID, Title: task.Title, Status: task.Status, Priority: task.Priority,
+				SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now,
+			}},
+		},
+	}
+	cached := newCachedProvider(fake, store)
+	cached.SetActiveTaskList(currentList.ID)
+	if err := cached.Pull(ctx); err != nil {
+		t.Fatalf("initial Pull() error = %v", err)
+	}
+
+	fake.tasks[currentList.ID] = nil
+	fake.fetchedTasks = map[domain.TaskID]domain.Task{
+		task.ID: {
+			ID: task.ID, ProviderID: providerID, ListID: homeList.ID, ListIDs: []domain.ListID{homeList.ID},
+			RemoteID: &remoteTaskID, Title: task.Title, Status: task.Status, Priority: task.Priority,
+			SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now,
+		},
+	}
+	if err := cached.Pull(ctx); err != nil {
+		t.Fatalf("scoped Pull() after move error = %v", err)
+	}
+	updated, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.IsDeleted || updated.ListID != homeList.ID || !updated.HasList(homeList.ID) {
+		t.Fatalf("task after scoped refresh = %#v, want active in home list", updated)
+	}
+}
+
+func bootstrapStringPointer(value string) *string { return &value }

@@ -298,6 +298,11 @@ func (m Model) detailLines(width int) []string {
 		location += "/" + string(row.ListID)
 	}
 	appendField("LOCATION", location)
+	listNames := make([]string, len(row.ListNames))
+	for index, name := range row.ListNames {
+		listNames[index] = safeText(name)
+	}
+	appendField("LISTS", strings.Join(listNames, ", "))
 	assignee := safeText(task.Assignee)
 	if assignee == "" {
 		assignee = "(unassigned)"

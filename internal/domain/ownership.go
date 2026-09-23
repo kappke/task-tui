@@ -42,7 +42,12 @@ func ValidateTaskProvider(task Task, list List) error {
 	if err := ValidateProviderOwnership(list.ProviderID, task.ProviderID); err != nil {
 		return err
 	}
-	if !task.ListID.IsZero() && !list.ID.IsZero() && task.ListID != list.ID {
+	if !task.ListID.IsZero() && !list.ID.IsZero() {
+		for _, listID := range task.Memberships() {
+			if listID == list.ID {
+				return nil
+			}
+		}
 		return fmt.Errorf("%w: task %s does not belong to list %s", ErrInvalidParent, task.ID, list.ID)
 	}
 	return nil

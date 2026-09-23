@@ -15,17 +15,19 @@ import (
 type Kind string
 
 const (
-	KindQuit         Kind = "quit"
-	KindRefresh      Kind = "refresh"
-	KindSearch       Kind = "search"
-	KindCreateSpace  Kind = "create_space"
-	KindCreateList   Kind = "create_list"
-	KindCreateTask   Kind = "create_task"
-	KindUpdateTask   Kind = "update_task"
-	KindCompleteTask Kind = "complete_task"
-	KindDeleteTask   Kind = "delete_task"
-	KindMoveTask     Kind = "move_task"
-	KindTransferTask Kind = "transfer_task"
+	KindQuit               Kind = "quit"
+	KindRefresh            Kind = "refresh"
+	KindSearch             Kind = "search"
+	KindCreateSpace        Kind = "create_space"
+	KindCreateList         Kind = "create_list"
+	KindCreateTask         Kind = "create_task"
+	KindUpdateTask         Kind = "update_task"
+	KindCompleteTask       Kind = "complete_task"
+	KindDeleteTask         Kind = "delete_task"
+	KindMoveTask           Kind = "move_task"
+	KindAddTaskToList      Kind = "add_task_to_list"
+	KindRemoveTaskFromList Kind = "remove_task_from_list"
+	KindTransferTask       Kind = "transfer_task"
 )
 
 // Command is a normalized request from the UI to the application layer.
@@ -108,7 +110,7 @@ func (c Command) Validate() error {
 		if strings.TrimSpace(c.ProviderID) == "" || strings.TrimSpace(c.TaskID) == "" {
 			return fmt.Errorf("%w: provider and task are required", ErrInvalid)
 		}
-	case KindMoveTask, KindTransferTask:
+	case KindMoveTask, KindTransferTask, KindAddTaskToList, KindRemoveTaskFromList:
 		if strings.TrimSpace(c.ProviderID) == "" || strings.TrimSpace(c.TaskID) == "" || strings.TrimSpace(c.DestinationListID) == "" {
 			return fmt.Errorf("%w: provider, task, and destination list are required", ErrInvalid)
 		}

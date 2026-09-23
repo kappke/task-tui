@@ -138,8 +138,8 @@ func TestOpenRunsInitialMigrationAndConfiguresSQLite(t *testing.T) {
 	if err := store.SQLDB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatalf("migration count: %v", err)
 	}
-	if migrationCount != 7 {
-		t.Fatalf("migration count = %d, want 7", migrationCount)
+	if migrationCount != 8 {
+		t.Fatalf("migration count = %d, want 8", migrationCount)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("close: %v", err)
@@ -153,8 +153,8 @@ func TestOpenRunsInitialMigrationAndConfiguresSQLite(t *testing.T) {
 	if err := reopened.SQLDB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatalf("reopen migration count: %v", err)
 	}
-	if migrationCount != 7 {
-		t.Fatalf("reopen migration count = %d, want 7", migrationCount)
+	if migrationCount != 8 {
+		t.Fatalf("reopen migration count = %d, want 8", migrationCount)
 	}
 }
 
@@ -181,8 +181,62 @@ func TestTaskCanBeListedThroughMultipleListMemberships(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tasks) != 1 || tasks[0].ID != h.task.ID || tasks[0].ListID != second.ID {
+	if len(tasks) != 1 || tasks[0].ID != h.task.ID || tasks[0].ListID != h.list.ID {
 		t.Fatalf("second-list tasks = %#v, want task %s in list %s", tasks, h.task.ID, second.ID)
+	}
+	if len(tasks[0].ListIDs) != 2 || tasks[0].ListIDs[0] != h.list.ID || tasks[0].ListIDs[1] != second.ID {
+		t.Fatalf("task memberships = %v, want [%s %s]", tasks[0].ListIDs, h.list.ID, second.ID)
+	}
+	loaded, err := store.GetTask(context.Background(), h.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.ListIDs) != 2 || loaded.ListIDs[0] != h.list.ID || loaded.ListIDs[1] != second.ID {
+		t.Fatalf("loaded memberships = %v, want [%s %s]", loaded.ListIDs, h.list.ID, second.ID)
+	}
+	filtered, err := store.Filter(context.Background(), repository.TaskFilter{ListID: &second.ID})
+	if err != nil || len(filtered) != 1 || filtered[0].ID != h.task.ID {
+		t.Fatalf("filter by additional list = %#v, %v", filtered, err)
+	}
+
+	loaded.ListID = second.ID
+	loaded.ListIDs = []domain.ListID{second.ID}
+	if _, err := store.UpdateTask(context.Background(), loaded); err != nil {
+		t.Fatalf("move primary membership: %v", err)
+	}
+	primaryTasks, err := store.ListTasksByListPage(context.Background(), h.provider.ID, h.list.ID, 50, 0)
+	if err != nil || len(primaryTasks) != 0 {
+		t.Fatalf("old primary list tasks = %#v, %v", primaryTasks, err)
+	}
+
+	created, err := store.CreateTask(context.Background(), domain.Task{
+		ID: "multi-list-created", ProviderID: h.provider.ID, ListID: second.ID,
+		ListIDs: []domain.ListID{second.ID, h.list.ID}, Title: "created shared task",
+	})
+	if err != nil {
+		t.Fatalf("create task with multiple memberships: %v", err)
+	}
+	if !created.HasList(h.list.ID) || created.ListID != second.ID {
+		t.Fatalf("created task memberships = primary %s, lists %v", created.ListID, created.ListIDs)
+	}
+
+	if _, err := store.CreateTask(context.Background(), domain.Task{
+		ID: "task-without-list", ProviderID: h.provider.ID, Title: "invalid",
+	}); err == nil {
+		t.Fatal("CreateTask() succeeded without a list")
+	}
+}
+
+func TestTaskListMembershipsCannotCrossProviders(t *testing.T) {
+	store := openTestStore(t)
+	first := createHierarchy(t, store, "membership-provider-one")
+	second := createHierarchy(t, store, "membership-provider-two")
+
+	_, err := store.SQLDB().ExecContext(context.Background(), `
+		INSERT INTO task_list_memberships (provider_id, task_id, list_id)
+		VALUES (?, ?, ?)`, first.provider.ID, first.task.ID, second.list.ID)
+	if err == nil {
+		t.Fatal("database accepted a task membership in a different provider")
 	}
 }
 

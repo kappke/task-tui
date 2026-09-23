@@ -178,6 +178,10 @@ func TestClientCRUDUsesAuthorizationAndRemotePaths(t *testing.T) {
 			_, _ = io.WriteString(w, `{"id":"task-1","name":"updated"}`)
 		case r.Method == http.MethodDelete && r.URL.Path == "/task/task-1":
 			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/list/list-2/task/task-1":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && r.URL.Path == "/list/list-2/task/task-1":
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
 		}
@@ -201,7 +205,13 @@ func TestClientCRUDUsesAuthorizationAndRemotePaths(t *testing.T) {
 	if err := client.DeleteTask(context.Background(), "task-1"); err != nil {
 		t.Fatalf("DeleteTask() error = %v", err)
 	}
-	if len(methods) != 3 {
+	if err := client.AddTaskToList(context.Background(), "list-2", "task-1"); err != nil {
+		t.Fatalf("AddTaskToList() error = %v", err)
+	}
+	if err := client.RemoveTaskFromList(context.Background(), "list-2", "task-1"); err != nil {
+		t.Fatalf("RemoveTaskFromList() error = %v", err)
+	}
+	if len(methods) != 5 {
 		t.Fatalf("methods = %#v", methods)
 	}
 }

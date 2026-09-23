@@ -61,7 +61,7 @@ func (r *fakeRepository) GetTask(_ context.Context, id TaskID) (Task, error) {
 func (r *fakeRepository) ListTasks(_ context.Context, listID ListID) ([]Task, error) {
 	var tasks []Task
 	for _, task := range r.tasks {
-		if task.ListID == listID {
+		if containsList(task.Memberships(), listID) {
 			tasks = append(tasks, cloneTask(task))
 		}
 	}
@@ -133,6 +133,15 @@ func (r *fakeRepository) recordIntent(intent *SyncIntent) {
 	copy := *intent
 	copy.Payload = append([]byte(nil), intent.Payload...)
 	r.intents = append(r.intents, &copy)
+}
+
+func containsList(listIDs []ListID, wanted ListID) bool {
+	for _, listID := range listIDs {
+		if listID == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 type fakeIDs struct {
@@ -376,6 +385,45 @@ func TestMoveTaskUsesLocalMutationForSameProvider(t *testing.T) {
 	}
 	if provider.calls != 0 {
 		t.Fatalf("provider API calls = %d, want 0", provider.calls)
+	}
+}
+
+func TestTaskListMembershipsCanBeAddedRemovedAndMovedWithoutOrphaning(t *testing.T) {
+	r := newFakeRepository()
+	addHierarchy(r, "provider", "space", "primary")
+	r.lists["second"] = List{ID: "second", ProviderID: "provider", SpaceID: "space", Name: "second"}
+	r.lists["third"] = List{ID: "third", ProviderID: "provider", SpaceID: "space", Name: "third"}
+	r.tasks["task"] = Task{
+		ID: "task", ProviderID: "provider", ListID: "primary", ListIDs: []ListID{"primary", "second"},
+		Title: "shared", Status: StatusTodo, Priority: PriorityNormal,
+	}
+	s := newServiceForTest(r, &fakeProvider{id: "provider", typ: ProviderTypeLocal, caps: AllCapabilities()})
+
+	added, err := s.AddTaskToList(context.Background(), "task", "third")
+	if err != nil {
+		t.Fatalf("AddTaskToList() error = %v", err)
+	}
+	if added.ListID != "primary" || !reflect.DeepEqual(added.ListIDs, []ListID{"primary", "second", "third"}) {
+		t.Fatalf("added task memberships = primary %q, lists %v", added.ListID, added.ListIDs)
+	}
+
+	removed, err := s.RemoveTaskFromList(context.Background(), "task", "primary")
+	if err != nil {
+		t.Fatalf("RemoveTaskFromList(primary) error = %v", err)
+	}
+	if removed.ListID != "second" || !reflect.DeepEqual(removed.ListIDs, []ListID{"second", "third"}) {
+		t.Fatalf("removed task memberships = primary %q, lists %v", removed.ListID, removed.ListIDs)
+	}
+
+	moved, err := s.MoveTask(context.Background(), "task", "third")
+	if err != nil {
+		t.Fatalf("MoveTask() error = %v", err)
+	}
+	if moved.ListID != "third" || !reflect.DeepEqual(moved.ListIDs, []ListID{"third"}) {
+		t.Fatalf("moved task memberships = primary %q, lists %v", moved.ListID, moved.ListIDs)
+	}
+	if _, err := s.RemoveTaskFromList(context.Background(), "task", "third"); !errors.Is(err, ErrLastTaskList) {
+		t.Fatalf("RemoveTaskFromList(last) error = %v, want last-list rejection", err)
 	}
 }
 

@@ -194,8 +194,6 @@ func (s *Store) ensureTaskListMemberships(ctx context.Context) error {
         )`,
 		`CREATE INDEX IF NOT EXISTS task_list_memberships_list_idx
             ON task_list_memberships (provider_id, list_id, task_id)`,
-		`INSERT OR IGNORE INTO task_list_memberships (provider_id, task_id, list_id)
-            SELECT provider_id, id, list_id FROM tasks`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {

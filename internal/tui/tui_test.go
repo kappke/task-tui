@@ -322,6 +322,29 @@ func TestOnlyActiveProviderIsDisplayed(t *testing.T) {
 	}
 }
 
+func TestTaskAppearsInEveryMemberListAndShowsMemberships(t *testing.T) {
+	snapshot := testSnapshot()
+	snapshot.Lists = append(snapshot.Lists, List{
+		ID: "planning", ProviderID: "work", SpaceID: "engineering", Name: "Planning", SyncState: SyncStateSynced,
+	})
+	snapshot.Tasks[0].ListIDs = []ListID{"backend", "planning"}
+	model := New(snapshot)
+	model.UI.SelectedNode = TreeNodeRef{Kind: TreeNodeList, ProviderID: "work", SpaceID: "engineering", ListID: "planning"}
+	model.UI.SelectedTask = TaskRef{ProviderID: "work", TaskID: "same"}
+
+	rows := model.VisibleTasks()
+	if len(rows) != 1 || rows[0].Task.ListID != "backend" || rows[0].ListID != "planning" {
+		t.Fatalf("planning list rows = %#v", rows)
+	}
+	if !reflect.DeepEqual(rows[0].ListNames, []string{"Backend", "Planning"}) {
+		t.Fatalf("task list labels = %v", rows[0].ListNames)
+	}
+	lines := model.detailLines(120)
+	if !strings.Contains(strings.Join(lines, "\n"), "LISTS: Backend, Planning") {
+		t.Fatalf("task detail does not show all list memberships:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
 func TestProviderSwitchCommandPalette(t *testing.T) {
 	for _, input := range []string{"provider personal", "provider switch personal"} {
 		command, err := ParseCommand(input)
@@ -345,6 +368,35 @@ func TestProviderSwitchCommandPalette(t *testing.T) {
 	}
 	if rows := model.VisibleTasks(); len(rows) == 0 || rows[0].ProviderID != "personal" {
 		t.Fatalf("switched tasks = %#v, want personal tasks only", rows)
+	}
+}
+
+func TestTaskListCommandPaletteTargetsSelectedTask(t *testing.T) {
+	parsed, err := ParseCommand(":task add-list backlog")
+	if err != nil {
+		t.Fatalf("ParseCommand() error = %v", err)
+	}
+	if parsed.Kind != CommandAddTaskToList || parsed.DestinationListID != "backlog" {
+		t.Fatalf("parsed command = %#v", parsed)
+	}
+
+	model := New(testSnapshot())
+	model.selectTaskAt(0)
+	model.UI.Mode = ModeCommand
+	model.UI.Input = "task add-list backlog"
+	model.UI.InputCursor = runeCount(model.UI.Input)
+	model, command := model.Update(KeyMsg{Key: "enter"})
+	if command == nil {
+		t.Fatal("task list command emitted no command")
+	}
+	result := command()
+	message, ok := result.(CommandMsg)
+	if !ok {
+		t.Fatalf("command message = %T", result)
+	}
+	if message.Command.Kind != CommandAddTaskToList || message.Command.TaskID != model.UI.SelectedTask.TaskID ||
+		message.Command.ProviderID != model.UI.SelectedTask.ProviderID || message.Command.DestinationListID != "backlog" {
+		t.Fatalf("emitted command = %#v", message.Command)
 	}
 }
 

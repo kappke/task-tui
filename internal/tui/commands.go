@@ -20,20 +20,23 @@ type Cmd func() Message
 type CommandKind string
 
 const (
-	CommandLoadCached     CommandKind = "load_cached"
-	CommandCreateSpace    CommandKind = "create_space"
-	CommandCreateList     CommandKind = "create_list"
-	CommandCreateTask     CommandKind = "create_task"
-	CommandUpdateTask     CommandKind = "update_task"
-	CommandCompleteTask   CommandKind = "complete_task"
-	CommandDeleteTask     CommandKind = "delete_task"
-	CommandSearch         CommandKind = "search_tasks"
-	CommandFilter         CommandKind = "filter_tasks"
-	CommandGroup          CommandKind = "group_tasks"
-	CommandSwitchProvider CommandKind = "switch_provider"
-	CommandRefresh        CommandKind = "refresh"
-	CommandQuit           CommandKind = "quit"
-	CommandHelp           CommandKind = "help"
+	CommandLoadCached         CommandKind = "load_cached"
+	CommandCreateSpace        CommandKind = "create_space"
+	CommandCreateList         CommandKind = "create_list"
+	CommandCreateTask         CommandKind = "create_task"
+	CommandUpdateTask         CommandKind = "update_task"
+	CommandCompleteTask       CommandKind = "complete_task"
+	CommandDeleteTask         CommandKind = "delete_task"
+	CommandMoveTask           CommandKind = "move_task"
+	CommandAddTaskToList      CommandKind = "add_task_to_list"
+	CommandRemoveTaskFromList CommandKind = "remove_task_from_list"
+	CommandSearch             CommandKind = "search_tasks"
+	CommandFilter             CommandKind = "filter_tasks"
+	CommandGroup              CommandKind = "group_tasks"
+	CommandSwitchProvider     CommandKind = "switch_provider"
+	CommandRefresh            CommandKind = "refresh"
+	CommandQuit               CommandKind = "quit"
+	CommandHelp               CommandKind = "help"
 )
 
 // Short aliases make command construction pleasant for small adapters while
@@ -50,24 +53,25 @@ const (
 // AppCommand is the normalized contract between presentation and application
 // layers. ProviderID is carried on every provider-owned task operation.
 type AppCommand struct {
-	Kind          CommandKind
-	ProviderID    ProviderID
-	SpaceID       SpaceID
-	ListID        ListID
-	TaskID        TaskID
-	Title         string
-	Description   string
-	Assignee      string
-	Priority      Priority
-	DueAt         *time.Time
-	ClearDueAt    bool
-	Query         string
-	Filter        Filter
-	GroupBy       TaskGroupMode
-	Completed     bool
-	Status        string
-	Raw           string
-	EditAllFields bool
+	Kind              CommandKind
+	ProviderID        ProviderID
+	SpaceID           SpaceID
+	ListID            ListID
+	DestinationListID ListID
+	TaskID            TaskID
+	Title             string
+	Description       string
+	Assignee          string
+	Priority          Priority
+	DueAt             *time.Time
+	ClearDueAt        bool
+	Query             string
+	Filter            Filter
+	GroupBy           TaskGroupMode
+	Completed         bool
+	Status            string
+	Raw               string
+	EditAllFields     bool
 }
 
 // Command is a concise alias for the presentation-to-application contract.
@@ -123,7 +127,7 @@ func ParseCommand(input string) (AppCommand, error) {
 	args := fields[1:]
 	if name == "task" {
 		if len(args) == 0 {
-			return AppCommand{}, errors.New("task command requires create, edit, complete, or delete")
+			return AppCommand{}, errors.New("task command requires create, edit, complete, delete, move, add-list, or remove-list")
 		}
 		name = normalize(args[0])
 		args = args[1:]
@@ -163,6 +167,19 @@ func ParseCommand(input string) (AppCommand, error) {
 		command.Kind = CommandCompleteTask
 	case "delete", "remove":
 		command.Kind = CommandDeleteTask
+	case "move", "add-list", "add-to-list", "remove-list", "remove-from-list":
+		if len(args) != 1 || strings.TrimSpace(args[0]) == "" {
+			return AppCommand{}, fmt.Errorf("task %s requires a destination list id", name)
+		}
+		command.DestinationListID = ListID(strings.TrimSpace(args[0]))
+		switch name {
+		case "move":
+			command.Kind = CommandMoveTask
+		case "add-list", "add-to-list":
+			command.Kind = CommandAddTaskToList
+		default:
+			command.Kind = CommandRemoveTaskFromList
+		}
 	case "search", "find":
 		command.Kind = CommandSearch
 		command.Query = strings.TrimSpace(strings.Join(args, " "))

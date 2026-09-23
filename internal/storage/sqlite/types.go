@@ -95,6 +95,7 @@ type Task struct {
 	ID              string
 	ProviderID      string
 	ListID          string
+	ListIDs         []string
 	RemoteID        *string
 	ParentTaskID    *string
 	Assignee        string

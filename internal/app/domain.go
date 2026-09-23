@@ -109,6 +109,7 @@ type CreateListInput struct {
 type CreateTaskInput struct {
 	ProviderID   ProviderID
 	ListID       ListID
+	ListIDs      []ListID
 	ParentTaskID *TaskID
 	Title        string
 	Description  string
@@ -162,6 +163,9 @@ func ValidateTask(task Task) error {
 	if task.ListID.IsZero() {
 		return fmt.Errorf("%w: task %s has no list", ErrInvalidEntity, task.ID)
 	}
+	if _, err := task.NormalizeListMemberships(); err != nil {
+		return fmt.Errorf("%w: task %s list memberships: %v", ErrInvalidEntity, task.ID, err)
+	}
 	return nil
 }
 
@@ -190,7 +194,7 @@ func ValidateParentProvider(task Task, parent Task) error {
 }
 
 func taskPatchHasChanges(patch TaskPatch) bool {
-	return patch.ListID != nil || patch.ParentTaskID != nil || patch.Assignee != nil || patch.Title != nil ||
+	return patch.ListID != nil || len(patch.AddListIDs) > 0 || len(patch.RemoveListIDs) > 0 || patch.ParentTaskID != nil || patch.Assignee != nil || patch.Title != nil ||
 		patch.Description != nil || patch.Status != nil || patch.Priority != nil ||
 		patch.DueAt != nil || patch.CompletedAt != nil || patch.ClearParentTask ||
 		patch.ClearDueAt || patch.ClearCompletedAt
@@ -199,6 +203,8 @@ func taskPatchHasChanges(patch TaskPatch) bool {
 func taskPatchPayloadFrom(patch TaskPatch) TaskUpdatePayload {
 	payload := patch
 	payload.ListID = cloneListID(patch.ListID)
+	payload.AddListIDs = append([]ListID(nil), patch.AddListIDs...)
+	payload.RemoveListIDs = append([]ListID(nil), patch.RemoveListIDs...)
 	payload.ParentTaskID = cloneTaskID(patch.ParentTaskID)
 	payload.Title = cloneString(patch.Title)
 	payload.Description = cloneString(patch.Description)
@@ -212,6 +218,7 @@ func taskPatchPayloadFrom(patch TaskPatch) TaskUpdatePayload {
 func taskCreatePayloadFrom(task Task) TaskCreatePayload {
 	payload := domain.NewTaskPayload(task)
 	payload.ListID = task.ListID
+	payload.ListIDs = task.Memberships()
 	payload.ParentTaskID = cloneTaskID(task.ParentTaskID)
 	payload.DueAt = cloneTime(task.DueAt)
 	payload.CompletedAt = cloneTime(task.CompletedAt)
@@ -272,6 +279,7 @@ func cloneList(list List) List {
 
 func cloneTask(task Task) Task {
 	task.RemoteID = cloneString(task.RemoteID)
+	task.ListIDs = append([]ListID(nil), task.ListIDs...)
 	task.ParentTaskID = cloneTaskID(task.ParentTaskID)
 	task.DueAt = cloneTime(task.DueAt)
 	task.CompletedAt = cloneTime(task.CompletedAt)

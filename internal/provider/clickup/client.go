@@ -520,6 +520,24 @@ func (c *Client) MoveTask(ctx context.Context, taskID string, listID string) err
 	return c.doJSONVersion(ctx, http.MethodPut, path, struct{}{}, nil, "v3")
 }
 
+// AddTaskToList adds a task to an additional list without changing its home list.
+func (c *Client) AddTaskToList(ctx context.Context, listID, taskID string) error {
+	return c.updateTaskListMembership(ctx, http.MethodPost, listID, taskID)
+}
+
+// RemoveTaskFromList removes a task's membership in one list.
+func (c *Client) RemoveTaskFromList(ctx context.Context, listID, taskID string) error {
+	return c.updateTaskListMembership(ctx, http.MethodDelete, listID, taskID)
+}
+
+func (c *Client) updateTaskListMembership(ctx context.Context, method, listID, taskID string) error {
+	if strings.TrimSpace(listID) == "" || strings.TrimSpace(taskID) == "" {
+		return errors.New("ClickUp task and list IDs are required to update list membership")
+	}
+	path := "/list/" + url.PathEscape(listID) + "/task/" + url.PathEscape(taskID)
+	return c.doJSON(ctx, method, path, nil, nil)
+}
+
 func (c *Client) DeleteTask(ctx context.Context, taskID string) error {
 	path := "/task/" + url.PathEscape(taskID)
 	return c.doJSON(ctx, http.MethodDelete, path, nil, nil)

@@ -124,6 +124,7 @@ type TaskRow struct {
 	SpaceName      string
 	ListID         ListID
 	ListName       string
+	ListNames      []string
 	SearchResult   bool
 	HierarchyDepth int
 }
@@ -372,6 +373,7 @@ func cloneRawMessage(value json.RawMessage) json.RawMessage {
 func cloneTask(in Task) Task {
 	out := in
 	out.RemoteID = cloneString(in.RemoteID)
+	out.ListIDs = append([]ListID(nil), in.ListIDs...)
 	out.ParentTaskID = cloneTaskID(in.ParentTaskID)
 	out.TimeEstimate = cloneDuration(in.TimeEstimate)
 	out.TimeTracked = cloneDuration(in.TimeTracked)

@@ -358,6 +358,7 @@ func viewFromDomain(
 			ID:              TaskID(task.ID),
 			ProviderID:      ProviderID(task.ProviderID),
 			ListID:          ListID(task.ListID),
+			ListIDs:         cloneListIDs(task.ListIDs),
 			RemoteID:        cloneString(task.RemoteID),
 			ParentTaskID:    cloneTaskID(task.ParentTaskID),
 			Assignee:        task.Assignee,
@@ -392,6 +393,28 @@ func cloneTaskID(value *domain.TaskID) *TaskID {
 	}
 	copy := TaskID(*value)
 	return &copy
+}
+
+func cloneListIDs(values []domain.ListID) []ListID {
+	if values == nil {
+		return nil
+	}
+	result := make([]ListID, len(values))
+	for index, value := range values {
+		result[index] = ListID(value)
+	}
+	return result
+}
+
+func domainListIDs(values []ListID) []domain.ListID {
+	if values == nil {
+		return nil
+	}
+	result := make([]domain.ListID, len(values))
+	for index, value := range values {
+		result[index] = domain.ListID(value)
+	}
+	return result
 }
 
 func cloneTime(value *time.Time) *time.Time {
@@ -543,6 +566,8 @@ func (p *cachedProvider) pull(ctx context.Context) error {
 		}
 		p.logger.Info("ClickUp lists fetched", "provider_id", p.ID(), "space_id", storedSpace.ID, "lists", len(lists))
 		seenLists := make(map[string]struct{}, len(lists))
+		// The ClickUp list endpoint is home-list scoped, so a selected-list
+		// refresh must scan other home lists to discover secondary memberships.
 		for _, list := range lists {
 			if list.ProviderID != p.ID() || list.SpaceID != storedSpace.ID {
 				return fmt.Errorf("%w: list %s has invalid provider or parent", domain.ErrProviderMismatch, list.ID)
@@ -566,10 +591,7 @@ func (p *cachedProvider) pull(ctx context.Context) error {
 			}
 			activeList := p.activeTaskList()
 			scopeSet := p.hasActiveTaskScope()
-			p.logger.Debug("evaluating ClickUp task scope", "active_list_id", activeList, "stored_list_id", storedList.ID, "remote_list_id", remoteIDText(storedList.RemoteID))
-			if scopeSet && storedList.ID != activeList {
-				continue
-			}
+			p.logger.Debug("refreshing list memberships", "active_list_scope", scopeSet, "active_list_id", activeList, "home_list_id", storedList.ID, "remote_list_id", remoteIDText(storedList.RemoteID))
 			p.reportProgress("fetching tasks from list " + storedList.ID.String())
 			p.logger.Info("fetching ClickUp tasks", "list_id", storedList.ID, "remote_list_id", remoteIDText(storedList.RemoteID))
 			// FetchTasks accepts the local identity at the provider boundary. A
@@ -630,10 +652,9 @@ func (p *cachedProvider) reconcileTasks(ctx context.Context, listID domain.ListI
 		progress := false
 		next := pending[:0]
 		for _, task := range pending {
-			if task.ProviderID != p.ID() || task.ListID != listID {
+			if task.ProviderID != p.ID() || !task.HasList(listID) {
 				return fmt.Errorf("%w: task %s has invalid provider or parent", domain.ErrProviderMismatch, task.ID)
 			}
-			task.ListID = listID
 			if task.ParentTaskID != nil {
 				parentRemoteID := remoteByMappedID[*task.ParentTaskID]
 				if parentRemoteID != "" {
@@ -844,7 +865,10 @@ func (p *cachedProvider) reconcileTask(ctx context.Context, remote domain.Task) 
 			return domain.Task{}, err
 		}
 		value := mapped.(domain.Task)
-		value.ID, value.ProviderID, value.ListID, value.SyncState = local.ID, p.ID(), local.ListID, state
+		value.ID, value.ProviderID, value.ListID, value.SyncState = local.ID, p.ID(), remote.ListID, state
+		if hasLocalChanges(local.SyncState) {
+			value.ListID = local.ListID
+		}
 		return p.store.UpsertTask(ctx, value)
 	}, func(value any) domain.SyncBase { return value.(domain.Task).SyncBase() })
 	return value.(domain.Task), conflict, err
@@ -1070,8 +1094,24 @@ func (p *cachedProvider) reconcileMissingTasks(ctx context.Context, listID domai
 		if task.RemoteID == nil || hasRemote(seen, *task.RemoteID) || hasLocalChanges(task.SyncState) {
 			continue
 		}
-		if err := p.store.DeleteTask(ctx, task.ID); err != nil {
-			return fmt.Errorf("tombstone missing task %s: %w", task.ID, err)
+		remote, err := p.Provider.FetchTask(ctx, task.ID)
+		if errors.Is(err, domain.ErrNotFound) {
+			if err := p.store.DeleteTask(ctx, task.ID); err != nil {
+				return fmt.Errorf("tombstone missing task %s: %w", task.ID, err)
+			}
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("fetch task %s missing from list %s: %w", task.ID, listID, err)
+		}
+		if remote.ID != task.ID || remote.ProviderID != p.ID() {
+			return fmt.Errorf("%w: fetched missing task %s has invalid identity or provider", domain.ErrProviderMismatch, task.ID)
+		}
+		if err := remote.Validate(); err != nil {
+			return fmt.Errorf("validate fetched task %s: %w", task.ID, err)
+		}
+		if _, _, err := p.reconcileTask(ctx, remote); err != nil {
+			return fmt.Errorf("reconcile task %s missing from list %s: %w", task.ID, listID, err)
 		}
 	}
 	return nil
@@ -1095,6 +1135,7 @@ func pushedTask(original, result domain.Task) domain.Task {
 	result.ID = original.ID
 	result.ProviderID = original.ProviderID
 	result.ListID = original.ListID
+	result.ListIDs = append([]domain.ListID(nil), original.ListIDs...)
 	if result.RemoteID == nil {
 		result.RemoteID = cloneString(original.RemoteID)
 	}
@@ -1422,6 +1463,16 @@ func foundationCommand(input command.Command) (app.Command, error) {
 		return app.MoveTaskCommand{
 			TaskID:            domain.TaskID(input.TaskID),
 			DestinationListID: domain.ListID(input.DestinationListID),
+		}, nil
+	case command.KindAddTaskToList:
+		return app.AddTaskToListCommand{
+			TaskID: domain.TaskID(input.TaskID),
+			ListID: domain.ListID(input.DestinationListID),
+		}, nil
+	case command.KindRemoveTaskFromList:
+		return app.RemoveTaskFromListCommand{
+			TaskID: domain.TaskID(input.TaskID),
+			ListID: domain.ListID(input.DestinationListID),
 		}, nil
 	case command.KindTransferTask:
 		return app.TransferTaskCommand{
@@ -2129,6 +2180,20 @@ func foundationUICommand(input foundationtui.AppCommand) (command.Command, bool,
 			ProviderID: string(input.ProviderID),
 			TaskID:     string(input.TaskID),
 		}, true, nil
+	case foundationtui.CommandMoveTask, foundationtui.CommandAddTaskToList, foundationtui.CommandRemoveTaskFromList:
+		kind := command.KindMoveTask
+		switch input.Kind {
+		case foundationtui.CommandAddTaskToList:
+			kind = command.KindAddTaskToList
+		case foundationtui.CommandRemoveTaskFromList:
+			kind = command.KindRemoveTaskFromList
+		}
+		return command.Command{
+			Kind:              kind,
+			ProviderID:        string(input.ProviderID),
+			TaskID:            string(input.TaskID),
+			DestinationListID: string(input.DestinationListID),
+		}, true, nil
 	case foundationtui.CommandSearch:
 		return command.Command{Kind: command.KindSearch, Query: input.Query}, true, nil
 	case foundationtui.CommandRefresh:
@@ -2209,6 +2274,7 @@ func foundationSnapshot(view View) foundationtui.Snapshot {
 			ID:              domain.TaskID(value.ID),
 			ProviderID:      domain.ProviderID(value.ProviderID),
 			ListID:          domain.ListID(value.ListID),
+			ListIDs:         domainListIDs(value.ListIDs),
 			RemoteID:        cloneString(value.RemoteID),
 			ParentTaskID:    parent,
 			Assignee:        value.Assignee,

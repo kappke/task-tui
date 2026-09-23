@@ -55,9 +55,13 @@ type List struct {
 
 // Task is the common task representation shared by all providers.
 type Task struct {
-	ID              TaskID         `json:"id"`
-	ProviderID      ProviderID     `json:"provider_id"`
-	ListID          ListID         `json:"list_id"`
+	ID         TaskID     `json:"id"`
+	ProviderID ProviderID `json:"provider_id"`
+	// ListID is the required primary list. It must also appear in ListIDs when
+	// ListIDs is explicitly populated.
+	ListID ListID `json:"list_id"`
+	// ListIDs contains every list membership, including ListID. A nil slice is
+	// accepted as the legacy single-list representation.
 	ListIDs         []ListID       `json:"list_ids,omitempty"`
 	RemoteID        *string        `json:"remote_id,omitempty"`
 	ParentTaskID    *TaskID        `json:"parent_task_id,omitempty"`
@@ -255,6 +259,23 @@ func (t Task) Validate() error {
 	if err := t.ListID.Validate(); err != nil {
 		return err
 	}
+	seenLists := make(map[ListID]struct{}, len(t.ListIDs))
+	primaryIncluded := len(t.ListIDs) == 0
+	for _, listID := range t.ListIDs {
+		if err := listID.Validate(); err != nil {
+			return fmt.Errorf("task list membership: %w", err)
+		}
+		if _, exists := seenLists[listID]; exists {
+			return fmt.Errorf("%w: duplicate task list membership %s", ErrInvalidParent, listID)
+		}
+		seenLists[listID] = struct{}{}
+		if listID == t.ListID {
+			primaryIncluded = true
+		}
+	}
+	if !primaryIncluded {
+		return fmt.Errorf("%w: primary list %s is not a task membership", ErrInvalidParent, t.ListID)
+	}
 	if t.ParentTaskID != nil {
 		if err := t.ParentTaskID.Validate(); err != nil {
 			return fmt.Errorf("%w: parent task: %v", ErrInvalidParent, err)
@@ -385,6 +406,117 @@ func (t Task) NormalizeUTC() Task {
 	t.CreatedAt = t.CreatedAt.UTC()
 	t.UpdatedAt = t.UpdatedAt.UTC()
 	return t
+}
+
+// Memberships returns the task's list memberships, including its required
+// primary list. Legacy tasks with only ListID are treated as single-list tasks.
+func (t Task) Memberships() []ListID {
+	if len(t.ListIDs) == 0 {
+		if t.ListID == "" {
+			return nil
+		}
+		return []ListID{t.ListID}
+	}
+	return append([]ListID(nil), t.ListIDs...)
+}
+
+// HasList reports whether the task belongs to listID.
+func (t Task) HasList(listID ListID) bool {
+	if listID == t.ListID {
+		return true
+	}
+	for _, membership := range t.ListIDs {
+		if membership == listID {
+			return true
+		}
+	}
+	return false
+}
+
+// NormalizeListMemberships returns a task whose ListIDs contains every
+// membership exactly once and always includes its required primary ListID.
+func (t Task) NormalizeListMemberships() (Task, error) {
+	if t.ListID == "" {
+		return Task{}, fmt.Errorf("%w: task has no primary list", ErrInvalidParent)
+	}
+	ids := t.Memberships()
+	seen := make(map[ListID]struct{}, len(ids))
+	normalized := make([]ListID, 0, len(ids))
+	for _, listID := range ids {
+		if err := listID.Validate(); err != nil {
+			return Task{}, fmt.Errorf("task list membership: %w", err)
+		}
+		if _, exists := seen[listID]; exists {
+			return Task{}, fmt.Errorf("%w: duplicate task list membership %s", ErrInvalidParent, listID)
+		}
+		seen[listID] = struct{}{}
+		normalized = append(normalized, listID)
+	}
+	if _, exists := seen[t.ListID]; !exists {
+		return Task{}, fmt.Errorf("%w: primary list %s is not a task membership", ErrInvalidParent, t.ListID)
+	}
+	t.ListIDs = normalized
+	return t, nil
+}
+
+// AddToList adds a membership without changing the task's primary list.
+func (t Task) AddToList(listID ListID) (Task, error) {
+	if err := listID.Validate(); err != nil {
+		return Task{}, err
+	}
+	t, err := t.NormalizeListMemberships()
+	if err != nil {
+		return Task{}, err
+	}
+	for _, existing := range t.ListIDs {
+		if existing == listID {
+			return t, nil
+		}
+	}
+	t.ListIDs = append(t.ListIDs, listID)
+	return t, nil
+}
+
+// RemoveFromList removes a membership and reassigns the primary list if
+// necessary. A task cannot be left without a list.
+func (t Task) RemoveFromList(listID ListID) (Task, error) {
+	if err := listID.Validate(); err != nil {
+		return Task{}, err
+	}
+	t, err := t.NormalizeListMemberships()
+	if err != nil {
+		return Task{}, err
+	}
+	remaining := make([]ListID, 0, len(t.ListIDs))
+	removed := false
+	for _, existing := range t.ListIDs {
+		if existing == listID {
+			removed = true
+			continue
+		}
+		remaining = append(remaining, existing)
+	}
+	if !removed {
+		return Task{}, ErrNotFound
+	}
+	if len(remaining) == 0 {
+		return Task{}, ErrLastTaskList
+	}
+	t.ListIDs = remaining
+	if t.ListID == listID {
+		t.ListID = remaining[0]
+	}
+	return t, nil
+}
+
+// MoveToList replaces all current memberships with a single destination list.
+func (t Task) MoveToList(listID ListID) (Task, error) {
+	if err := listID.Validate(); err != nil {
+		return Task{}, err
+	}
+	t.ListID = listID
+	t.ListIDs = []ListID{listID}
+	return t, nil
 }
 
 // NormalizeUTC returns a copy with all timestamps represented in UTC.

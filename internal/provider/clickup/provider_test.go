@@ -42,6 +42,8 @@ func TestProviderUsesRemoteIDsForTaskOperations(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.Method+" "+r.URL.Path)
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/task/remote-task":
+			_, _ = io.WriteString(w, `{"id":"remote-task","list":{"id":"remote-list"}}`)
 		case r.Method == http.MethodPut && r.URL.Path == "/task/remote-task":
 			_, _ = io.WriteString(w, `{"id":"remote-task","name":"updated","status":{"status":"open"}}`)
 		case r.Method == http.MethodDelete && r.URL.Path == "/task/remote-task":
@@ -76,7 +78,7 @@ func TestProviderUsesRemoteIDsForTaskOperations(t *testing.T) {
 	if err := clickupProvider.DeleteTask(context.Background(), task); err != nil {
 		t.Fatalf("DeleteTask() error = %v", err)
 	}
-	if !reflect.DeepEqual(paths, []string{"PUT /task/remote-task", "DELETE /task/remote-task"}) {
+	if !reflect.DeepEqual(paths, []string{"GET /task/remote-task", "PUT /task/remote-task", "DELETE /task/remote-task"}) {
 		t.Fatalf("paths = %#v", paths)
 	}
 }
@@ -118,6 +120,87 @@ func TestProviderCreatesTaskInRemoteListAndMapsProviderID(t *testing.T) {
 	}
 }
 
+func TestProviderCreatesTaskAndAddsItsAdditionalListMemberships(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/list/remote-primary/task":
+			_, _ = io.WriteString(w, `{"id":"remote-task","name":"Shared","list":{"id":"remote-primary"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/list/remote-extra/task/remote-task":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	provider := New(NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
+		ProviderID: "clickup-work",
+		RemoteListResolver: func(listID domain.ListID) (string, error) {
+			if listID == "primary" {
+				return "remote-primary", nil
+			}
+			return "remote-extra", nil
+		},
+	})
+
+	created, err := provider.CreateTask(context.Background(), domain.Task{
+		ProviderID: "clickup-work", ListID: "primary", ListIDs: []domain.ListID{"primary", "extra"}, Title: "Shared",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+	if !reflect.DeepEqual(created.ListIDs, []domain.ListID{"primary", "extra"}) {
+		t.Fatalf("created memberships = %v", created.ListIDs)
+	}
+	want := []string{"POST /list/remote-primary/task", "POST /list/remote-extra/task/remote-task"}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("create paths = %v, want %v", paths, want)
+	}
+}
+
+func TestProviderRollsBackTaskWhenAdditionalListCreateFails(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/list/remote-primary/task":
+			_, _ = io.WriteString(w, `{"id":"remote-task","name":"Shared","list":{"id":"remote-primary"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/list/remote-extra/task/remote-task":
+			http.Error(w, `{"err":"temporary failure"}`, http.StatusServiceUnavailable)
+		case r.Method == http.MethodDelete && r.URL.Path == "/task/remote-task":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	provider := New(NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
+		ProviderID: "clickup-work",
+		RemoteListResolver: func(listID domain.ListID) (string, error) {
+			if listID == "primary" {
+				return "remote-primary", nil
+			}
+			return "remote-extra", nil
+		},
+	})
+
+	created, err := provider.CreateTask(context.Background(), domain.Task{
+		ProviderID: "clickup-work", ListID: "primary", ListIDs: []domain.ListID{"primary", "extra"}, Title: "Shared",
+	})
+	if err == nil || created.ID != "" {
+		t.Fatalf("CreateTask() = %#v, %v; wanted failed operation rolled back", created, err)
+	}
+	want := []string{
+		"POST /list/remote-primary/task",
+		"POST /list/remote-extra/task/remote-task",
+		"DELETE /task/remote-task",
+	}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("rollback paths = %v, want %v", paths, want)
+	}
+}
+
 func TestProviderResolvesLocalSpaceIDBeforeFetchingLists(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/space/remote-space/list" && r.URL.Path != "/space/remote-space/folder" {
@@ -147,7 +230,7 @@ func TestProviderFetchTaskUsesRemoteTaskCallAndLocalListIdentity(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		_, _ = io.WriteString(w, `{"id":"remote-task","name":"Task","list":{"id":"remote-list"}}`)
+		_, _ = io.WriteString(w, `{"id":"remote-task","name":"Task","list":{"id":"remote-list"},"lists":[{"id":"remote-extra-list"}]}`)
 	}))
 	defer server.Close()
 
@@ -158,7 +241,12 @@ func TestProviderFetchTaskUsesRemoteTaskCallAndLocalListIdentity(t *testing.T) {
 	}), ProviderConfig{
 		ProviderID:         "clickup-work",
 		RemoteTaskResolver: func(domain.TaskID) (string, error) { return "remote-task", nil },
-		LocalListResolver:  func(string) (domain.ListID, error) { return "local-list", nil },
+		LocalListResolver: func(remoteID string) (domain.ListID, error) {
+			if remoteID == "remote-extra-list" {
+				return "local-extra-list", nil
+			}
+			return "local-list", nil
+		},
 	})
 
 	task, err := provider.FetchTask(context.Background(), "local-task")
@@ -167,6 +255,60 @@ func TestProviderFetchTaskUsesRemoteTaskCallAndLocalListIdentity(t *testing.T) {
 	}
 	if task.ID != "local-task" || task.ListID != "local-list" || task.RemoteID == nil || *task.RemoteID != "remote-task" {
 		t.Fatalf("FetchTask() = %#v, want local task/list identities and remote task ID", task)
+	}
+	if !reflect.DeepEqual(task.ListIDs, []domain.ListID{"local-list", "local-extra-list"}) {
+		t.Fatalf("FetchTask() list memberships = %v", task.ListIDs)
+	}
+}
+
+func TestProviderFetchTaskMapsRemoteNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	provider := New(NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
+		ProviderID:         "clickup-work",
+		RemoteTaskResolver: func(domain.TaskID) (string, error) { return "remote-missing", nil },
+	})
+	if _, err := provider.FetchTask(context.Background(), "local-task"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("FetchTask() error = %v, want domain not found", err)
+	}
+}
+
+func TestProviderFetchTasksKeepsHomeListAndEveryMembership(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/list/remote-request-list/task" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `{"last_page":true,"tasks":[{"id":"remote-task","name":"Shared","list":{"id":"remote-home-list"},"lists":[{"id":"remote-extra-list"}]}]}`)
+	}))
+	defer server.Close()
+	provider := New(NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
+		ProviderID:         "clickup-work",
+		RemoteListResolver: func(domain.ListID) (string, error) { return "remote-request-list", nil },
+		LocalListResolver: func(remoteID string) (domain.ListID, error) {
+			switch remoteID {
+			case "remote-home-list":
+				return "local-home-list", nil
+			case "remote-extra-list":
+				return "local-extra-list", nil
+			default:
+				return "local-request-list", nil
+			}
+		},
+	})
+
+	tasks, err := provider.FetchTasks(context.Background(), "local-request-list")
+	if err != nil {
+		t.Fatalf("FetchTasks() error = %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].ListID != "local-home-list" {
+		t.Fatalf("FetchTasks() primary list = %#v", tasks)
+	}
+	want := []domain.ListID{"local-home-list", "local-extra-list", "local-request-list"}
+	if !reflect.DeepEqual(tasks[0].ListIDs, want) {
+		t.Fatalf("FetchTasks() memberships = %v, want %v", tasks[0].ListIDs, want)
 	}
 }
 
@@ -183,6 +325,10 @@ func TestProviderUpdatePayloadClearsDescriptionAndResolvesParent(t *testing.T) {
 		var payload map[string]any
 		switch r.URL.Path {
 		case "/task/remote-task":
+			if r.Method == http.MethodGet {
+				_, _ = io.WriteString(w, `{"id":"remote-task","list":{"id":"old-list"}}`)
+				return
+			}
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Fatalf("decode update payload: %v", err)
 			}
@@ -198,6 +344,8 @@ func TestProviderUpdatePayloadClearsDescriptionAndResolvesParent(t *testing.T) {
 			_, _ = io.WriteString(w, `{"id":"remote-task","name":"updated","status":{"status":"open"},"list":{"id":"old-list"}}`)
 		case "/api/v3/workspaces/workspace/tasks/remote-task/home_list/remote-list":
 			_, _ = io.WriteString(w, `{}`)
+		case "/list/old-list/task/remote-task":
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
 		}
@@ -235,6 +383,10 @@ func TestProviderUpdatePayloadClearsDescriptionAndResolvesParent(t *testing.T) {
 
 func TestProviderUpdatePayloadClearsParentWithNull(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, `{"id":"remote-task","list":{"id":"remote-list"}}`)
+			return
+		}
 		var payload map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatalf("decode update payload: %v", err)
@@ -242,7 +394,7 @@ func TestProviderUpdatePayloadClearsParentWithNull(t *testing.T) {
 		if value, ok := payload["parent"]; !ok || value != nil {
 			t.Errorf("parent payload = %#v, want explicit null", payload["parent"])
 		}
-		_, _ = io.WriteString(w, `{"id":"remote-task","name":"updated","status":{"status":"open"}}`)
+		_, _ = io.WriteString(w, `{"id":"remote-task","name":"updated","status":{"status":"open"},"list":{"id":"remote-list"}}`)
 	}))
 	defer server.Close()
 	provider := New(NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
@@ -254,5 +406,55 @@ func TestProviderUpdatePayloadClearsParentWithNull(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("UpdateTask() error = %v", err)
+	}
+}
+
+func TestProviderUpdateSynchronizesTaskListMemberships(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/task/remote-task":
+			_, _ = io.WriteString(w, `{"id":"remote-task","list":{"id":"remote-home"},"lists":[{"id":"remote-existing"}]}`)
+		case r.Method == http.MethodPut && r.URL.Path == "/task/remote-task":
+			_, _ = io.WriteString(w, `{"id":"remote-task","name":"updated","list":{"id":"remote-home"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/list/remote-new/task/remote-task":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && r.URL.Path == "/list/remote-existing/task/remote-task":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	provider := New(NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
+		ProviderID: "clickup-work",
+		RemoteListResolver: func(listID domain.ListID) (string, error) {
+			switch listID {
+			case "local-home":
+				return "remote-home", nil
+			case "local-new":
+				return "remote-new", nil
+			default:
+				return "remote-existing", nil
+			}
+		},
+	})
+
+	_, err := provider.UpdateTask(context.Background(), domain.Task{
+		ID: "local-task", ProviderID: "clickup-work", ListID: "local-home",
+		ListIDs: []domain.ListID{"local-home", "local-new"}, RemoteID: stringPointer("remote-task"), Title: "updated",
+	})
+	if err != nil {
+		t.Fatalf("UpdateTask() error = %v", err)
+	}
+	want := []string{
+		"GET /task/remote-task",
+		"PUT /task/remote-task",
+		"POST /list/remote-new/task/remote-task",
+		"DELETE /list/remote-existing/task/remote-task",
+	}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("membership update paths = %v, want %v", paths, want)
 	}
 }

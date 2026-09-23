@@ -13,6 +13,7 @@ var (
 	ErrNotFound                    = domain.ErrNotFound
 	ErrProviderMismatch            = domain.ErrProviderMismatch
 	ErrInvalidParent               = domain.ErrInvalidParent
+	ErrLastTaskList                = domain.ErrLastTaskList
 	ErrCrossProviderMove           = domain.ErrCrossProviderMove
 	ErrUnsupported                 = domain.ErrUnsupported
 	ErrProviderNotFound            = errors.New("provider not found")

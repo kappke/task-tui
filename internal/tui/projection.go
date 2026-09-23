@@ -149,12 +149,25 @@ func (m Model) taskRows(aggregate bool) []TaskRow {
 		if !aggregate && !m.inSelectedScope(task, lists) {
 			continue
 		}
+		memberships := task.Memberships()
+		listNames := make([]string, 0, len(memberships))
+		for _, membership := range memberships {
+			name := string(membership)
+			if list, ok := lists[scopedID{provider: task.ProviderID, id: string(membership)}]; ok {
+				name = list.Name
+			}
+			listNames = append(listNames, name)
+		}
 
 		provider, providerOK := providerByID[task.ProviderID]
 		if !providerOK {
 			provider = Provider{ID: task.ProviderID, Name: string(task.ProviderID), SyncState: SyncStateUnknown}
 		}
-		list, listOK := lists[scopedID{provider: task.ProviderID, id: string(task.ListID)}]
+		listID := task.ListID
+		if m.UI.SelectedNode.Kind == TreeNodeList && taskHasList(task, m.UI.SelectedNode.ListID) {
+			listID = m.UI.SelectedNode.ListID
+		}
+		list, listOK := lists[scopedID{provider: task.ProviderID, id: string(listID)}]
 		space, spaceOK := spaces[scopedID{provider: task.ProviderID, id: string(list.SpaceID)}]
 		row := TaskRow{
 			Task:         task,
@@ -162,7 +175,8 @@ func (m Model) taskRows(aggregate bool) []TaskRow {
 			ProviderName: displayProviderName(provider),
 			Assignee:     task.Assignee,
 			SpaceID:      list.SpaceID,
-			ListID:       task.ListID,
+			ListID:       listID,
+			ListNames:    listNames,
 			SearchResult: m.UI.SearchActive,
 		}
 		if listOK {
@@ -173,7 +187,7 @@ func (m Model) taskRows(aggregate bool) []TaskRow {
 			row.SpaceID = list.SpaceID
 		}
 		if row.ListName == "" {
-			row.ListName = string(task.ListID)
+			row.ListName = string(listID)
 		}
 		if spaceOK {
 			row.SpaceName = space.Name
@@ -440,10 +454,15 @@ func (m Model) inSelectedScope(task Task, lists map[scopedID]List) bool {
 		if task.ProviderID != ref.ProviderID {
 			return false
 		}
-		list, ok := lists[scopedID{provider: task.ProviderID, id: string(task.ListID)}]
-		return ok && list.SpaceID == ref.SpaceID
+		for _, listID := range task.Memberships() {
+			list, ok := lists[scopedID{provider: task.ProviderID, id: string(listID)}]
+			if ok && list.SpaceID == ref.SpaceID {
+				return true
+			}
+		}
+		return false
 	case TreeNodeList:
-		return task.ProviderID == ref.ProviderID && task.ListID == ref.ListID
+		return task.ProviderID == ref.ProviderID && taskHasList(task, ref.ListID)
 	default:
 		return true
 	}
@@ -475,8 +494,14 @@ func (m Model) matchesRow(row TaskRow) bool {
 	if filter.SpaceID != "" && !matchesIdentifier(string(filter.SpaceID), string(row.SpaceID), row.SpaceName) {
 		return false
 	}
-	if filter.ListID != "" && !matchesIdentifier(string(filter.ListID), string(row.ListID), row.ListName) {
-		return false
+	if filter.ListID != "" && !taskHasList(row.Task, filter.ListID) {
+		matched := matchesIdentifier(string(filter.ListID), string(row.ListID), row.ListName)
+		for _, listName := range row.ListNames {
+			matched = matched || matchesIdentifier(string(filter.ListID), listName, listName)
+		}
+		if !matched {
+			return false
+		}
 	}
 	if filter.Status != "" && normalize(row.Task.Status) != normalize(filter.Status) {
 		return false
@@ -525,6 +550,7 @@ func containsTaskText(row TaskRow, query string) bool {
 		row.Task.Description,
 		row.Assignee,
 		row.ListName,
+		strings.Join(row.ListNames, " "),
 		row.SpaceName,
 		row.ProviderName,
 		string(row.ProviderID),

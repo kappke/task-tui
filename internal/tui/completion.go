@@ -7,6 +7,9 @@ var commandNames = []string{
 	"edit",
 	"complete",
 	"delete",
+	"move",
+	"add-list",
+	"remove-list",
 	"search",
 	"filter",
 	"group",
@@ -20,7 +23,7 @@ var commandNames = []string{
 	"help",
 }
 
-var taskCommandNames = []string{"create", "edit", "complete", "delete"}
+var taskCommandNames = []string{"create", "edit", "complete", "delete", "move", "add-list", "remove-list"}
 
 var hierarchyCommandNames = []string{"create", "new"}
 

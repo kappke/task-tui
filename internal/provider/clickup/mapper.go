@@ -116,6 +116,7 @@ func (m Mapper) MapTaskContext(ctx context.Context, input wireTask, listID domai
 		ID:           domain.TaskID(newLocalID("task")),
 		ProviderID:   m.ProviderID,
 		ListID:       listID,
+		ListIDs:      []domain.ListID{listID},
 		RemoteID:     stringPointer(remoteID),
 		Assignee:     mapAssignee(input.Assignees),
 		Title:        input.Name,

@@ -255,7 +255,7 @@ func (m Model) applyTasksLoaded(event TasksLoadedMsg) Model {
 			rejected++
 			continue
 		}
-		if event.ListID != "" && incoming.ListID != event.ListID {
+		if event.ListID != "" && !taskHasList(incoming, event.ListID) {
 			rejected++
 			continue
 		}
@@ -302,7 +302,19 @@ func taskInEventScope(task Task, event TasksLoadedMsg) bool {
 	if event.ProviderID != "" && task.ProviderID != event.ProviderID {
 		return false
 	}
-	return event.ListID == "" || task.ListID == event.ListID
+	return event.ListID == "" || taskHasList(task, event.ListID)
+}
+
+func taskHasList(task Task, listID ListID) bool {
+	if task.ListID == listID {
+		return true
+	}
+	for _, membership := range task.ListIDs {
+		if membership == listID {
+			return true
+		}
+	}
+	return false
 }
 
 func sameTask(left, right Task) bool {
@@ -1399,6 +1411,8 @@ func (m Model) submitPalette() (Model, Cmd) {
 		return m.submitTaskCommand(command, false)
 	case CommandDeleteTask:
 		return m.submitTaskCommand(command, true)
+	case CommandMoveTask, CommandAddTaskToList, CommandRemoveTaskFromList:
+		return m.submitTaskListCommand(command)
 	case CommandRefresh:
 		command.ProviderID = m.UI.SelectedNode.ProviderID
 		if command.ListID == "" {
@@ -1418,7 +1432,7 @@ func (m Model) submitPalette() (Model, Cmd) {
 	case CommandHelp:
 		m.UI.Mode = ModeBrowse
 		m.UI.Input = ""
-		m.Status = Status{Level: StatusInfo, Text: "Keys: j/k move, tab switch panel, h/l scroll, enter open, n/e/x/d, / search, f filter, r refresh"}
+		m.Status = Status{Level: StatusInfo, Text: "Keys: j/k move, tab switch panel, h/l scroll, enter open, n/e/x/d, / search, f filter, r refresh; :task move/add-list/remove-list <list-id>"}
 		return m, nil
 	default:
 		m.Status = Status{Level: StatusError, Text: "Unsupported command"}
@@ -1611,6 +1625,33 @@ func (m Model) submitTaskCommand(command AppCommand, confirmDelete bool) (Model,
 	}
 	m.UI.Mode = ModeBrowse
 	m.Status = Status{Level: StatusInfo, Text: "Completing task locally; sync is asynchronous"}
+	return m, m.emit(command)
+}
+
+func (m Model) submitTaskListCommand(command AppCommand) (Model, Cmd) {
+	row, ok := m.selectedTask()
+	if !ok {
+		m.Status = Status{Level: StatusWarning, Text: "Select a task first"}
+		return m, nil
+	}
+	if command.DestinationListID == "" {
+		m.Status = Status{Level: StatusError, Text: "Specify a destination list id"}
+		return m, nil
+	}
+	command.ProviderID = row.Task.ProviderID
+	command.ListID = row.Task.ListID
+	command.TaskID = row.Task.ID
+	m.UI.Mode = ModeBrowse
+	m.UI.Input = ""
+	m.UI.InputCursor = 0
+	switch command.Kind {
+	case CommandMoveTask:
+		m.Status = Status{Level: StatusInfo, Text: "Move requested locally; sync is asynchronous"}
+	case CommandAddTaskToList:
+		m.Status = Status{Level: StatusInfo, Text: "List membership requested locally; sync is asynchronous"}
+	case CommandRemoveTaskFromList:
+		m.Status = Status{Level: StatusInfo, Text: "List membership removal requested locally; sync is asynchronous"}
+	}
 	return m, m.emit(command)
 }
 

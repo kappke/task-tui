@@ -11,6 +11,8 @@ import (
 // as a JSON patch.
 type TaskPatch struct {
 	ListID           *ListID    `json:"list_id,omitempty"`
+	AddListIDs       []ListID   `json:"add_list_ids,omitempty"`
+	RemoveListIDs    []ListID   `json:"remove_list_ids,omitempty"`
 	ParentTaskID     *TaskID    `json:"parent_task_id,omitempty"`
 	Assignee         *string    `json:"assignee,omitempty"`
 	Title            *string    `json:"title,omitempty"`
@@ -29,6 +31,7 @@ type TaskPatch struct {
 // assigned by the operation and destination provider.
 type TaskPayload struct {
 	ListID       ListID     `json:"list_id"`
+	ListIDs      []ListID   `json:"list_ids,omitempty"`
 	ParentTaskID *TaskID    `json:"parent_task_id,omitempty"`
 	Assignee     string     `json:"assignee,omitempty"`
 	Title        string     `json:"title"`
@@ -129,6 +132,8 @@ func NewTaskCreateMutationPayload(task Task) TaskMutationPayload {
 }
 
 func NewTaskUpdateMutationPayload(task Task, patch TaskPatch) TaskMutationPayload {
+	patch.AddListIDs = append([]ListID(nil), patch.AddListIDs...)
+	patch.RemoveListIDs = append([]ListID(nil), patch.RemoveListIDs...)
 	return TaskMutationPayload{
 		Version:    TaskMutationPayloadVersion,
 		ProviderID: task.ProviderID,
@@ -189,11 +194,18 @@ func (p *TaskMutationPayload) UnmarshalJSON(data []byte) error {
 		Version: header.Version, ProviderID: header.ProviderID, TaskID: header.TaskID,
 		Snapshot: header.Snapshot, RemoteID: header.RemoteID,
 	}
+	var fieldsByName map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fieldsByName); err != nil {
+		return err
+	}
+	if _, isCreatePayload := fieldsByName["list_ids"]; isCreatePayload {
+		return nil
+	}
 	var fields TaskPatch
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-	if fields.ListID != nil || fields.ParentTaskID != nil || fields.Assignee != nil || fields.Title != nil ||
+	if fields.ListID != nil || len(fields.AddListIDs) > 0 || len(fields.RemoveListIDs) > 0 || fields.ParentTaskID != nil || fields.Assignee != nil || fields.Title != nil ||
 		fields.Description != nil || fields.Status != nil || fields.Priority != nil || fields.DueAt != nil ||
 		fields.CompletedAt != nil || fields.ClearParentTask || fields.ClearDueAt || fields.ClearCompletedAt {
 		p.TaskPatch = &fields
@@ -222,6 +234,7 @@ func cloneTaskPayloadSnapshot(task Task) *Task {
 
 func cloneTaskSnapshot(task Task) Task {
 	task.RemoteID = cloneString(task.RemoteID)
+	task.ListIDs = append([]ListID(nil), task.ListIDs...)
 	task.ParentTaskID = cloneTaskID(task.ParentTaskID)
 	task.DueAt = cloneTime(task.DueAt)
 	task.CompletedAt = cloneTime(task.CompletedAt)
@@ -256,6 +269,7 @@ func cloneTime(value *time.Time) *time.Time {
 func NewTaskPayload(task Task) TaskPayload {
 	return TaskPayload{
 		ListID:       task.ListID,
+		ListIDs:      task.Memberships(),
 		ParentTaskID: task.ParentTaskID,
 		Assignee:     task.Assignee,
 		Title:        task.Title,
@@ -271,6 +285,25 @@ func NewTaskPayload(task Task) TaskPayload {
 func (p TaskPayload) Validate() error {
 	if err := p.ListID.Validate(); err != nil {
 		return err
+	}
+	if len(p.ListIDs) > 0 {
+		seen := make(map[ListID]struct{}, len(p.ListIDs))
+		primaryIncluded := false
+		for _, listID := range p.ListIDs {
+			if err := listID.Validate(); err != nil {
+				return fmt.Errorf("task payload list membership: %w", err)
+			}
+			if _, exists := seen[listID]; exists {
+				return fmt.Errorf("%w: duplicate task payload list membership %s", ErrInvalidParent, listID)
+			}
+			seen[listID] = struct{}{}
+			if listID == p.ListID {
+				primaryIncluded = true
+			}
+		}
+		if !primaryIncluded {
+			return fmt.Errorf("%w: primary list %s is not a task membership", ErrInvalidParent, p.ListID)
+		}
 	}
 	if p.ParentTaskID != nil {
 		if err := p.ParentTaskID.Validate(); err != nil {
@@ -288,6 +321,32 @@ func (p TaskPatch) Validate() error {
 		if err := p.ListID.Validate(); err != nil {
 			return err
 		}
+	}
+	if p.ListID != nil && (len(p.AddListIDs) > 0 || len(p.RemoveListIDs) > 0) {
+		return fmt.Errorf("%w: exclusive move cannot be combined with list membership changes", ErrInvalidParent)
+	}
+	addIDs := make(map[ListID]struct{}, len(p.AddListIDs))
+	for _, listID := range p.AddListIDs {
+		if err := listID.Validate(); err != nil {
+			return fmt.Errorf("add task list membership: %w", err)
+		}
+		if _, exists := addIDs[listID]; exists {
+			return fmt.Errorf("%w: duplicate added list %s", ErrInvalidParent, listID)
+		}
+		addIDs[listID] = struct{}{}
+	}
+	removeIDs := make(map[ListID]struct{}, len(p.RemoveListIDs))
+	for _, listID := range p.RemoveListIDs {
+		if err := listID.Validate(); err != nil {
+			return fmt.Errorf("remove task list membership: %w", err)
+		}
+		if _, exists := removeIDs[listID]; exists {
+			return fmt.Errorf("%w: duplicate removed list %s", ErrInvalidParent, listID)
+		}
+		if _, exists := addIDs[listID]; exists {
+			return fmt.Errorf("%w: list %s cannot be added and removed together", ErrInvalidParent, listID)
+		}
+		removeIDs[listID] = struct{}{}
 	}
 	if p.ParentTaskID != nil {
 		if err := p.ParentTaskID.Validate(); err != nil {
@@ -318,8 +377,30 @@ func (p TaskPatch) Apply(task Task) (Task, error) {
 	if err := p.Validate(); err != nil {
 		return Task{}, err
 	}
+	task, err := task.NormalizeListMemberships()
+	if err != nil {
+		return Task{}, err
+	}
 	if p.ListID != nil {
-		task.ListID = *p.ListID
+		task, err = task.MoveToList(*p.ListID)
+		if err != nil {
+			return Task{}, err
+		}
+	}
+	for _, listID := range p.AddListIDs {
+		task, err = task.AddToList(listID)
+		if err != nil {
+			return Task{}, err
+		}
+	}
+	for _, listID := range p.RemoveListIDs {
+		if !task.HasList(listID) {
+			continue
+		}
+		task, err = task.RemoveFromList(listID)
+		if err != nil {
+			return Task{}, err
+		}
 	}
 	if p.ClearParentTask {
 		task.ParentTaskID = nil
