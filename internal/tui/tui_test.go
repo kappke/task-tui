@@ -288,6 +288,25 @@ func TestFilterAndCommandPalette(t *testing.T) {
 	}
 }
 
+func TestRefreshUsesSelectedTaskListWhenHierarchySelectionIsProvider(t *testing.T) {
+	model := New(testSnapshot())
+	model.UI.SelectedNode = TreeNodeRef{Kind: TreeNodeProvider, ProviderID: "work"}
+	model.UI.Focus = PanelTasks
+
+	model, command := model.Update(KeyMsg{Key: "r"})
+	if command == nil {
+		t.Fatal("refresh command is nil")
+	}
+	result := command()
+	message, ok := result.(CommandMsg)
+	if !ok {
+		t.Fatalf("refresh command type = %T", result)
+	}
+	if message.Command.Kind != CommandRefresh || message.Command.ProviderID != "work" || message.Command.ListID != "backend" {
+		t.Fatalf("refresh command = %#v, want work/backend", message.Command)
+	}
+}
+
 func TestOnlyActiveProviderIsDisplayed(t *testing.T) {
 	model := New(testSnapshot())
 	if model.UI.ActiveProviderID != "work" {

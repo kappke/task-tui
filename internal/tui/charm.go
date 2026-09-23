@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -34,6 +35,8 @@ type CharmModel struct {
 	helpKeys        charmHelpKeyMap
 	viewport        viewport.Model
 	pendingTaskEdit *pendingTaskEdit
+	refreshing      bool
+	refreshFrame    int
 }
 
 type pendingTaskEdit struct {
@@ -46,6 +49,10 @@ type taskEditorFinishedMsg struct {
 	path string
 	err  error
 }
+
+type refreshTickMsg struct{}
+
+var refreshFrames = [...]string{"|", "/", "-", "\\"}
 
 var _ tea.Model = (*CharmModel)(nil)
 
@@ -132,6 +139,13 @@ func (m *CharmModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if finished, ok := msg.(taskEditorFinishedMsg); ok {
 		return m, m.finishTaskEditor(finished)
 	}
+	if _, ok := msg.(refreshTickMsg); ok {
+		if !m.refreshing {
+			return m, nil
+		}
+		m.refreshFrame = (m.refreshFrame + 1) % len(refreshFrames)
+		return m, refreshTick()
+	}
 
 	if key, ok := msg.(tea.KeyMsg); ok && m.shouldOpenTaskEditor(key) {
 		return m, m.startTaskEditor()
@@ -157,6 +171,18 @@ func (m *CharmModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	next, coreCmd := m.core.Update(coreMessage)
 	m.core = next
+	switch value := coreMessage.(type) {
+	case SyncStateMsg:
+		m.refreshing = value.State == SyncStateSyncing
+		if !m.refreshing {
+			m.refreshFrame = 0
+		}
+	case CommandResultMsg:
+		if value.Command.Kind == CommandRefresh {
+			m.refreshing = true
+			m.refreshFrame = 0
+		}
+	}
 	m.syncInput()
 
 	commands := make([]tea.Cmd, 0, 2)
@@ -166,10 +192,17 @@ func (m *CharmModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if command := m.dispatch(coreCmd); command != nil {
 		commands = append(commands, command)
 	}
+	if m.refreshing {
+		commands = append(commands, refreshTick())
+	}
 	if m.core.UI.Quitting {
 		commands = append(commands, tea.Quit)
 	}
 	return m, tea.Batch(commands...)
+}
+
+func refreshTick() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return refreshTickMsg{} })
 }
 
 func (m *CharmModel) shouldOpenTaskEditor(msg tea.KeyMsg) bool {
@@ -757,7 +790,11 @@ func (m *CharmModel) charmStatusLine(width int) string {
 	if level == "" {
 		level = "INFO"
 	}
-	line := fit("STATUS "+level+": "+safeText(m.core.Status.Text), width)
+	prefix := "STATUS " + level + ": "
+	if m.refreshing {
+		prefix = refreshFrames[m.refreshFrame] + " " + prefix
+	}
+	line := fit(prefix+safeText(m.core.Status.Text), width)
 	switch m.core.Status.Level {
 	case StatusError:
 		return charmErrorStyle.Render(line)

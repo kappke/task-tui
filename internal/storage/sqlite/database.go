@@ -175,6 +175,33 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("sqlite: commit migration %03d (%s): %w", migration.version, migration.name, err)
 		}
 	}
+	if err := s.ensureTaskListMemberships(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) ensureTaskListMemberships(ctx context.Context) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS task_list_memberships (
+            provider_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            list_id TEXT NOT NULL,
+            PRIMARY KEY (provider_id, task_id, list_id),
+            FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE RESTRICT,
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY (list_id) REFERENCES lists(id) ON DELETE CASCADE
+        )`,
+		`CREATE INDEX IF NOT EXISTS task_list_memberships_list_idx
+            ON task_list_memberships (provider_id, list_id, task_id)`,
+		`INSERT OR IGNORE INTO task_list_memberships (provider_id, task_id, list_id)
+            SELECT provider_id, id, list_id FROM tasks`,
+	}
+	for _, statement := range statements {
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("sqlite: ensure task list memberships: %w", err)
+		}
+	}
 	return nil
 }
 

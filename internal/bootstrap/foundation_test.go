@@ -279,6 +279,20 @@ func TestFoundationUICommandsCreateFirstHierarchy(t *testing.T) {
 	}
 }
 
+func TestFoundationUICommandRefreshPreservesListID(t *testing.T) {
+	translated, dispatch, err := foundationUICommand(foundationtui.AppCommand{
+		Kind:       foundationtui.CommandRefresh,
+		ProviderID: "clickup",
+		ListID:     "list-local",
+	})
+	if err != nil || !dispatch {
+		t.Fatalf("refresh translation failed: dispatch=%v err=%v", dispatch, err)
+	}
+	if translated.Kind != command.KindRefresh || translated.ProviderID != "clickup" || translated.ListID != "list-local" {
+		t.Fatalf("refresh translation = %#v", translated)
+	}
+}
+
 func TestCachedProviderReconcilesRemoteIDsWithLocalIDs(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlite.Open(":memory:")
@@ -342,6 +356,10 @@ func TestCachedProviderReconcilesRemoteIDsWithLocalIDs(t *testing.T) {
 		},
 	}
 	cached := newCachedProvider(fake, store)
+	cached.SetActiveTaskList(domain.ListID(listRemoteID))
+	if got := cached.activeTaskList(); got != list.ID {
+		t.Fatalf("active list = %q, want local list %q", got, list.ID)
+	}
 	localTask, err := cached.CreateTask(ctx, domain.Task{
 		ID:         "task-local",
 		ProviderID: providerID,
@@ -401,6 +419,8 @@ func TestCachedProviderReconcilesRemoteIDsWithLocalIDs(t *testing.T) {
 			UpdatedAt:       now,
 		}},
 	}
+	fake.lists[space.ID] = append([]domain.List(nil), fake.lists[fetchedSpaceID]...)
+	fake.lists[space.ID][0].SpaceID = space.ID
 	fake.tasks = map[domain.ListID][]domain.Task{
 		list.ID: {{
 			ID:              domain.TaskID("task-fetched"),
@@ -455,6 +475,94 @@ func TestCachedProviderReconcilesRemoteIDsWithLocalIDs(t *testing.T) {
 	if local.Title != "Local edit" || local.SyncState != domain.SyncStatePending {
 		t.Fatalf("local task after pull = %#v, want pending local edit", local)
 	}
+
+	// A successful push makes the pushed value the new merge base. If ClickUp
+	// is then changed back to the previous value, remote reconciliation applies it.
+	fake.created = local
+	if _, err := cached.UpdateTask(ctx, local); err != nil {
+		t.Fatalf("push local edit: %v", err)
+	}
+	fake.tasks[list.ID][0].Title = "Remote task"
+	if err := cached.Pull(ctx); err != nil {
+		t.Fatalf("cached Pull() after remote reversion: %v", err)
+	}
+	local, err = store.GetTask(ctx, localTask.ID)
+	if err != nil {
+		t.Fatalf("get task after remote reversion: %v", err)
+	}
+	if local.Title != "Remote task" || local.SyncState != domain.SyncStateSynced {
+		t.Fatalf("task after remote reversion = %#v, want reverted synced task", local)
+	}
+}
+
+func TestUIStateNormalizesRemoteListAndRestartPullKeepsScope(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "tasktui.db")
+	store, err := sqlite.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID := domain.ProviderID("clickup-work")
+	if _, err := store.UpsertProvider(ctx, domain.Provider{ID: providerID, Type: domain.ProviderTypeClickUp, Name: "Work", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	spaceRemote, selectedRemote, otherRemote := "space-remote", "list-remote-selected", "list-remote-other"
+	space, err := store.UpsertSpace(ctx, domain.Space{ID: "space-local", ProviderID: providerID, RemoteID: &spaceRemote, Name: "Work", SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := store.UpsertList(ctx, domain.List{ID: "list-local-selected", ProviderID: providerID, SpaceID: space.ID, RemoteID: &selectedRemote, Name: "Selected", SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := store.UpsertList(ctx, domain.List{ID: "list-local-other", ProviderID: providerID, SpaceID: space.ID, RemoteID: &otherRemote, Name: "Other", SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := newFoundationDataStore(store)
+	if err := data.SaveUIState(ctx, UIState{ProviderID: string(providerID), SpaceID: string(space.ID), ListID: selectedRemote}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = sqlite.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	data = newFoundationDataStore(store)
+	state, err := data.LoadUIState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ListID != string(selected.ID) || state.SpaceID != string(space.ID) {
+		t.Fatalf("normalized UI state = %#v, want local scope %s/%s", state, space.ID, selected.ID)
+	}
+
+	selectedTaskRemote, otherTaskRemote := "task-selected", "task-other"
+	fake := &foundationTestProvider{
+		id:     providerID,
+		spaces: []domain.Space{{ID: "fetched-space", ProviderID: providerID, RemoteID: &spaceRemote, Name: "Work", SyncState: domain.SyncStateSynced}},
+		lists:  map[domain.SpaceID][]domain.List{space.ID: {{ID: "mapped-selected", ProviderID: providerID, SpaceID: space.ID, RemoteID: &selectedRemote, Name: "Selected", SyncState: domain.SyncStateSynced}, {ID: "mapped-other", ProviderID: providerID, SpaceID: space.ID, RemoteID: &otherRemote, Name: "Other", SyncState: domain.SyncStateSynced}}},
+		tasks: map[domain.ListID][]domain.Task{
+			selected.ID: {{ID: "mapped-selected-task", ProviderID: providerID, ListID: selected.ID, RemoteID: &selectedTaskRemote, Title: "Selected task", Status: "todo", Priority: domain.PriorityNormal, SyncState: domain.SyncStateSynced}},
+			other.ID:    {{ID: "mapped-other-task", ProviderID: providerID, ListID: other.ID, RemoteID: &otherTaskRemote, Title: "Other task", Status: "todo", Priority: domain.PriorityNormal, SyncState: domain.SyncStateSynced}},
+		},
+	}
+	cached := newCachedProvider(fake, store)
+	cached.SetActiveTaskList(domain.ListID(state.ListID))
+	if err := cached.Pull(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := store.ListTasksByProvider(ctx, providerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].Title != "Selected task" || tasks[0].ListID != selected.ID {
+		t.Fatalf("scoped restart pull tasks = %#v, want only selected list task", tasks)
+	}
 }
 
 func TestCachedProviderPreservesParentsAcrossOutOfOrderRepeatedPulls(t *testing.T) {
@@ -493,6 +601,7 @@ func TestCachedProviderPreservesParentsAcrossOutOfOrderRepeatedPulls(t *testing.
 		},
 	}
 	cached := newCachedProvider(fake, store)
+	cached.SetActiveTaskList(list.ID)
 	if err := cached.Pull(ctx); err != nil {
 		t.Fatalf("first Pull() error = %v", err)
 	}

@@ -37,6 +37,7 @@ type ProviderConfig struct {
 	MaxBodyBytes        int64
 	MaxPages            int
 	Mapper              *Mapper
+	ResponseLogger      func(method, endpoint string, statusCode int, body []byte)
 	TeamID              string
 	ParentResolver      any
 	ParentIDs           map[string]domain.TaskID
@@ -146,13 +147,14 @@ func newProvider(config ProviderConfig) *Provider {
 	}
 	if config.Client == nil {
 		config.Client = NewClient(ClientConfig{
-			BaseURL:      config.BaseURL,
-			HTTPClient:   config.HTTPClient,
-			TokenSource:  config.TokenSource,
-			Timeout:      config.Timeout,
-			MaxBodyBytes: config.MaxBodyBytes,
-			MaxPages:     config.MaxPages,
-			TeamID:       config.TeamID,
+			BaseURL:        config.BaseURL,
+			HTTPClient:     config.HTTPClient,
+			TokenSource:    config.TokenSource,
+			Timeout:        config.Timeout,
+			MaxBodyBytes:   config.MaxBodyBytes,
+			MaxPages:       config.MaxPages,
+			TeamID:         config.TeamID,
+			ResponseLogger: config.ResponseLogger,
 		})
 	}
 	if config.TeamID != "" {
@@ -325,7 +327,36 @@ func (p *Provider) FetchTasks(ctx context.Context, listID domain.ListID) ([]doma
 	if err != nil {
 		return nil, fmt.Errorf("fetch ClickUp tasks for list %s: %w", remoteListID, err)
 	}
-	return p.mapper.MapTasksContext(ctx, tasks, listID), nil
+	mapped := p.mapper.MapTasksContext(ctx, tasks, listID)
+	for index := range mapped {
+		memberships := make([]domain.ListID, 0, len(tasks[index].Lists)+1)
+		for _, remoteList := range tasks[index].Lists {
+			resolved, resolveErr := p.resolveListLocalID(ctx, remoteList.ID.String())
+			if resolveErr != nil {
+				continue
+			}
+			memberships = append(memberships, resolved)
+		}
+		memberships = append(memberships, listID)
+		mapped[index].ListIDs = uniqueListIDs(memberships)
+	}
+	return mapped, nil
+}
+
+func uniqueListIDs(values []domain.ListID) []domain.ListID {
+	seen := make(map[domain.ListID]struct{}, len(values))
+	result := make([]domain.ListID, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func (p *Provider) FetchTask(ctx context.Context, taskID domain.TaskID) (domain.Task, error) {

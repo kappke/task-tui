@@ -14,6 +14,7 @@ import (
 
 	"github.com/kappke/task-tui/internal/app"
 	"github.com/kappke/task-tui/internal/command"
+	"github.com/kappke/task-tui/internal/domain"
 	"github.com/kappke/task-tui/internal/storage/sqlite"
 	foundationsync "github.com/kappke/task-tui/internal/sync"
 )
@@ -235,6 +236,9 @@ func (r *Runtime) Start(ctx context.Context) error {
 	if err != nil {
 		r.failStart()
 		return fmt.Errorf("load UI state: %w", err)
+	}
+	if scoped, ok := r.sync.(taskScopeInitializer); ok {
+		scoped.SetTaskScope(ProviderID(state.ProviderID), domain.ListID(state.ListID))
 	}
 	view, err := r.store.Snapshot(ctx)
 	if err != nil {

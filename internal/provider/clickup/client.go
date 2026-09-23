@@ -31,13 +31,14 @@ type HTTPDoer interface {
 // accepted as a value so callers can provide either a context-aware function,
 // a no-argument function, or a TokenSource implementation.
 type ClientConfig struct {
-	BaseURL      string
-	HTTPClient   HTTPDoer
-	TokenSource  any
-	Timeout      time.Duration
-	MaxBodyBytes int64
-	MaxPages     int
-	TeamID       string
+	BaseURL        string
+	HTTPClient     HTTPDoer
+	TokenSource    any
+	Timeout        time.Duration
+	MaxBodyBytes   int64
+	MaxPages       int
+	TeamID         string
+	ResponseLogger func(method, endpoint string, statusCode int, body []byte)
 }
 
 // ClientOptions is a descriptive alias for ClientConfig.
@@ -74,14 +75,15 @@ func WithTeamID(value string) ClientOption {
 // models outside this package and does not authenticate until a request is
 // made.
 type Client struct {
-	baseURL     *url.URL
-	baseErr     error
-	httpClient  HTTPDoer
-	tokenSource any
-	timeout     time.Duration
-	maxBodySize int64
-	maxPages    int
-	teamID      string
+	baseURL        *url.URL
+	baseErr        error
+	httpClient     HTTPDoer
+	tokenSource    any
+	timeout        time.Duration
+	maxBodySize    int64
+	maxPages       int
+	teamID         string
+	responseLogger func(method, endpoint string, statusCode int, body []byte)
 }
 
 func (c *Client) String() string {
@@ -120,13 +122,14 @@ func NewClient(values ...any) *Client {
 
 func clientConfigFromProvider(value ProviderConfig) ClientConfig {
 	config := ClientConfig{
-		BaseURL:      value.BaseURL,
-		HTTPClient:   value.HTTPClient,
-		TokenSource:  value.TokenSource,
-		Timeout:      value.Timeout,
-		MaxBodyBytes: value.MaxBodyBytes,
-		MaxPages:     value.MaxPages,
-		TeamID:       value.TeamID,
+		BaseURL:        value.BaseURL,
+		HTTPClient:     value.HTTPClient,
+		TokenSource:    value.TokenSource,
+		Timeout:        value.Timeout,
+		MaxBodyBytes:   value.MaxBodyBytes,
+		MaxPages:       value.MaxPages,
+		TeamID:         value.TeamID,
+		ResponseLogger: value.ResponseLogger,
 	}
 	if value.Client != nil {
 		if config.BaseURL == "" && value.Client.baseURL != nil {
@@ -190,14 +193,15 @@ func newClient(config ClientConfig) *Client {
 	}
 
 	return &Client{
-		baseURL:     baseURL,
-		baseErr:     err,
-		httpClient:  httpClient,
-		tokenSource: config.TokenSource,
-		timeout:     config.Timeout,
-		maxBodySize: config.MaxBodyBytes,
-		maxPages:    config.MaxPages,
-		teamID:      strings.TrimSpace(config.TeamID),
+		baseURL:        baseURL,
+		baseErr:        err,
+		httpClient:     httpClient,
+		tokenSource:    config.TokenSource,
+		timeout:        config.Timeout,
+		maxBodySize:    config.MaxBodyBytes,
+		maxPages:       config.MaxPages,
+		teamID:         strings.TrimSpace(config.TeamID),
+		responseLogger: config.ResponseLogger,
 	}
 }
 
@@ -700,6 +704,9 @@ func (c *Client) doJSONEndpoint(ctx context.Context, method string, endpoint str
 			StatusCode: response.StatusCode,
 			Err:        err,
 		}
+	}
+	if c.responseLogger != nil {
+		c.responseLogger(method, endpoint, response.StatusCode, raw)
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return c.responseError(method, endpoint, response, raw, token)

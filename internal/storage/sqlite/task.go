@@ -51,8 +51,8 @@ func (s *Store) getTaskByRemoteID(ctx context.Context, providerID, remoteID stri
 }
 
 func (s *Store) listTasks(ctx context.Context, providerID, listID string) ([]Task, error) {
-	query := taskSelect + " WHERE provider_id = ? AND list_id = ? AND is_deleted = 0 ORDER BY due_at IS NULL, due_at, created_at, id"
-	return taskQuery(ctx, s.db, query, providerID, listID)
+	query := taskSelect + " WHERE provider_id = ? AND is_deleted = 0 AND (list_id = ? OR EXISTS (SELECT 1 FROM task_list_memberships m WHERE m.provider_id = tasks.provider_id AND m.task_id = tasks.id AND m.list_id = ?)) ORDER BY due_at IS NULL, due_at, created_at, id"
+	return taskQuery(ctx, s.db, query, providerID, listID, listID)
 }
 
 func (s *Store) listTasksByList(ctx context.Context, providerID, listID string) ([]Task, error) {
@@ -61,11 +61,11 @@ func (s *Store) listTasksByList(ctx context.Context, providerID, listID string) 
 
 func (s *Store) listTasksByListID(ctx context.Context, listID string) ([]Task, error) {
 	return taskQuery(ctx, s.db,
-		taskSelect+" WHERE list_id = ? AND is_deleted = 0 ORDER BY due_at IS NULL, due_at, created_at, id", listID)
+		taskSelect+" WHERE is_deleted = 0 AND (list_id = ? OR EXISTS (SELECT 1 FROM task_list_memberships m WHERE m.task_id = tasks.id AND m.list_id = ?)) ORDER BY due_at IS NULL, due_at, created_at, id", listID, listID)
 }
 
 func (s *Store) listTasksPage(ctx context.Context, providerID, listID string, limit, offset int) ([]Task, error) {
-	return taskQuery(ctx, s.db, taskSelect+" WHERE provider_id = ? AND list_id = ? AND is_deleted = 0 ORDER BY due_at IS NULL, due_at, created_at, id LIMIT ? OFFSET ?", providerID, listID, limit, offset)
+	return taskQuery(ctx, s.db, taskSelect+" WHERE provider_id = ? AND is_deleted = 0 AND (list_id = ? OR EXISTS (SELECT 1 FROM task_list_memberships m WHERE m.provider_id = tasks.provider_id AND m.task_id = tasks.id AND m.list_id = ?)) ORDER BY due_at IS NULL, due_at, created_at, id LIMIT ? OFFSET ?", providerID, listID, listID, limit, offset)
 }
 
 func (s *Store) listAllTasksPage(ctx context.Context, providerID string, limit, offset int) ([]Task, error) {

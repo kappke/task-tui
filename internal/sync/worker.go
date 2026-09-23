@@ -41,6 +41,7 @@ const (
 	EventPullCompleted      EventKind = "pull_completed"
 	EventSyncCompleted      EventKind = "sync_completed"
 	EventSyncFailed         EventKind = "sync_failed"
+	EventProgress           EventKind = "sync_progress"
 )
 
 // Event is delivered to an optional non-blocking event sink.
@@ -54,6 +55,7 @@ type Event struct {
 	Failure     FailureKind
 	Decision    RetryDecision
 	Err         error
+	Message     string
 }
 
 // EventSink receives worker status events. Sinks should be quick; the Worker
@@ -146,7 +148,7 @@ func newWorker(queue Queue, provider Provider, options WorkerOptions) (*Worker, 
 		return nil, errors.New("sync provider ID is empty")
 	}
 	options = normalizeWorkerOptions(options)
-	return &Worker{
+	worker := &Worker{
 		queue:    queue,
 		provider: provider,
 		options:  options,
@@ -155,7 +157,13 @@ func newWorker(queue Queue, provider Provider, options WorkerOptions) (*Worker, 
 			ProviderID: providerID,
 			State:      WorkerIdle,
 		},
-	}, nil
+	}
+	if reporter, ok := provider.(interface{ SetSyncProgress(func(string)) }); ok {
+		reporter.SetSyncProgress(func(message string) {
+			worker.emit(context.Background(), Event{Kind: EventProgress, State: WorkerRunning, Message: message})
+		})
+	}
+	return worker, nil
 }
 
 func normalizeWorkerOptions(options WorkerOptions) WorkerOptions {

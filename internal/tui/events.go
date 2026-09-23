@@ -56,6 +56,7 @@ type SyncStateMsg struct {
 	EntityID   string
 	State      SyncState
 	Error      string
+	Message    string
 	LastSyncAt *time.Time
 }
 

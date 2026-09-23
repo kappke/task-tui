@@ -572,7 +572,9 @@ func (s *Store) ListByList(ctx context.Context, listID domain.ListID) ([]domain.
 	}
 	result := make([]domain.Task, 0, len(tasks))
 	for _, task := range tasks {
-		result = append(result, domainTask(task))
+		value := domainTask(task)
+		value.ListID = listID
+		result = append(result, value)
 	}
 	return result, nil
 }
@@ -601,7 +603,9 @@ func (s *Store) ListTasksByListPage(ctx context.Context, providerID domain.Provi
 	}
 	result := make([]domain.Task, 0, len(tasks))
 	for _, task := range tasks {
-		result = append(result, domainTask(task))
+		value := domainTask(task)
+		value.ListID = listID
+		result = append(result, value)
 	}
 	return result, nil
 }
@@ -665,7 +669,37 @@ func (s *Store) UpsertTask(ctx context.Context, task domain.Task) (domain.Task, 
 	if err != nil {
 		return domain.Task{}, adaptError(err, false)
 	}
+	task.ID = domain.TaskID(upserted.ID)
+	if err := s.syncTaskListMemberships(ctx, task); err != nil {
+		return domain.Task{}, err
+	}
 	return domainTask(upserted), nil
+}
+
+func (s *Store) syncTaskListMemberships(ctx context.Context, task domain.Task) error {
+	listIDs := task.ListIDs
+	if len(listIDs) == 0 {
+		listIDs = []domain.ListID{task.ListID}
+	}
+	if len(task.ListIDs) > 0 {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM task_list_memberships WHERE provider_id = ? AND task_id = ?`, task.ProviderID, task.ID); err != nil {
+			return fmt.Errorf("sqlite: clear task %s list memberships: %w", task.ID, err)
+		}
+	}
+	seen := make(map[domain.ListID]struct{}, len(listIDs))
+	for _, listID := range listIDs {
+		if listID == "" {
+			continue
+		}
+		if _, ok := seen[listID]; ok {
+			continue
+		}
+		seen[listID] = struct{}{}
+		if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO task_list_memberships(provider_id, task_id, list_id) VALUES (?, ?, ?)`, task.ProviderID, task.ID, listID); err != nil {
+			return fmt.Errorf("sqlite: save task %s list membership %s: %w", task.ID, listID, err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) DeleteTask(ctx context.Context, id domain.TaskID) error {

@@ -352,6 +352,9 @@ func (m Model) applySyncState(event SyncStateMsg) Model {
 
 	level := StatusInfo
 	text := fmt.Sprintf("%s sync: %s", providerLabel(m, event.ProviderID), string(state))
+	if event.Message != "" {
+		text = providerLabel(m, event.ProviderID) + " " + event.Message
+	}
 	if event.Error != "" || state == SyncStateFailed || state == SyncStateConflict {
 		level = StatusError
 		if event.Error != "" {
@@ -382,6 +385,10 @@ func (m Model) applyCommandResult(event CommandResultMsg) Model {
 	if text == "" {
 		text = commandResultText(event.Command)
 	}
+	if event.Command.Kind == CommandRefresh {
+		m.Status = Status{Level: StatusInfo, Text: "Refreshing ClickUp data..."}
+		return m
+	}
 	m.Status = Status{Level: StatusSuccess, Text: text}
 	return m
 }
@@ -406,7 +413,7 @@ func commandResultText(command AppCommand) string {
 		}
 		return "Tasks grouped by " + string(command.GroupBy)
 	case CommandRefresh:
-		return "Refresh completed"
+		return "Refresh started"
 	default:
 		return "Command completed"
 	}
@@ -532,7 +539,17 @@ func (m Model) updateBrowse(key KeyMsg, action Action) (Model, Cmd) {
 	case ActionFilter:
 		m.beginFilter()
 	case ActionRefresh:
-		command := AppCommand{Kind: CommandRefresh, ProviderID: m.UI.SelectedNode.ProviderID}
+		ref := m.UI.SelectedNode
+		command := AppCommand{Kind: CommandRefresh, ProviderID: ref.ProviderID, ListID: ref.ListID}
+		// The hierarchy selection can remain on the provider while focus is in
+		// the task panel. Use the selected task's list in that case so refresh
+		// remains scoped to the list the user is viewing.
+		if command.ListID == "" {
+			if row, ok := m.selectedTask(); ok {
+				command.ProviderID = row.Task.ProviderID
+				command.ListID = row.Task.ListID
+			}
+		}
 		m.Status = Status{Level: StatusInfo, Text: "Refresh requested; local data remains available"}
 		return m, m.emit(command)
 	case ActionCommand:
@@ -1384,6 +1401,12 @@ func (m Model) submitPalette() (Model, Cmd) {
 		return m.submitTaskCommand(command, true)
 	case CommandRefresh:
 		command.ProviderID = m.UI.SelectedNode.ProviderID
+		if command.ListID == "" {
+			if row, ok := m.selectedTask(); ok {
+				command.ProviderID = row.Task.ProviderID
+				command.ListID = row.Task.ListID
+			}
+		}
 		m.UI.Mode = ModeBrowse
 		m.UI.Input = ""
 		m.Status = Status{Level: StatusInfo, Text: "Refresh requested; local data remains available"}

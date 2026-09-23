@@ -8,12 +8,18 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/kappke/task-tui/internal/domain"
 )
 
 // SyncController is the lifecycle boundary used by Runtime.
 type SyncController interface {
 	Start(context.Context) error
 	Stop(context.Context) error
+}
+
+type taskScopeInitializer interface {
+	SetTaskScope(ProviderID, domain.ListID)
 }
 
 // SyncEngine runs one independently cancellable worker per enabled remote

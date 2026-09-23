@@ -195,6 +195,12 @@ type FoundationProvider struct {
 	remoteIDs  map[string]string
 }
 
+func (p *FoundationProvider) SetSyncProgress(callback func(string)) {
+	if reporter, ok := p.provider.(interface{ SetSyncProgress(func(string)) }); ok {
+		reporter.SetSyncProgress(callback)
+	}
+}
+
 var _ Provider = (*FoundationProvider)(nil)
 var _ Pusher = (*FoundationProvider)(nil)
 var _ Puller = (*FoundationProvider)(nil)

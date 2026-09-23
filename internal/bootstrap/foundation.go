@@ -210,7 +210,64 @@ func (s *foundationDataStore) LoadUIState(ctx context.Context) (UIState, error) 
 	if err := json.Unmarshal(state.Value, &result); err != nil {
 		return UIState{}, fmt.Errorf("decode UI state: %w", err)
 	}
-	return result, nil
+	return s.normalizeUIState(ctx, result)
+}
+
+func (s *foundationDataStore) normalizeUIState(ctx context.Context, state UIState) (UIState, error) {
+	original := state
+	persist := func() error {
+		if original.ProviderID == state.ProviderID && original.SpaceID == state.SpaceID && original.ListID == state.ListID {
+			return nil
+		}
+		return s.SaveUIState(ctx, state)
+	}
+	if strings.TrimSpace(state.ProviderID) == "" {
+		return state, nil
+	}
+	if _, err := s.store.GetProvider(ctx, domain.ProviderID(state.ProviderID)); err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			state.ProviderID, state.SpaceID, state.ListID = "", "", ""
+			return state, persist()
+		}
+		return UIState{}, fmt.Errorf("resolve UI provider %s: %w", state.ProviderID, err)
+	}
+	if strings.TrimSpace(state.ListID) == "" {
+		if strings.TrimSpace(state.SpaceID) != "" {
+			space, spaceErr := s.store.GetSpace(ctx, domain.SpaceID(state.SpaceID))
+			if spaceErr != nil || space.ProviderID != domain.ProviderID(state.ProviderID) {
+				space, spaceErr = s.store.GetSpaceByRemoteID(ctx, domain.ProviderID(state.ProviderID), state.SpaceID)
+			}
+			if spaceErr != nil {
+				if !errors.Is(spaceErr, domain.ErrNotFound) {
+					return UIState{}, fmt.Errorf("resolve UI space %s: %w", state.SpaceID, spaceErr)
+				}
+				state.SpaceID = ""
+				return state, persist()
+			}
+			state.SpaceID = space.ID.String()
+		}
+		return state, persist()
+	}
+	list, err := s.store.GetList(ctx, domain.ListID(state.ListID))
+	if err != nil || list.ProviderID != domain.ProviderID(state.ProviderID) {
+		list, err = s.store.GetListByRemoteID(ctx, domain.ProviderID(state.ProviderID), state.ListID)
+	}
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			state.SpaceID = ""
+			state.ListID = ""
+			return state, persist()
+		}
+		return UIState{}, fmt.Errorf("resolve UI list %s: %w", state.ListID, err)
+	}
+	if list.ProviderID != domain.ProviderID(state.ProviderID) {
+		state.SpaceID = ""
+		state.ListID = ""
+		return state, persist()
+	}
+	state.ListID = list.ID.String()
+	state.SpaceID = list.SpaceID.String()
+	return state, persist()
 }
 
 func (s *foundationDataStore) SaveUIState(ctx context.Context, state UIState) error {
@@ -358,14 +415,71 @@ func cloneDuration(value *time.Duration) *time.Duration {
 // invoked and serializes it per provider instance.
 type cachedProvider struct {
 	providerpkg.Provider
-	store *sqlite.Store
+	store      *sqlite.Store
+	logger     *slog.Logger
+	activeMu   sync.RWMutex
+	activeList domain.ListID
+	scopeSet   bool
+	progressMu sync.RWMutex
+	progress   func(string)
 }
 
 var _ providerpkg.Provider = (*cachedProvider)(nil)
 var _ providerpkg.Puller = (*cachedProvider)(nil)
 
-func newCachedProvider(value providerpkg.Provider, store *sqlite.Store) *cachedProvider {
-	return &cachedProvider{Provider: value, store: store}
+func newCachedProvider(value providerpkg.Provider, store *sqlite.Store, loggers ...*slog.Logger) *cachedProvider {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if len(loggers) > 0 && loggers[0] != nil {
+		logger = loggers[0]
+	}
+	return &cachedProvider{Provider: value, store: store, logger: logger}
+}
+
+func (p *cachedProvider) SetActiveTaskList(listID domain.ListID) {
+	requestedID := strings.TrimSpace(string(listID))
+	resolvedID := listID
+	if requestedID != "" {
+		ctx := context.Background()
+		if list, err := p.store.GetList(ctx, listID); err == nil && list.ProviderID == p.ID() {
+			resolvedID = list.ID
+		} else if list, remoteErr := p.store.GetListByRemoteID(ctx, p.ID(), requestedID); remoteErr == nil {
+			resolvedID = list.ID
+		} else {
+			p.logger.Warn("could not resolve active ClickUp list", "requested_list_id", requestedID, "error", remoteErr)
+		}
+	}
+	p.activeMu.Lock()
+	p.activeList = resolvedID
+	p.scopeSet = true
+	p.activeMu.Unlock()
+	p.logger.Info("active ClickUp task list set", "requested_list_id", requestedID, "local_list_id", resolvedID)
+}
+
+func (p *cachedProvider) activeTaskList() domain.ListID {
+	p.activeMu.RLock()
+	defer p.activeMu.RUnlock()
+	return p.activeList
+}
+
+func (p *cachedProvider) hasActiveTaskScope() bool {
+	p.activeMu.RLock()
+	defer p.activeMu.RUnlock()
+	return p.scopeSet
+}
+
+func (p *cachedProvider) SetSyncProgress(callback func(string)) {
+	p.progressMu.Lock()
+	p.progress = callback
+	p.progressMu.Unlock()
+}
+
+func (p *cachedProvider) reportProgress(message string) {
+	p.progressMu.RLock()
+	callback := p.progress
+	p.progressMu.RUnlock()
+	if callback != nil {
+		callback(message)
+	}
 }
 
 func (p *cachedProvider) Pull(ctx context.Context) error {
@@ -392,10 +506,14 @@ func (p *cachedProvider) Pull(ctx context.Context) error {
 }
 
 func (p *cachedProvider) pull(ctx context.Context) error {
+	p.reportProgress("fetching spaces")
+	p.logger.Info("ClickUp pull started", "provider_id", p.ID())
 	spaces, err := p.Provider.FetchSpaces(ctx)
 	if err != nil {
+		p.logger.Error("ClickUp space fetch failed", "provider_id", p.ID(), "error", SafeErrorText(err))
 		return err
 	}
+	p.logger.Info("ClickUp spaces fetched", "provider_id", p.ID(), "spaces", len(spaces))
 	seenSpaces := make(map[string]struct{}, len(spaces))
 	for _, space := range spaces {
 		if space.ProviderID != p.ID() {
@@ -408,20 +526,22 @@ func (p *cachedProvider) pull(ctx context.Context) error {
 		if space.RemoteID != nil {
 			seenSpaces[*space.RemoteID] = struct{}{}
 		}
-		if conflict {
-			continue
-		}
 		if metadata, ok := p.Provider.(providerpkg.StatusMetadataProvider); ok {
-			for _, item := range metadata.SpaceStatusMetadata(storedSpace) {
-				if err := p.store.UpsertMetadata(ctx, item); err != nil {
-					return fmt.Errorf("store status metadata for space %s: %w", storedSpace.ID, err)
+			if !conflict {
+				for _, item := range metadata.SpaceStatusMetadata(storedSpace) {
+					if err := p.store.UpsertMetadata(ctx, item); err != nil {
+						return fmt.Errorf("store status metadata for space %s: %w", storedSpace.ID, err)
+					}
 				}
 			}
 		}
+		p.reportProgress("fetching lists from space " + storedSpace.ID.String())
 		lists, err := p.Provider.FetchLists(ctx, storedSpace.ID)
 		if err != nil {
+			p.logger.Error("ClickUp list fetch failed", "provider_id", p.ID(), "space_id", storedSpace.ID, "error", SafeErrorText(err))
 			return fmt.Errorf("fetch lists for space %s: %w", storedSpace.ID, err)
 		}
+		p.logger.Info("ClickUp lists fetched", "provider_id", p.ID(), "space_id", storedSpace.ID, "lists", len(lists))
 		seenLists := make(map[string]struct{}, len(lists))
 		for _, list := range lists {
 			if list.ProviderID != p.ID() || list.SpaceID != storedSpace.ID {
@@ -435,21 +555,29 @@ func (p *cachedProvider) pull(ctx context.Context) error {
 			if list.RemoteID != nil {
 				seenLists[*list.RemoteID] = struct{}{}
 			}
-			if conflict {
-				continue
-			}
 			if metadata, ok := p.Provider.(providerpkg.StatusMetadataProvider); ok {
-				for _, item := range metadata.ListStatusMetadata(storedList) {
-					if err := p.store.UpsertMetadata(ctx, item); err != nil {
-						return fmt.Errorf("store status metadata for list %s: %w", storedList.ID, err)
+				if !conflict {
+					for _, item := range metadata.ListStatusMetadata(storedList) {
+						if err := p.store.UpsertMetadata(ctx, item); err != nil {
+							return fmt.Errorf("store status metadata for list %s: %w", storedList.ID, err)
+						}
 					}
 				}
 			}
+			activeList := p.activeTaskList()
+			scopeSet := p.hasActiveTaskScope()
+			p.logger.Debug("evaluating ClickUp task scope", "active_list_id", activeList, "stored_list_id", storedList.ID, "remote_list_id", remoteIDText(storedList.RemoteID))
+			if scopeSet && storedList.ID != activeList {
+				continue
+			}
+			p.reportProgress("fetching tasks from list " + storedList.ID.String())
+			p.logger.Info("fetching ClickUp tasks", "list_id", storedList.ID, "remote_list_id", remoteIDText(storedList.RemoteID))
 			// FetchTasks accepts the local identity at the provider boundary. A
 			// ClickUp provider resolves it to the remote list ID before calling
 			// the API; the pre-upsert mapper ID is not a local identity.
 			tasks, err := p.Provider.FetchTasks(ctx, storedList.ID)
 			if err != nil {
+				p.logger.Error("ClickUp task fetch failed", "provider_id", p.ID(), "list_id", storedList.ID, "remote_list_id", remoteIDText(list.RemoteID), "error", SafeErrorText(err))
 				return fmt.Errorf("fetch tasks for list %s: %w", storedList.ID, err)
 			}
 			seenTasks := make(map[string]struct{}, len(tasks))
@@ -468,6 +596,23 @@ func (p *cachedProvider) pull(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func remoteIDText(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func remoteTaskIDs(tasks []domain.Task) []string {
+	ids := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		if task.RemoteID != nil {
+			ids = append(ids, *task.RemoteID)
+		}
+	}
+	return ids
 }
 
 func (p *cachedProvider) reconcileTasks(ctx context.Context, listID domain.ListID, tasks []domain.Task, seen map[string]struct{}) error {
@@ -531,14 +676,20 @@ func (p *cachedProvider) CreateTask(ctx context.Context, task domain.Task) (doma
 	if err := p.check(ctx); err != nil {
 		return domain.Task{}, err
 	}
+	p.logger.Info("ClickUp task create started", "provider_id", p.ID(), "task_id", task.ID, "remote_task_id", remoteIDText(task.RemoteID))
 	created, err := p.Provider.CreateTask(ctx, task)
 	if err != nil {
+		p.logger.Error("ClickUp task create failed", "provider_id", p.ID(), "task_id", task.ID, "error", SafeErrorText(err))
 		return domain.Task{}, err
 	}
 	created = pushedTask(task, created)
 	if _, err := p.store.UpsertTask(ctx, created); err != nil {
 		return domain.Task{}, fmt.Errorf("store created task %s: %w", task.ID, err)
 	}
+	if err := p.savePushBase(ctx, created); err != nil {
+		return domain.Task{}, fmt.Errorf("save created task %s sync base: %w", task.ID, err)
+	}
+	p.logger.Info("ClickUp task create completed", "provider_id", p.ID(), "task_id", task.ID, "remote_task_id", remoteIDText(created.RemoteID))
 	return created, nil
 }
 
@@ -547,15 +698,34 @@ func (p *cachedProvider) UpdateTask(ctx context.Context, task domain.Task) (doma
 		return domain.Task{}, err
 	}
 	task = p.persistedTaskIdentity(ctx, task)
+	p.logger.Info("ClickUp task update started", "provider_id", p.ID(), "task_id", task.ID, "remote_task_id", remoteIDText(task.RemoteID))
 	updated, err := p.Provider.UpdateTask(ctx, task)
 	if err != nil {
+		p.logger.Error("ClickUp task update failed", "provider_id", p.ID(), "task_id", task.ID, "remote_task_id", remoteIDText(task.RemoteID), "error", SafeErrorText(err))
 		return domain.Task{}, err
 	}
 	updated = pushedTask(task, updated)
 	if _, err := p.store.UpsertTask(ctx, updated); err != nil {
 		return domain.Task{}, fmt.Errorf("store updated task %s: %w", task.ID, err)
 	}
+	if err := p.savePushBase(ctx, updated); err != nil {
+		return domain.Task{}, fmt.Errorf("save updated task %s sync base: %w", task.ID, err)
+	}
+	p.logger.Info("ClickUp task update completed", "provider_id", p.ID(), "task_id", task.ID, "remote_task_id", remoteIDText(updated.RemoteID))
 	return updated, nil
+}
+
+func (p *cachedProvider) savePushBase(ctx context.Context, task domain.Task) error {
+	payload, err := json.Marshal(entityFields(task))
+	if err != nil {
+		return err
+	}
+	base := task.SyncBase()
+	base.Payload = payload
+	base.SyncState = domain.SyncStateSynced
+	base.CapturedAt = time.Now().UTC()
+	base.UpdatedAt = base.CapturedAt
+	return p.store.SaveBase(ctx, base)
 }
 
 func (p *cachedProvider) DeleteTask(ctx context.Context, task domain.Task) error {
@@ -964,6 +1134,7 @@ func persistenceContext(ctx context.Context) (context.Context, context.CancelFun
 type foundationSyncController struct {
 	engine  *foundationsync.Engine
 	enabled bool
+	scopes  map[ProviderID]func(domain.ListID)
 
 	mu       sync.Mutex
 	started  bool
@@ -978,7 +1149,29 @@ func newFoundationSyncController(engine *foundationsync.Engine, enabled bool) *f
 	return &foundationSyncController{
 		engine:  engine,
 		enabled: enabled,
+		scopes:  make(map[ProviderID]func(domain.ListID)),
 	}
+}
+
+func (s *foundationSyncController) RegisterTaskScope(providerID ProviderID, setter func(domain.ListID)) {
+	if s == nil || setter == nil {
+		return
+	}
+	s.scopes[providerID] = setter
+}
+
+func (s *foundationSyncController) SetTaskScope(providerID ProviderID, listID domain.ListID) {
+	if s == nil {
+		return
+	}
+	if setter := s.scopes[providerID]; setter != nil {
+		setter(listID)
+	}
+}
+
+func (s *foundationSyncController) TriggerList(providerID ProviderID, listID domain.ListID) error {
+	s.SetTaskScope(providerID, listID)
+	return s.Trigger(providerID)
 }
 
 func (s *foundationSyncController) Events() <-chan foundationsync.Event {
@@ -1138,7 +1331,7 @@ func (h *foundationHandler) Handle(ctx context.Context, input command.Command) (
 	}
 	if input.Kind == command.KindRefresh {
 		if h.sync != nil {
-			if err := h.sync.Trigger(ProviderID(input.ProviderID)); err != nil {
+			if err := h.sync.TriggerList(ProviderID(input.ProviderID), domain.ListID(input.ListID)); err != nil {
 				return command.Event{}, err
 			}
 		}
@@ -1835,6 +2028,10 @@ func foundationSyncMessage(event foundationsync.Event) (foundationtui.SyncStateM
 		return foundationtui.SyncStateMsg{}, false, false
 	}
 	switch event.Kind {
+	case foundationsync.EventProgress:
+		message.State = foundationtui.SyncStateSyncing
+		message.Message = event.Message
+		return message, false, true
 	case foundationsync.EventWorkerStarted, foundationsync.EventSyncStarted,
 		foundationsync.EventOperationClaimed, foundationsync.EventOperationAttempted:
 		message.State = foundationtui.SyncStateSyncing
@@ -1935,7 +2132,7 @@ func foundationUICommand(input foundationtui.AppCommand) (command.Command, bool,
 	case foundationtui.CommandSearch:
 		return command.Command{Kind: command.KindSearch, Query: input.Query}, true, nil
 	case foundationtui.CommandRefresh:
-		return command.Command{Kind: command.KindRefresh, ProviderID: string(input.ProviderID)}, true, nil
+		return command.Command{Kind: command.KindRefresh, ProviderID: string(input.ProviderID), ListID: string(input.ListID)}, true, nil
 	case foundationtui.CommandQuit:
 		return command.Command{Kind: command.KindQuit}, true, nil
 	case foundationtui.CommandFilter, foundationtui.CommandGroup, foundationtui.CommandHelp:
@@ -2079,6 +2276,7 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal, lo
 	taskRepository := sqlite.NewTaskRepository(store)
 	localProvider := localpkg.NewWithStores(spaceRepository, listRepository, taskRepository)
 	providers := make([]providerpkg.Provider, 0, 2)
+	taskScopeSetters := make(map[ProviderID]func(domain.ListID))
 	providers = append(providers, localProvider)
 	if err := upsertFoundationProvider(ctx, store, domain.Provider{
 		ID:        localProvider.ID(),
@@ -2099,6 +2297,9 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal, lo
 				BaseURL:     cfg.ClickUp.BaseURL,
 				TeamID:      cfg.ClickUp.WorkspaceID,
 				TokenSource: foundationTokenSource(cfg.ClickUp.TokenEnv),
+				ResponseLogger: func(method, endpoint string, statusCode int, body []byte) {
+					logger.Info("ClickUp response", "method", method, "endpoint", endpoint, "status_code", statusCode, "body", string(body))
+				},
 			}),
 			ParentResolver:      foundationParentResolver(store),
 			RemoteListResolver:  foundationRemoteListResolver(store),
@@ -2106,8 +2307,9 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal, lo
 			LocalListResolver:   foundationLocalListResolver(store, clickupProviderID),
 			RemoteTaskResolver:  foundationRemoteTaskResolver(store),
 		})
-		cached := newCachedProvider(clickupProvider, store)
+		cached := newCachedProvider(clickupProvider, store, logger)
 		providers = append(providers, cached)
+		taskScopeSetters[ProviderID(clickupProvider.ID())] = cached.SetActiveTaskList
 		configuration, marshalErr := json.Marshal(struct {
 			BaseURL     string `json:"base_url"`
 			WorkspaceID string `json:"workspace_id,omitempty"`
@@ -2171,6 +2373,9 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal, lo
 		return nil, fmt.Errorf("create foundation sync engine: %w", err)
 	}
 	syncController := newFoundationSyncController(engine, cfg.Sync.Enabled)
+	for providerID, setter := range taskScopeSetters {
+		syncController.RegisterTaskScope(providerID, setter)
+	}
 	handler := newFoundationHandler(service, syncController)
 	ui, err := newFoundationUIControllerWithListLoader(terminal, handler, func(ctx context.Context) (View, error) {
 		return newFoundationDataStore(store).Snapshot(ctx)

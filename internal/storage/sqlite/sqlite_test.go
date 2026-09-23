@@ -122,7 +122,7 @@ func TestOpenRunsInitialMigrationAndConfiguresSQLite(t *testing.T) {
 
 	for _, table := range []string{
 		"providers", "spaces", "lists", "tasks", "provider_metadata", "sync_operations",
-		"sync_bases", "conflicts", "app_state", "schema_migrations",
+		"sync_bases", "conflicts", "app_state", "task_list_memberships", "schema_migrations",
 	} {
 		var exists int
 		if err := store.SQLDB().QueryRow(
@@ -138,8 +138,8 @@ func TestOpenRunsInitialMigrationAndConfiguresSQLite(t *testing.T) {
 	if err := store.SQLDB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatalf("migration count: %v", err)
 	}
-	if migrationCount != 6 {
-		t.Fatalf("migration count = %d, want 6", migrationCount)
+	if migrationCount != 7 {
+		t.Fatalf("migration count = %d, want 7", migrationCount)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("close: %v", err)
@@ -153,8 +153,36 @@ func TestOpenRunsInitialMigrationAndConfiguresSQLite(t *testing.T) {
 	if err := reopened.SQLDB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatalf("reopen migration count: %v", err)
 	}
-	if migrationCount != 6 {
-		t.Fatalf("reopen migration count = %d, want 6", migrationCount)
+	if migrationCount != 7 {
+		t.Fatalf("reopen migration count = %d, want 7", migrationCount)
+	}
+}
+
+func TestTaskCanBeListedThroughMultipleListMemberships(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	h := createHierarchy(t, store, "multi-list")
+	second, err := store.CreateList(context.Background(), domain.List{
+		ID: "multi-list-second", ProviderID: h.provider.ID, SpaceID: h.space.ID,
+		Name: "second", SyncState: domain.SyncStateLocal,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := h.task
+	updated.ListIDs = []domain.ListID{h.list.ID, second.ID}
+	if _, err := store.UpsertTask(context.Background(), updated); err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := store.ListTasksByListPage(context.Background(), h.provider.ID, second.ID, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].ID != h.task.ID || tasks[0].ListID != second.ID {
+		t.Fatalf("second-list tasks = %#v, want task %s in list %s", tasks, h.task.ID, second.ID)
 	}
 }
 
