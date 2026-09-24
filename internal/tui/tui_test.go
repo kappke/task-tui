@@ -557,17 +557,24 @@ func TestCompositeFilterRejectsUnknownColumnsAndMalformedExpressions(t *testing.
 
 func TestBareFilterAndSortCommandsOpenTheirEditors(t *testing.T) {
 	model := New(testSnapshot())
-	filter, err := ParseFilter("status:open")
-	if err != nil {
-		t.Fatal(err)
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "filter status:open")
+	model, command := model.Update(KeyMsg{Key: "enter"})
+	if command == nil || !model.UI.FilterActive || model.UI.Filter.String() != "status:open" {
+		t.Fatalf("filter application: active=%v filter=%q command=%v", model.UI.FilterActive, model.UI.Filter.String(), command)
 	}
-	model.UI.Filter = filter
-	model.UI.FilterActive = true
+
+	model, _ = model.Update(KeyMsg{Key: "f"})
+	if model.UI.Mode != ModeFilter || model.UI.Input != "status:open" {
+		t.Fatalf("filter shortcut reopened mode %q with input %q", model.UI.Mode, model.UI.Input)
+	}
+
+	model, _ = model.Update(KeyMsg{Key: "esc"})
 	model, _ = model.Update(KeyMsg{Key: ":"})
 	model, _ = typeInput(model, "filter")
-	model, command := model.Update(KeyMsg{Key: "enter"})
+	model, command = model.Update(KeyMsg{Key: "enter"})
 	if command != nil || model.UI.Mode != ModeFilter || model.UI.Input != "status:open" {
-		t.Fatalf(":filter opened mode %q with input %q and command %v", model.UI.Mode, model.UI.Input, command)
+		t.Fatalf(":filter reopened mode %q with input %q and command %v", model.UI.Mode, model.UI.Input, command)
 	}
 
 	model, _ = model.Update(KeyMsg{Key: "esc"})
@@ -576,6 +583,57 @@ func TestBareFilterAndSortCommandsOpenTheirEditors(t *testing.T) {
 	model, command = model.Update(KeyMsg{Key: "enter"})
 	if command != nil || model.UI.Mode != ModeSort {
 		t.Fatalf(":sort opened mode %q with command %v", model.UI.Mode, command)
+	}
+}
+
+func TestFilterEditorRecoversTextFromSavedListState(t *testing.T) {
+	model := New(testSnapshot())
+	model.Data.Tasks[1].Status = "done"
+	parsed, err := ParseFilter("status:open")
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.UI.Filter = Filter{Expression: parsed.Expression}
+	model.UI.FilterActive = true
+	key := ListViewKey{ProviderID: "work", ListID: "backend"}
+	model.UI.ListViews = make(map[ListViewKey]ListViewState)
+	model.UI.ListViews[key] = ListViewState{Filter: "status:open"}
+	if got := len(model.VisibleTasks()); got != 1 {
+		t.Fatalf("saved filter result count = %d, want one applied result", got)
+	}
+
+	model, _ = model.Update(KeyMsg{Key: "f"})
+	if model.UI.Mode != ModeFilter || model.UI.Input != "status:open" {
+		t.Fatalf("reopened saved filter = mode %q input %q", model.UI.Mode, model.UI.Input)
+	}
+}
+
+func TestCharmReopensTheAppliedFilterTextForEditing(t *testing.T) {
+	model := NewCharmModel(New(testSnapshot()), CharmOptions{})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{':'}})
+	model = updated.(*CharmModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("filter status:open")})
+	model = updated.(*CharmModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(*CharmModel)
+	if !model.core.UI.FilterActive || model.core.UI.Filter.String() != "status:open" {
+		t.Fatalf("applied Charm filter = active %v expression %q", model.core.UI.FilterActive, model.core.UI.Filter.String())
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	model = updated.(*CharmModel)
+	if model.core.UI.Mode != ModeFilter || model.core.UI.Input != "status:open" || !strings.Contains(model.View(), "FILTER: status:open") {
+		t.Fatalf("reopened Charm filter = mode %q input %q\n%s", model.core.UI.Mode, model.core.UI.Input, model.View())
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	model = updated.(*CharmModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{':'}})
+	model = updated.(*CharmModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("filter")})
+	model = updated.(*CharmModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(*CharmModel)
+	if model.core.UI.Mode != ModeFilter || model.core.UI.Input != "status:open" {
+		t.Fatalf("bare palette filter reopened with mode %q input %q", model.core.UI.Mode, model.core.UI.Input)
 	}
 }
 

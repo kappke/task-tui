@@ -121,9 +121,21 @@ func (m Model) selectedListViewKey() (ListViewKey, bool) {
 func (m Model) currentListViewState() ListViewState {
 	state := ListViewState{Sort: sortCriteriaString(m.UI.SortBy), GroupBy: m.UI.GroupBy, Columns: cloneColumnPreferences(m.UI.ColumnPreferences)}
 	if m.UI.FilterActive {
-		state.Filter = m.UI.Filter.String()
+		state.Filter = m.editableFilterText()
 	}
 	return state
+}
+
+func (m Model) editableFilterText() string {
+	if expression := m.UI.Filter.String(); expression != "" || !m.UI.FilterActive {
+		return expression
+	}
+	if key, ok := m.selectedListViewKey(); ok {
+		if state, exists := m.UI.ListViews[key]; exists {
+			return state.Filter
+		}
+	}
+	return ""
 }
 
 func (m *Model) rememberListView(key ListViewKey, state ListViewState) {
@@ -1335,7 +1347,7 @@ func (m *Model) beginSearch() {
 func (m *Model) beginFilter() {
 	m.resetCommandCompletion()
 	m.UI.Mode = ModeFilter
-	m.UI.Input = m.UI.Filter.String()
+	m.UI.Input = m.editableFilterText()
 	m.UI.InputCursor = runeCount(m.UI.Input)
 	m.UI.InputOrigin = m.UI.Input
 	m.Status = Status{Level: StatusInfo, Text: `Filter columns with AND/OR/NOT; e.g. status:open AND (priority:high OR assignee:"Ada Lovelace")`}

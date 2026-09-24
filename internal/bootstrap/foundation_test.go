@@ -242,6 +242,10 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 	if !ui.model.UI.FilterActive || ui.model.UI.Filter.String() != "status:open" || ui.model.UI.GroupBy != foundationtui.TaskGroupStatus || foundationSortString(ui.model.UI.SortBy) != "status asc, priority desc" {
 		t.Fatalf("restored active list view = filter %q active %v group %q sort %q", ui.model.UI.Filter.String(), ui.model.UI.FilterActive, ui.model.UI.GroupBy, foundationSortString(ui.model.UI.SortBy))
 	}
+	filterEditor, _ := ui.model.Update(foundationtui.KeyMsg{Key: "f"})
+	if filterEditor.UI.Mode != foundationtui.ModeFilter || filterEditor.UI.Input != "status:open" {
+		t.Fatalf("reopened saved filter = mode %q input %q", filterEditor.UI.Mode, filterEditor.UI.Input)
+	}
 	if len(state.ListViews) != 2 || state.ListViews[0].ProviderID != "personal" || state.ListViews[1].ProviderID != "work" {
 		t.Fatalf("saved per-list views = %#v, want sorted personal and work preferences", state.ListViews)
 	}
