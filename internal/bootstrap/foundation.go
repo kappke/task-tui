@@ -1719,6 +1719,19 @@ func (u *foundationUIController) SetState(state UIState) {
 		u.model.UI.TreeCursor = max(0, state.Cursor)
 	}
 	u.model.UI.SelectedNode = foundationNodeRef(state)
+	u.model.UI.ListViews = make(map[foundationtui.ListViewKey]foundationtui.ListViewState, len(state.ListViews))
+	for _, view := range state.ListViews {
+		if view.ProviderID == "" || view.ListID == "" {
+			continue
+		}
+		u.model.UI.ListViews[foundationtui.ListViewKey{
+			ProviderID: foundationtui.ProviderID(view.ProviderID),
+			ListID:     foundationtui.ListID(view.ListID),
+		}] = foundationtui.ListViewState{
+			Filter:  view.Filter,
+			GroupBy: foundationtui.TaskGroupMode(view.GroupBy),
+		}
+	}
 	if state.ProviderID != "" && state.ListID != "" {
 		u.activeList = &foundationTaskScope{
 			providerID: ProviderID(state.ProviderID),
@@ -1728,19 +1741,29 @@ func (u *foundationUIController) SetState(state UIState) {
 	} else {
 		u.activeList = nil
 	}
-	u.model.UI.Filter = foundationtui.Filter{}
-	u.model.UI.FilterActive = false
-	if strings.TrimSpace(state.Filter) != "" {
-		filter, err := foundationtui.ParseFilter(state.Filter)
-		if err == nil {
-			u.model.UI.Filter = filter
-			u.model.UI.FilterActive = true
-		}
-	}
 	u.model.UI.CollapsedGroups = make(map[string]bool, len(state.CollapsedGroups))
 	for _, key := range state.CollapsedGroups {
 		if key = strings.TrimSpace(key); key != "" {
 			u.model.UI.CollapsedGroups[key] = true
+		}
+	}
+	if key, ok := foundationListViewKey(state); ok {
+		if view, exists := u.model.UI.ListViews[key]; exists {
+			state.Filter = view.Filter
+			state.GroupBy = string(view.GroupBy)
+		} else {
+			u.model.UI.ListViews[key] = foundationtui.ListViewState{
+				Filter:  state.Filter,
+				GroupBy: foundationtui.TaskGroupMode(state.GroupBy),
+			}
+		}
+	}
+	u.model.UI.Filter = foundationtui.Filter{}
+	u.model.UI.FilterActive = false
+	if strings.TrimSpace(state.Filter) != "" {
+		if filter, err := foundationtui.ParseFilter(state.Filter); err == nil {
+			u.model.UI.Filter = filter
+			u.model.UI.FilterActive = true
 		}
 	}
 	u.model.UI.FocusedGroup = ""
@@ -1901,6 +1924,32 @@ func (u *foundationUIController) State() UIState {
 		}
 	}
 	sort.Strings(state.CollapsedGroups)
+	listViews := make(map[foundationtui.ListViewKey]foundationtui.ListViewState, len(model.UI.ListViews)+1)
+	for key, view := range model.UI.ListViews {
+		listViews[key] = view
+	}
+	if key, ok := foundationListViewKey(state); ok {
+		view := foundationtui.ListViewState{GroupBy: model.UI.GroupBy}
+		if model.UI.FilterActive {
+			view.Filter = model.UI.Filter.String()
+		}
+		listViews[key] = view
+	}
+	state.ListViews = make([]ListViewState, 0, len(listViews))
+	for key, view := range listViews {
+		state.ListViews = append(state.ListViews, ListViewState{
+			ProviderID: string(key.ProviderID),
+			ListID:     string(key.ListID),
+			Filter:     view.Filter,
+			GroupBy:    string(view.GroupBy),
+		})
+	}
+	sort.Slice(state.ListViews, func(i, j int) bool {
+		if state.ListViews[i].ProviderID != state.ListViews[j].ProviderID {
+			return state.ListViews[i].ProviderID < state.ListViews[j].ProviderID
+		}
+		return state.ListViews[i].ListID < state.ListViews[j].ListID
+	})
 	return state
 }
 
@@ -2269,6 +2318,16 @@ func foundationNodeRef(state UIState) foundationtui.TreeNodeRef {
 		ref.Kind = foundationtui.TreeNodeProvider
 	}
 	return ref
+}
+
+func foundationListViewKey(state UIState) (foundationtui.ListViewKey, bool) {
+	if state.ProviderID == "" || state.ListID == "" {
+		return foundationtui.ListViewKey{}, false
+	}
+	return foundationtui.ListViewKey{
+		ProviderID: foundationtui.ProviderID(state.ProviderID),
+		ListID:     foundationtui.ListID(state.ListID),
+	}, true
 }
 
 func foundationUICommand(input foundationtui.AppCommand) (command.Command, bool, error) {

@@ -220,8 +220,13 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 		ProviderID:      "work",
 		SpaceID:         "engineering",
 		ListID:          "backend",
+		Filter:          "status:open",
 		GroupBy:         string(foundationtui.TaskGroupStatus),
 		CollapsedGroups: []string{" status:done ", "status:done", "assignee:alice"},
+		ListViews: []ListViewState{
+			{ProviderID: "work", ListID: "backend", Filter: "status:open", GroupBy: string(foundationtui.TaskGroupStatus)},
+			{ProviderID: "personal", ListID: "today", Filter: "priority:high", GroupBy: string(foundationtui.TaskGroupPriority)},
+		},
 	})
 	if ui.model.UI.ActiveProviderID != "work" || ui.model.UI.SelectedNode.ListID != "backend" {
 		t.Fatalf("restored selection = %#v, active provider = %q", ui.model.UI.SelectedNode, ui.model.UI.ActiveProviderID)
@@ -232,6 +237,12 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 	}
 	if !ui.model.UI.CollapsedGroups["status:done"] || !ui.model.UI.CollapsedGroups["assignee:alice"] || len(ui.model.UI.CollapsedGroups) != 2 {
 		t.Fatalf("restored collapsed groups = %#v, want two unique keys", ui.model.UI.CollapsedGroups)
+	}
+	if !ui.model.UI.FilterActive || ui.model.UI.Filter.String() != "status:open" || ui.model.UI.GroupBy != foundationtui.TaskGroupStatus {
+		t.Fatalf("restored active list view = filter %q active %v group %q", ui.model.UI.Filter.String(), ui.model.UI.FilterActive, ui.model.UI.GroupBy)
+	}
+	if len(state.ListViews) != 2 || state.ListViews[0].ProviderID != "personal" || state.ListViews[1].ProviderID != "work" {
+		t.Fatalf("saved per-list views = %#v, want sorted personal and work preferences", state.ListViews)
 	}
 }
 
@@ -684,7 +695,15 @@ func TestUIStateNormalizesRemoteListAndRestartRefreshFindsSharedTasks(t *testing
 		t.Fatal(err)
 	}
 	data := newFoundationDataStore(store)
-	if err := data.SaveUIState(ctx, UIState{ProviderID: string(providerID), SpaceID: string(space.ID), ListID: selectedRemote}); err != nil {
+	if err := data.SaveUIState(ctx, UIState{
+		ProviderID: string(providerID),
+		SpaceID:    string(space.ID),
+		ListID:     selectedRemote,
+		ListViews: []ListViewState{
+			{ProviderID: string(providerID), ListID: string(selected.ID), Filter: "status:open", GroupBy: "status"},
+			{ProviderID: string(providerID), ListID: string(other.ID), Filter: "priority:high", GroupBy: "priority"},
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -702,6 +721,9 @@ func TestUIStateNormalizesRemoteListAndRestartRefreshFindsSharedTasks(t *testing
 	}
 	if state.ListID != string(selected.ID) || state.SpaceID != string(space.ID) {
 		t.Fatalf("normalized UI state = %#v, want local scope %s/%s", state, space.ID, selected.ID)
+	}
+	if len(state.ListViews) != 2 || state.ListViews[0].ProviderID != string(providerID) || state.ListViews[0].ListID != string(selected.ID) || state.ListViews[0].Filter != "status:open" || state.ListViews[1].ListID != string(other.ID) || state.ListViews[1].GroupBy != "priority" {
+		t.Fatalf("persisted per-list view state = %#v, want selected and other list preferences", state.ListViews)
 	}
 
 	selectedTaskRemote, otherTaskRemote := "task-selected", "task-other"

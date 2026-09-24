@@ -108,6 +108,48 @@ func TestSwitchingToTasksLoadsTheHighlightedList(t *testing.T) {
 
 }
 
+func TestListViewFilterAndGroupingAreRememberedPerList(t *testing.T) {
+	model := New(testSnapshot())
+	filter, err := ParseFilter("status:open")
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.UI.Filter = filter
+	model.UI.FilterActive = true
+	model.UI.GroupBy = TaskGroupStatus
+
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "provider personal")
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+	if model.UI.SelectedNode.ListID != "today" {
+		t.Fatalf("selected list after provider switch = %q, want today", model.UI.SelectedNode.ListID)
+	}
+	if model.UI.FilterActive || model.UI.GroupBy != TaskGroupNone {
+		t.Fatalf("new list inherited previous view: filter=%#v active=%v group=%q", model.UI.Filter, model.UI.FilterActive, model.UI.GroupBy)
+	}
+
+	model, _ = model.Update(KeyMsg{Key: "f"})
+	model, _ = typeInput(model, "priority:high")
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "group priority")
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "provider work")
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+	if model.UI.SelectedNode.ListID != "backend" || !model.UI.FilterActive || model.UI.Filter.String() != "status:open" || model.UI.GroupBy != TaskGroupStatus {
+		t.Fatalf("restored work list view: list=%q filter=%q active=%v group=%q", model.UI.SelectedNode.ListID, model.UI.Filter.String(), model.UI.FilterActive, model.UI.GroupBy)
+	}
+
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "provider personal")
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+	if model.UI.SelectedNode.ListID != "today" || !model.UI.FilterActive || model.UI.Filter.String() != "priority:high" || model.UI.GroupBy != TaskGroupPriority {
+		t.Fatalf("restored personal list view: list=%q filter=%q active=%v group=%q", model.UI.SelectedNode.ListID, model.UI.Filter.String(), model.UI.FilterActive, model.UI.GroupBy)
+	}
+}
+
 func TestTaskDetailViewOpensScrollsAndCloses(t *testing.T) {
 	snapshot := testSnapshot()
 	snapshot.Tasks[0].Description = strings.Repeat("This description explains the authentication regression and the required fix. ", 4)

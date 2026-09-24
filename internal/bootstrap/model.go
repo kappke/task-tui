@@ -157,14 +157,23 @@ type SyncOperation struct {
 
 // UIState is presentation state persisted independently from domain entities.
 type UIState struct {
-	ProviderID      string   `json:"provider_id,omitempty"`
-	SpaceID         string   `json:"space_id,omitempty"`
-	ListID          string   `json:"list_id,omitempty"`
-	Panel           string   `json:"panel,omitempty"`
-	Cursor          int      `json:"cursor,omitempty"`
-	Filter          string   `json:"filter,omitempty"`
-	GroupBy         string   `json:"group_by,omitempty"`
-	CollapsedGroups []string `json:"collapsed_groups,omitempty"`
+	ProviderID      string          `json:"provider_id,omitempty"`
+	SpaceID         string          `json:"space_id,omitempty"`
+	ListID          string          `json:"list_id,omitempty"`
+	Panel           string          `json:"panel,omitempty"`
+	Cursor          int             `json:"cursor,omitempty"`
+	Filter          string          `json:"filter,omitempty"`
+	GroupBy         string          `json:"group_by,omitempty"`
+	CollapsedGroups []string        `json:"collapsed_groups,omitempty"`
+	ListViews       []ListViewState `json:"list_views,omitempty"`
+}
+
+// ListViewState persists task filter and grouping preferences for one list.
+type ListViewState struct {
+	ProviderID string `json:"provider_id"`
+	ListID     string `json:"list_id"`
+	Filter     string `json:"filter,omitempty"`
+	GroupBy    string `json:"group_by,omitempty"`
 }
 
 // View is the local snapshot supplied to the TUI. It is intentionally a

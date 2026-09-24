@@ -163,6 +163,19 @@ type TaskGroup struct {
 	Collapsed bool
 }
 
+// ListViewKey scopes task-view preferences to one provider-owned list.
+type ListViewKey struct {
+	ProviderID ProviderID
+	ListID     ListID
+}
+
+// ListViewState stores the filter and grouping used the last time a list was
+// viewed. Filter is kept in its editable form so it can be persisted directly.
+type ListViewState struct {
+	Filter  string
+	GroupBy TaskGroupMode
+}
+
 // Panel is the focused navigation area.
 type Panel string
 
@@ -219,6 +232,7 @@ type UIState struct {
 	FilterActive            bool
 	Filter                  Filter
 	GroupBy                 TaskGroupMode
+	ListViews               map[ListViewKey]ListViewState
 	CollapsedGroups         map[string]bool
 	FocusedGroup            string
 	TaskGroupCursor         int

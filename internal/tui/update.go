@@ -13,6 +13,28 @@ const horizontalScrollStep = 4
 // command. It performs no provider or persistence work.
 func (m Model) Update(msg Message) (Model, Cmd) {
 	m.ensureUI()
+	previousList, hadPreviousList := m.selectedListViewKey()
+	if hadPreviousList {
+		m.rememberListView(previousList, m.currentListViewState())
+	}
+
+	updated, command := m.updateMessage(msg)
+	updated.ensureUI()
+	currentList, hasCurrentList := updated.selectedListViewKey()
+	if hasCurrentList && (!hadPreviousList || currentList != previousList) {
+		if state, ok := updated.UI.ListViews[currentList]; ok {
+			updated.restoreListViewState(state)
+		} else {
+			updated.restoreListViewState(ListViewState{})
+		}
+	}
+	if hasCurrentList {
+		updated.rememberListView(currentList, updated.currentListViewState())
+	}
+	return updated, command
+}
+
+func (m Model) updateMessage(msg Message) (Model, Cmd) {
 	switch value := msg.(type) {
 	case KeyMsg:
 		return m.updateKey(value)
@@ -77,9 +99,64 @@ func (m *Model) ensureUI() {
 	if m.UI.CollapsedGroups == nil {
 		m.UI.CollapsedGroups = make(map[string]bool)
 	}
+	if m.UI.ListViews == nil {
+		m.UI.ListViews = make(map[ListViewKey]ListViewState)
+	}
 	if len(m.KeyMap.Bindings) == 0 {
 		m.KeyMap = DefaultKeyMap()
 	}
+}
+
+func (m Model) selectedListViewKey() (ListViewKey, bool) {
+	ref := m.UI.SelectedNode
+	if ref.Kind != TreeNodeList || ref.ProviderID == "" || ref.ListID == "" {
+		return ListViewKey{}, false
+	}
+	return ListViewKey{ProviderID: ref.ProviderID, ListID: ref.ListID}, true
+}
+
+func (m Model) currentListViewState() ListViewState {
+	state := ListViewState{GroupBy: m.UI.GroupBy}
+	if m.UI.FilterActive {
+		state.Filter = m.UI.Filter.String()
+	}
+	return state
+}
+
+func (m *Model) rememberListView(key ListViewKey, state ListViewState) {
+	if current, ok := m.UI.ListViews[key]; ok && current == state {
+		return
+	}
+	views := make(map[ListViewKey]ListViewState, len(m.UI.ListViews)+1)
+	for currentKey, currentState := range m.UI.ListViews {
+		views[currentKey] = currentState
+	}
+	views[key] = state
+	m.UI.ListViews = views
+}
+
+func (m *Model) restoreListViewState(state ListViewState) {
+	m.UI.Filter = Filter{}
+	m.UI.FilterActive = false
+	if strings.TrimSpace(state.Filter) != "" {
+		if filter, err := ParseFilter(state.Filter); err == nil {
+			m.UI.Filter = filter
+			m.UI.FilterActive = filter.String() != ""
+		}
+	}
+	m.UI.GroupBy = TaskGroupNone
+	if group, err := ParseTaskGroupMode(string(state.GroupBy)); err == nil {
+		m.UI.GroupBy = group
+	}
+	m.UI.FocusedGroup = ""
+	m.UI.TaskGroupCursor = 0
+	m.UI.TaskHeaderSelected = false
+	m.UI.TaskHeaderTask = TaskRef{}
+	m.UI.TaskOffset = 0
+	m.UI.TaskCursor = 0
+	m.UI.SelectedTask = TaskRef{}
+	m.selectTaskAt(0)
+	m.keepVisible()
 }
 
 func (m *Model) initializeSelection() {
