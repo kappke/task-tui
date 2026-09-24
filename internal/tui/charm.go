@@ -442,7 +442,7 @@ func (m *CharmModel) inputMode() bool {
 		return false
 	}
 	switch m.core.UI.Mode {
-	case ModeSearch, ModeFilter, ModeCommand, ModeCreateSpace, ModeCreateList, ModeCreateTask, ModeEditTask:
+	case ModeSearch, ModeFilter, ModeSort, ModeCommand, ModeCreateSpace, ModeCreateList, ModeCreateTask, ModeEditTask:
 		return true
 	default:
 		return false
@@ -755,6 +755,10 @@ func (m *CharmModel) charmModeLine(width int) string {
 		prefix = "SEARCH"
 	case ModeFilter:
 		prefix = "FILTER"
+		suffix = " tab complete | enter apply | esc cancel"
+	case ModeSort:
+		prefix = "SORT"
+		suffix = " tab complete | enter apply | esc cancel"
 	case ModeCommand:
 		prefix = "COMMAND"
 		suffix = " tab/shift+tab complete | enter run | esc cancel"
@@ -782,21 +786,15 @@ func (m *CharmModel) charmModeLine(width int) string {
 }
 
 func (m *CharmModel) charmCommandCompletionLine(width int) string {
-	if m.core.UI.Mode != ModeCommand {
-		return ""
-	}
-	_, candidates, _, _ := m.core.commandCompletion()
-	if len(m.core.UI.CommandCompletion) > 0 {
-		candidates = m.core.UI.CommandCompletion
-	}
+	candidates, selected := m.core.completionOptions()
 	if len(candidates) == 0 {
 		return ""
 	}
-	start, end := completionWindow(candidates, m.core.UI.CommandCompletionIndex, width)
+	start, end := completionWindow(candidates, selected, width)
 	parts := make([]string, 0, end-start)
 	for index := start; index < end; index++ {
-		candidate := candidates[index]
-		if index == m.core.UI.CommandCompletionIndex {
+		candidate := strings.TrimSpace(candidates[index])
+		if index == selected {
 			parts = append(parts, charmSelectedStyle.Render(candidate))
 		} else {
 			parts = append(parts, charmMutedStyle.Render(candidate))
@@ -862,6 +860,7 @@ func newCharmHelpKeyMap() charmHelpKeyMap {
 		bind([]string{"n", "e", "x", "d"}, "n/e/x/d", "task"),
 		bind([]string{"/"}, "/", "search"),
 		bind([]string{"f"}, "f", "filter"),
+		bind([]string{"o"}, "o", "sort"),
 		bind([]string{"c"}, "c", "columns"),
 		bind([]string{"q", "ctrl+c"}, "q", "quit"),
 	}

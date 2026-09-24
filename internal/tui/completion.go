@@ -12,6 +12,7 @@ var commandNames = []string{
 	"remove-list",
 	"search",
 	"filter",
+	"sort",
 	"group",
 	"ungroup",
 	"provider",
@@ -43,10 +44,35 @@ func (m Model) commandCompletion() (prefix string, candidates []string, start, e
 	before := strings.Fields(prefix)
 	if len(before) == 0 {
 		candidates = matchingCompletions(commandNames, fragment)
-		return prefix, candidates, start, cursor
+		_, end = inputTokenRange(input, cursor, false)
+		return prefix, candidates, start, end
 	}
 
 	first := normalize(before[0])
+	commandEnd := 0
+	for commandEnd < len(runes) && !isInputSpace(runes[commandEnd]) {
+		commandEnd++
+	}
+	if (first == "filter" || first == "sort" || first == "order") && commandEnd < cursor {
+		argumentStart := commandEnd
+		for argumentStart < len(runes) && isInputSpace(runes[argumentStart]) {
+			argumentStart++
+		}
+		if cursor >= argumentStart {
+			argumentModel := m
+			if first == "filter" {
+				argumentModel.UI.Mode = ModeFilter
+			} else {
+				argumentModel.UI.Mode = ModeSort
+			}
+			argumentModel.UI.Input = string(runes[argumentStart:])
+			argumentModel.UI.InputCursor = clamp(cursor-argumentStart, 0, runeCount(argumentModel.UI.Input))
+			context := argumentModel.inputCompletionContext()
+			start = argumentStart + context.Start
+			end = argumentStart + context.End
+			return string(runes[:start]), context.Candidates, start, end
+		}
+	}
 	switch first {
 	case "task":
 		if len(before) == 1 {
@@ -67,7 +93,8 @@ func (m Model) commandCompletion() (prefix string, candidates []string, start, e
 			candidates = matchingCompletions(m.providerCommandNames(), fragment)
 		}
 	}
-	return prefix, candidates, start, cursor
+	_, end = inputTokenRange(input, cursor, false)
+	return prefix, candidates, start, end
 }
 
 func (m Model) providerCommandNames() []string {
@@ -95,43 +122,46 @@ func isInputSpace(value rune) bool {
 }
 
 func (m *Model) completeCommand(reverse bool) {
-	prefix, candidates, start, end := m.commandCompletion()
-	inputRunes := []rune(m.UI.Input)
-	fragment := string(inputRunes[start:end])
-	continuing := fragment != "" && containsString(m.UI.CommandCompletion, fragment)
-	if continuing {
+	context := m.inputCompletionContext()
+	candidates := context.Candidates
+	start, end := context.Start, context.End
+	cycling := len(m.UI.CommandCompletion) > 0 && m.UI.InputCursor == m.UI.CommandCompletionEnd
+	if cycling {
 		candidates = m.UI.CommandCompletion
-	}
-	if !continuing {
-		m.UI.CommandCompletion = candidates
-		m.UI.CommandCompletionStart = start
-		m.UI.CommandCompletionEnd = end
-		m.UI.CommandCompletionIndex = 0
+		start = m.UI.CommandCompletionStart
+		end = m.UI.CommandCompletionEnd
 	}
 	if len(candidates) == 0 {
+		m.resetCommandCompletion()
 		return
 	}
-	if reverse {
+	if cycling && reverse {
 		m.UI.CommandCompletionIndex--
 		if m.UI.CommandCompletionIndex < 0 {
 			m.UI.CommandCompletionIndex = len(candidates) - 1
 		}
-	} else if continuing {
+	} else if cycling {
 		m.UI.CommandCompletionIndex++
 		if m.UI.CommandCompletionIndex >= len(candidates) {
 			m.UI.CommandCompletionIndex = 0
 		}
-	} else if m.UI.CommandCompletionIndex >= len(candidates) {
+	} else if reverse {
+		m.UI.CommandCompletionIndex = len(candidates) - 1
+	} else {
 		m.UI.CommandCompletionIndex = 0
 	}
 
 	value := candidates[m.UI.CommandCompletionIndex]
-	completed := prefix + value
-	m.UI.Input = completed
-	m.UI.InputCursor = runeCount(completed)
+	inputRunes := []rune(m.UI.Input)
+	completed := make([]rune, 0, len(inputRunes)+runeCount(value))
+	completed = append(completed, inputRunes[:start]...)
+	completed = append(completed, []rune(value)...)
+	completed = append(completed, inputRunes[end:]...)
+	m.UI.Input = string(completed)
+	m.UI.InputCursor = start + runeCount(value)
 	m.UI.CommandCompletion = candidates
 	m.UI.CommandCompletionStart = start
-	m.UI.CommandCompletionEnd = runeCount(completed)
+	m.UI.CommandCompletionEnd = m.UI.InputCursor
 }
 
 func containsString(values []string, wanted string) bool {
@@ -151,27 +181,46 @@ func (m *Model) resetCommandCompletion() {
 }
 
 func (m Model) commandCompletionLine(width int) string {
-	if m.UI.Mode != ModeCommand {
+	if m.UI.Mode != ModeCommand && m.UI.Mode != ModeFilter && m.UI.Mode != ModeSort {
 		return ""
 	}
-	_, candidates, _, _ := m.commandCompletion()
-	if len(m.UI.CommandCompletion) > 0 {
-		candidates = m.UI.CommandCompletion
-	}
+	candidates, selected := m.completionOptions()
 	if len(candidates) == 0 {
 		return ""
 	}
-	start, end := completionWindow(candidates, m.UI.CommandCompletionIndex, width)
+	start, end := completionWindow(candidates, selected, width)
 	parts := make([]string, 0, end-start)
 	for index := start; index < end; index++ {
-		candidate := candidates[index]
-		if index == m.UI.CommandCompletionIndex {
+		candidate := strings.TrimSpace(candidates[index])
+		if index == selected {
 			parts = append(parts, "["+candidate+"]")
 		} else {
 			parts = append(parts, candidate)
 		}
 	}
 	return fit("  options: "+strings.Join(parts, "  "), width)
+}
+
+func (m Model) completionOptions() ([]string, int) {
+	if len(m.UI.CommandCompletion) > 0 && m.UI.InputCursor == m.UI.CommandCompletionEnd {
+		return m.UI.CommandCompletion, clamp(m.UI.CommandCompletionIndex, 0, len(m.UI.CommandCompletion)-1)
+	}
+	context := m.inputCompletionContext()
+	return context.Candidates, 0
+}
+
+func (m Model) inputCompletionContext() inputCompletionContext {
+	switch m.UI.Mode {
+	case ModeCommand:
+		_, candidates, start, end := m.commandCompletion()
+		return inputCompletionContext{Start: start, End: end, Candidates: candidates}
+	case ModeFilter:
+		return m.filterCompletionContext()
+	case ModeSort:
+		return m.sortCompletionContext()
+	default:
+		return inputCompletionContext{}
+	}
 }
 
 func completionWindow(candidates []string, selected, width int) (start, end int) {

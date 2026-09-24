@@ -39,6 +39,7 @@ func TestDefaultKeyMap(t *testing.T) {
 		{key: "d", action: ActionDelete},
 		{key: "/", action: ActionSearch},
 		{key: "f", action: ActionFilter},
+		{key: "o", action: ActionSort},
 		{key: "c", action: ActionConfigureColumns},
 		{key: "r", action: ActionRefresh},
 		{key: ":", action: ActionCommand},
@@ -118,6 +119,9 @@ func TestListViewFilterAndGroupingAreRememberedPerList(t *testing.T) {
 	model.UI.Filter = filter
 	model.UI.FilterActive = true
 	model.UI.GroupBy = TaskGroupStatus
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "sort status asc")
+	model, _ = model.Update(KeyMsg{Key: "enter"})
 
 	model, _ = model.Update(KeyMsg{Key: ":"})
 	model, _ = typeInput(model, "provider personal")
@@ -125,8 +129,8 @@ func TestListViewFilterAndGroupingAreRememberedPerList(t *testing.T) {
 	if model.UI.SelectedNode.ListID != "today" {
 		t.Fatalf("selected list after provider switch = %q, want today", model.UI.SelectedNode.ListID)
 	}
-	if model.UI.FilterActive || model.UI.GroupBy != TaskGroupNone {
-		t.Fatalf("new list inherited previous view: filter=%#v active=%v group=%q", model.UI.Filter, model.UI.FilterActive, model.UI.GroupBy)
+	if model.UI.FilterActive || model.UI.GroupBy != TaskGroupNone || len(model.UI.SortBy) != 0 {
+		t.Fatalf("new list inherited previous view: filter=%#v active=%v group=%q sort=%v", model.UI.Filter, model.UI.FilterActive, model.UI.GroupBy, model.UI.SortBy)
 	}
 
 	model, _ = model.Update(KeyMsg{Key: "f"})
@@ -135,19 +139,22 @@ func TestListViewFilterAndGroupingAreRememberedPerList(t *testing.T) {
 	model, _ = model.Update(KeyMsg{Key: ":"})
 	model, _ = typeInput(model, "group priority")
 	model, _ = model.Update(KeyMsg{Key: "enter"})
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "sort priority desc, title asc")
+	model, _ = model.Update(KeyMsg{Key: "enter"})
 
 	model, _ = model.Update(KeyMsg{Key: ":"})
 	model, _ = typeInput(model, "provider work")
 	model, _ = model.Update(KeyMsg{Key: "enter"})
-	if model.UI.SelectedNode.ListID != "backend" || !model.UI.FilterActive || model.UI.Filter.String() != "status:open" || model.UI.GroupBy != TaskGroupStatus {
-		t.Fatalf("restored work list view: list=%q filter=%q active=%v group=%q", model.UI.SelectedNode.ListID, model.UI.Filter.String(), model.UI.FilterActive, model.UI.GroupBy)
+	if model.UI.SelectedNode.ListID != "backend" || !model.UI.FilterActive || model.UI.Filter.String() != "status:open" || model.UI.GroupBy != TaskGroupStatus || sortCriteriaString(model.UI.SortBy) != "status asc" {
+		t.Fatalf("restored work list view: list=%q filter=%q active=%v group=%q sort=%v", model.UI.SelectedNode.ListID, model.UI.Filter.String(), model.UI.FilterActive, model.UI.GroupBy, model.UI.SortBy)
 	}
 
 	model, _ = model.Update(KeyMsg{Key: ":"})
 	model, _ = typeInput(model, "provider personal")
 	model, _ = model.Update(KeyMsg{Key: "enter"})
-	if model.UI.SelectedNode.ListID != "today" || !model.UI.FilterActive || model.UI.Filter.String() != "priority:high" || model.UI.GroupBy != TaskGroupPriority {
-		t.Fatalf("restored personal list view: list=%q filter=%q active=%v group=%q", model.UI.SelectedNode.ListID, model.UI.Filter.String(), model.UI.FilterActive, model.UI.GroupBy)
+	if model.UI.SelectedNode.ListID != "today" || !model.UI.FilterActive || model.UI.Filter.String() != "priority:high" || model.UI.GroupBy != TaskGroupPriority || sortCriteriaString(model.UI.SortBy) != "priority desc, task asc" {
+		t.Fatalf("restored personal list view: list=%q filter=%q active=%v group=%q sort=%v", model.UI.SelectedNode.ListID, model.UI.Filter.String(), model.UI.FilterActive, model.UI.GroupBy, model.UI.SortBy)
 	}
 }
 
@@ -441,6 +448,229 @@ func TestFilterAndCommandPalette(t *testing.T) {
 	}
 }
 
+func TestCompositeSortUsesColumnValuesInSelectedOrderAndCanBeEdited(t *testing.T) {
+	snapshot := testSnapshot()
+	snapshot.TaskColumns = []ListTaskColumn{{ProviderID: "work", ListID: "backend", ID: "custom:roi", Name: "ROI", Type: "number"}}
+	snapshot.TaskColumnValues = []TaskColumnValueSet{
+		{ProviderID: "work", TaskID: "same", Values: map[string]string{"custom:roi": "2"}},
+		{ProviderID: "work", TaskID: "work-second", Values: map[string]string{"custom:roi": "13"}},
+		{ProviderID: "work", TaskID: "third", Values: map[string]string{"custom:roi": "9"}},
+		{ProviderID: "work", TaskID: "fourth", Values: map[string]string{"custom:roi": "9"}},
+	}
+	snapshot.Tasks = []Task{
+		{ID: "same", ProviderID: "work", ListID: "backend", Title: "Alpha", Status: "open", Priority: PriorityHigh},
+		{ID: "work-second", ProviderID: "work", ListID: "backend", Title: "Bravo", Status: "open", Priority: PriorityNormal},
+		{ID: "third", ProviderID: "work", ListID: "backend", Title: "Charlie", Status: "done", Priority: PriorityUrgent},
+		{ID: "fourth", ProviderID: "work", ListID: "backend", Title: "Delta", Status: "done", Priority: PriorityLow},
+	}
+	model := New(snapshot)
+
+	model, _ = model.Update(KeyMsg{Key: "o"})
+	if model.UI.Mode != ModeSort || model.UI.Input != "" {
+		t.Fatalf("new sort editor = mode %q input %q", model.UI.Mode, model.UI.Input)
+	}
+	model, _ = typeInput(model, "ROI asc, priority desc")
+	model, command := model.Update(KeyMsg{Key: "enter"})
+	if got := commandMessage(t, command); got.Kind != CommandSort || sortCriteriaString(got.Sort) != "custom:roi asc, priority desc" {
+		t.Fatalf("sort command = %#v", got)
+	}
+	if got, want := visibleTaskIDs(model), []TaskID{"same", "third", "fourth", "work-second"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ROI then priority order = %v, want %v", got, want)
+	}
+
+	model, _ = model.Update(KeyMsg{Key: "o"})
+	if model.UI.Input != "custom:roi asc, priority desc" {
+		t.Fatalf("sort editor did not preserve current criteria: %q", model.UI.Input)
+	}
+	model, _ = model.Update(KeyMsg{Key: "home"})
+	for range runeCount("custom:roi asc, ") {
+		model, _ = model.Update(KeyMsg{Key: "right"})
+	}
+	for range runeCount("custom:roi asc, ") {
+		model, _ = model.Update(KeyMsg{Key: "backspace"})
+	}
+	model, _ = model.Update(KeyMsg{Key: "end"})
+	model, _ = typeInput(model, ", custom:roi asc")
+	model, command = model.Update(KeyMsg{Key: "enter"})
+	commandMessage(t, command)
+	if got, want := visibleTaskIDs(model), []TaskID{"third", "same", "work-second", "fourth"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("edited priority-first order = %v, want %v", got, want)
+	}
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "sort ROI desc")
+	model, command = model.Update(KeyMsg{Key: "enter"})
+	commandMessage(t, command)
+	if got, want := visibleTaskIDs(model), []TaskID{"work-second", "third", "fourth", "same"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("descending dynamic-column order = %v, want %v", got, want)
+	}
+}
+
+func TestCompositeFilterSupportsBooleanColumnRulesAndDynamicColumns(t *testing.T) {
+	snapshot := testSnapshot()
+	snapshot.TaskColumns = []ListTaskColumn{{ProviderID: "work", ListID: "backend", ID: "custom:roi", Name: "ROI", Type: "number"}}
+	snapshot.TaskColumnValues = []TaskColumnValueSet{
+		{ProviderID: "work", TaskID: "same", Values: map[string]string{"custom:roi": "2"}},
+		{ProviderID: "work", TaskID: "work-second", Values: map[string]string{"custom:roi": "13"}},
+		{ProviderID: "work", TaskID: "third", Values: map[string]string{"custom:roi": "9"}},
+	}
+	snapshot.Tasks = []Task{
+		{ID: "same", ProviderID: "work", ListID: "backend", Title: "Alpha", Status: "open", Priority: PriorityHigh, Assignee: "Ada"},
+		{ID: "work-second", ProviderID: "work", ListID: "backend", Title: "Bravo", Status: "open", Priority: PriorityNormal, Assignee: "Bob"},
+		{ID: "third", ProviderID: "work", ListID: "backend", Title: "Charlie", Status: "done", Priority: PriorityUrgent, Assignee: "Ada"},
+	}
+	model := New(snapshot)
+	model, _ = model.Update(KeyMsg{Key: "f"})
+	model, _ = typeInput(model, `status:open AND (priority:high OR "ROI">=10) AND NOT assignee:Bob`)
+	model, command := model.Update(KeyMsg{Key: "enter"})
+	if commandMessage(t, command).Kind != CommandFilter {
+		t.Fatal("filter did not emit the normalized filter command")
+	}
+	if got, want := visibleTaskIDs(model), []TaskID{"same"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("composite filter matches = %v, want %v", got, want)
+	}
+
+	model, _ = model.Update(KeyMsg{Key: "f"})
+	if model.UI.Input != `status:open AND (priority:high OR "ROI">=10) AND NOT assignee:Bob` {
+		t.Fatalf("filter editor did not preserve current expression: %q", model.UI.Input)
+	}
+	for range runeCount(model.UI.Input) {
+		model, _ = model.Update(KeyMsg{Key: "backspace"})
+	}
+	model, _ = typeInput(model, `"ROI">=9 OR status:done`)
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+	if got, want := visibleTaskIDs(model), []TaskID{"work-second", "third"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("OR filter matches = %v, want %v", got, want)
+	}
+}
+
+func TestCompositeFilterRejectsUnknownColumnsAndMalformedExpressions(t *testing.T) {
+	for _, input := range []string{"status:open OR", "(status:open", `status:"unfinished`, "unknown:value"} {
+		model := New(testSnapshot())
+		model, _ = model.Update(KeyMsg{Key: "f"})
+		model, _ = typeInput(model, input)
+		model, command := model.Update(KeyMsg{Key: "enter"})
+		if command != nil || model.UI.Mode != ModeFilter || model.Status.Level != StatusError {
+			t.Fatalf("filter %q result: mode=%q command=%v status=%#v", input, model.UI.Mode, command, model.Status)
+		}
+	}
+}
+
+func TestBareFilterAndSortCommandsOpenTheirEditors(t *testing.T) {
+	model := New(testSnapshot())
+	filter, err := ParseFilter("status:open")
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.UI.Filter = filter
+	model.UI.FilterActive = true
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "filter")
+	model, command := model.Update(KeyMsg{Key: "enter"})
+	if command != nil || model.UI.Mode != ModeFilter || model.UI.Input != "status:open" {
+		t.Fatalf(":filter opened mode %q with input %q and command %v", model.UI.Mode, model.UI.Input, command)
+	}
+
+	model, _ = model.Update(KeyMsg{Key: "esc"})
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "sort")
+	model, command = model.Update(KeyMsg{Key: "enter"})
+	if command != nil || model.UI.Mode != ModeSort {
+		t.Fatalf(":sort opened mode %q with command %v", model.UI.Mode, command)
+	}
+}
+
+func TestFilterAndSortEditorsOfferContextualCompletions(t *testing.T) {
+	snapshot := testSnapshot()
+	snapshot.TaskColumns = []ListTaskColumn{{ProviderID: "work", ListID: "backend", ID: "custom:roi", Name: "ROI", Type: "number"}}
+	snapshot.TaskColumnValues = []TaskColumnValueSet{
+		{ProviderID: "work", TaskID: "same", Values: map[string]string{"custom:roi": "2"}},
+		{ProviderID: "work", TaskID: "work-second", Values: map[string]string{"custom:roi": "13"}},
+	}
+	model := New(snapshot)
+	model, _ = model.Update(KeyMsg{Key: "f"})
+	if line := model.commandCompletionLine(160); !strings.Contains(line, "status") || !strings.Contains(line, "priority") {
+		t.Fatalf("filter field completions missing columns:\n%s", line)
+	}
+	model, _ = typeInput(model, "status")
+	model, _ = model.Update(KeyMsg{Key: "tab"})
+	if model.UI.Input != "status:" {
+		t.Fatalf("status operator completion = %q, want status:", model.UI.Input)
+	}
+	model, _ = typeInput(model, "open")
+	if line := model.commandCompletionLine(160); !strings.Contains(line, "open") {
+		t.Fatalf("status value completions omit open:\n%s", line)
+	}
+
+	model.UI.Input = "priority:"
+	model.UI.InputCursor = runeCount(model.UI.Input)
+	model.resetCommandCompletion()
+	if line := model.commandCompletionLine(160); !strings.Contains(line, "high") || !strings.Contains(line, "urgent") {
+		t.Fatalf("priority value completions missing levels:\n%s", line)
+	}
+	model.UI.Input = `"ROI":`
+	model.UI.InputCursor = runeCount(model.UI.Input)
+	model.resetCommandCompletion()
+	if line := model.commandCompletionLine(160); !strings.Contains(line, "13") || !strings.Contains(line, "2") {
+		t.Fatalf("custom-column value completions missing cached values:\n%s", line)
+	}
+	model.UI.Input = "status:open "
+	model.UI.InputCursor = runeCount(model.UI.Input)
+	model.resetCommandCompletion()
+	if line := model.commandCompletionLine(160); !strings.Contains(line, "AND") || !strings.Contains(line, "OR") || !strings.Contains(line, "NOT") {
+		t.Fatalf("filter Boolean completions missing conditions:\n%s", line)
+	}
+	model, _ = model.Update(KeyMsg{Key: "tab"})
+	if model.UI.Input != "status:open AND" {
+		t.Fatalf("Boolean completion = %q, want a completed AND condition", model.UI.Input)
+	}
+	if line := model.commandCompletionLine(160); !strings.Contains(line, "OR") || !strings.Contains(line, "NOT") {
+		t.Fatalf("Boolean completion choices were not retained:\n%s", line)
+	}
+	model, _ = model.Update(KeyMsg{Key: "tab"})
+	if model.UI.Input != "status:open OR" {
+		t.Fatalf("second Boolean completion = %q, want OR", model.UI.Input)
+	}
+	model, _ = model.Update(KeyMsg{Key: "tab"})
+	if model.UI.Input != "status:open NOT" {
+		t.Fatalf("third Boolean completion = %q, want NOT", model.UI.Input)
+	}
+	model, _ = model.Update(KeyMsg{Key: "tab"})
+	if model.UI.Input != "status:open AND" {
+		t.Fatalf("Boolean completion cycle = %q, want AND", model.UI.Input)
+	}
+	model, _ = typeInput(model, " p")
+	if line := model.commandCompletionLine(160); !strings.Contains(line, "priority") || strings.Contains(line, "OR") {
+		t.Fatalf("completion after Boolean condition should offer columns:\n%s", line)
+	}
+
+	model, _ = model.Update(KeyMsg{Key: "esc"})
+	model, _ = model.Update(KeyMsg{Key: "o"})
+	if line := model.commandCompletionLine(160); !strings.Contains(line, "ROI") || !strings.Contains(line, "priority") {
+		t.Fatalf("sort column completions missing available columns:\n%s", line)
+	}
+	model, _ = typeInput(model, "priority ")
+	if line := model.commandCompletionLine(160); !strings.Contains(line, "asc") || !strings.Contains(line, "desc") {
+		t.Fatalf("sort direction completions missing directions:\n%s", line)
+	}
+	model, _ = model.Update(KeyMsg{Key: "tab"})
+	if model.UI.Input != "priority asc" {
+		t.Fatalf("sort direction completion = %q, want priority asc", model.UI.Input)
+	}
+}
+
+func TestCommandPaletteFilterCompletionUsesColumnValues(t *testing.T) {
+	model := New(testSnapshot())
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "filter status:")
+	if line := model.commandCompletionLine(160); !strings.Contains(line, "open") {
+		t.Fatalf("palette filter suggestions omit task statuses:\n%s", line)
+	}
+	model, _ = model.Update(KeyMsg{Key: "tab"})
+	if model.UI.Input != "filter status:done" && model.UI.Input != "filter status:open" {
+		t.Fatalf("palette filter completion = %q, want a known status", model.UI.Input)
+	}
+}
+
 func TestRefreshUsesSelectedTaskListWhenHierarchySelectionIsProvider(t *testing.T) {
 	model := New(testSnapshot())
 	model.UI.SelectedNode = TreeNodeRef{Kind: TreeNodeProvider, ProviderID: "work"}
@@ -624,6 +854,19 @@ func TestCharmCommandCompletionIsRendered(t *testing.T) {
 	view := model.View()
 	if !strings.Contains(view, "create") || !strings.Contains(view, "refresh") {
 		t.Fatalf("Charm command suggestions are not visible:\n%s", view)
+	}
+}
+
+func TestCharmFilterColumnCompletionsAreRendered(t *testing.T) {
+	model := NewCharmModel(New(testSnapshot()), CharmOptions{})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	model = updated.(*CharmModel)
+	if model.CoreModel().UI.Mode != ModeFilter {
+		t.Fatalf("filter shortcut opened mode %q", model.CoreModel().UI.Mode)
+	}
+	view := model.View()
+	if !strings.Contains(view, "options:") || !strings.Contains(view, "status") || !strings.Contains(view, "priority") {
+		t.Fatalf("Charm filter column suggestions are missing:\n%s", view)
 	}
 }
 
@@ -1211,6 +1454,15 @@ func commandMessage(t *testing.T, command Cmd) AppCommand {
 		t.Fatalf("command message = %T, want CommandMsg", result)
 	}
 	return message.Command
+}
+
+func visibleTaskIDs(model Model) []TaskID {
+	rows := model.VisibleTasks()
+	ids := make([]TaskID, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.Task.ID)
+	}
+	return ids
 }
 
 func testSnapshot() Snapshot {

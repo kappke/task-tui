@@ -35,6 +35,7 @@ const (
 	CommandRemoveTaskFromList CommandKind = "remove_task_from_list"
 	CommandSearch             CommandKind = "search_tasks"
 	CommandFilter             CommandKind = "filter_tasks"
+	CommandSort               CommandKind = "sort_tasks"
 	CommandGroup              CommandKind = "group_tasks"
 	CommandConfigureColumns   CommandKind = "configure_columns"
 	CommandSwitchProvider     CommandKind = "switch_provider"
@@ -71,6 +72,7 @@ type AppCommand struct {
 	ClearDueAt        bool
 	Query             string
 	Filter            Filter
+	Sort              []SortCriterion
 	GroupBy           TaskGroupMode
 	Completed         bool
 	Status            string
@@ -199,6 +201,13 @@ func ParseCommand(input string) (AppCommand, error) {
 			return AppCommand{}, err
 		}
 		command.Filter = filter
+	case "sort", "order":
+		command.Kind = CommandSort
+		criteria, err := ParseSort(strings.TrimSpace(strings.Join(args, " ")))
+		if err != nil {
+			return AppCommand{}, err
+		}
+		command.Sort = criteria
 	case "group", "groupby":
 		command.Kind = CommandGroup
 		modeInput := strings.TrimSpace(strings.Join(args, " "))

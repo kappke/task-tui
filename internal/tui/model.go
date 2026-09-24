@@ -199,6 +199,7 @@ type ListViewKey struct {
 // viewed. Filter is kept in its editable form so it can be persisted directly.
 type ListViewState struct {
 	Filter  string
+	Sort    string
 	GroupBy TaskGroupMode
 	Columns []TaskColumnPreference
 }
@@ -220,6 +221,7 @@ const (
 	ModeColumnConfig Mode = "column_config"
 	ModeSearch       Mode = "search"
 	ModeFilter       Mode = "filter"
+	ModeSort         Mode = "sort"
 	ModeCommand      Mode = "command"
 	ModeCreateSpace  Mode = "create_space"
 	ModeCreateList   Mode = "create_list"
@@ -259,6 +261,7 @@ type UIState struct {
 	SearchQuery             string
 	FilterActive            bool
 	Filter                  Filter
+	SortBy                  []SortCriterion
 	GroupBy                 TaskGroupMode
 	ListViews               map[ListViewKey]ListViewState
 	ColumnPreferences       []TaskColumnPreference

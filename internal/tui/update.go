@@ -119,7 +119,7 @@ func (m Model) selectedListViewKey() (ListViewKey, bool) {
 }
 
 func (m Model) currentListViewState() ListViewState {
-	state := ListViewState{GroupBy: m.UI.GroupBy, Columns: cloneColumnPreferences(m.UI.ColumnPreferences)}
+	state := ListViewState{Sort: sortCriteriaString(m.UI.SortBy), GroupBy: m.UI.GroupBy, Columns: cloneColumnPreferences(m.UI.ColumnPreferences)}
 	if m.UI.FilterActive {
 		state.Filter = m.UI.Filter.String()
 	}
@@ -141,7 +141,7 @@ func (m *Model) rememberListView(key ListViewKey, state ListViewState) {
 }
 
 func sameListViewState(left, right ListViewState) bool {
-	if left.Filter != right.Filter || left.GroupBy != right.GroupBy || len(left.Columns) != len(right.Columns) {
+	if left.Filter != right.Filter || left.Sort != right.Sort || left.GroupBy != right.GroupBy || len(left.Columns) != len(right.Columns) {
 		return false
 	}
 	for index := range left.Columns {
@@ -161,6 +161,14 @@ func (m *Model) restoreListViewState(state ListViewState) {
 		if filter, err := ParseFilter(state.Filter); err == nil {
 			m.UI.Filter = filter
 			m.UI.FilterActive = filter.String() != ""
+		}
+	}
+	m.UI.SortBy = nil
+	if strings.TrimSpace(state.Sort) != "" {
+		if criteria, err := ParseSort(state.Sort); err == nil {
+			if criteria, err = m.normalizeSortCriteria(criteria); err == nil {
+				m.UI.SortBy = criteria
+			}
 		}
 	}
 	m.UI.GroupBy = TaskGroupNone
@@ -661,6 +669,8 @@ func (m Model) updateBrowse(key KeyMsg, action Action) (Model, Cmd) {
 		m.beginSearch()
 	case ActionFilter:
 		m.beginFilter()
+	case ActionSort:
+		m.beginSort()
 	case ActionConfigureColumns:
 		m.beginColumnConfiguration()
 	case ActionRefresh:
@@ -1323,11 +1333,25 @@ func (m *Model) beginSearch() {
 }
 
 func (m *Model) beginFilter() {
+	m.resetCommandCompletion()
 	m.UI.Mode = ModeFilter
 	m.UI.Input = m.UI.Filter.String()
 	m.UI.InputCursor = runeCount(m.UI.Input)
 	m.UI.InputOrigin = m.UI.Input
-	m.Status = Status{Level: StatusInfo, Text: "Filter local tasks; e.g. status:open priority:high"}
+	m.Status = Status{Level: StatusInfo, Text: `Filter columns with AND/OR/NOT; e.g. status:open AND (priority:high OR assignee:"Ada Lovelace")`}
+}
+
+func (m *Model) beginSort() {
+	if _, ok := m.selectedList(); !ok {
+		m.Status = Status{Level: StatusWarning, Text: "Select a list before sorting tasks"}
+		return
+	}
+	m.resetCommandCompletion()
+	m.UI.Mode = ModeSort
+	m.UI.Input = sortCriteriaString(m.UI.SortBy)
+	m.UI.InputCursor = runeCount(m.UI.Input)
+	m.UI.InputOrigin = m.UI.Input
+	m.Status = Status{Level: StatusInfo, Text: "Sort by ordered columns; e.g. priority desc, due asc"}
 }
 
 func (m *Model) beginCommand() {
@@ -1336,7 +1360,7 @@ func (m *Model) beginCommand() {
 	m.UI.InputCursor = 0
 	m.UI.InputOrigin = ""
 	m.resetCommandCompletion()
-	m.Status = Status{Level: StatusInfo, Text: "Commands: create, edit, complete, delete, search, filter, group, columns, refresh"}
+	m.Status = Status{Level: StatusInfo, Text: "Commands: create, edit, complete, delete, search, filter, sort, group, columns, refresh"}
 }
 
 func (m Model) updateInput(key KeyMsg) (Model, Cmd) {
@@ -1375,7 +1399,7 @@ func (m Model) updateInput(key KeyMsg) (Model, Cmd) {
 			m.moveEditField(1)
 			return m, nil
 		}
-		if m.UI.Mode == ModeCommand {
+		if m.UI.Mode == ModeCommand || m.UI.Mode == ModeFilter || m.UI.Mode == ModeSort {
 			m.completeCommand(false)
 		}
 		return m, nil
@@ -1384,7 +1408,7 @@ func (m Model) updateInput(key KeyMsg) (Model, Cmd) {
 			m.moveEditField(-1)
 			return m, nil
 		}
-		if m.UI.Mode == ModeCommand {
+		if m.UI.Mode == ModeCommand || m.UI.Mode == ModeFilter || m.UI.Mode == ModeSort {
 			m.completeCommand(true)
 		}
 		return m, nil
@@ -1503,6 +1527,13 @@ func (m Model) submitInput() (Model, Cmd) {
 			return m, nil
 		}
 		return m.applyFilter(filter, AppCommand{Kind: CommandFilter, Filter: filter})
+	case ModeSort:
+		criteria, err := ParseSort(m.UI.Input)
+		if err != nil {
+			m.Status = Status{Level: StatusError, Text: err.Error()}
+			return m, nil
+		}
+		return m.applySort(criteria, AppCommand{Kind: CommandSort, Sort: criteria})
 	case ModeCommand:
 		return m.submitPalette()
 	case ModeCreateTask:
@@ -1537,6 +1568,10 @@ func (m Model) applySearch(query string, command AppCommand) (Model, Cmd) {
 }
 
 func (m Model) applyFilter(filter Filter, command AppCommand) (Model, Cmd) {
+	if err := m.validateFilterExpression(filter.Expression); err != nil {
+		m.Status = Status{Level: StatusError, Text: err.Error()}
+		return m, nil
+	}
 	m.UI.Mode = ModeBrowse
 	m.UI.Input = ""
 	m.UI.InputCursor = 0
@@ -1548,6 +1583,33 @@ func (m Model) applyFilter(filter Filter, command AppCommand) (Model, Cmd) {
 	m.keepVisible()
 	m.Status = Status{Level: StatusInfo, Text: fmt.Sprintf("Local filter: %d result(s)", len(m.VisibleTasks()))}
 	command.Filter = filter
+	return m, m.emit(command)
+}
+
+func (m Model) applySort(criteria []SortCriterion, command AppCommand) (Model, Cmd) {
+	if _, ok := m.selectedList(); !ok {
+		m.Status = Status{Level: StatusWarning, Text: "Select a list before sorting tasks"}
+		return m, nil
+	}
+	criteria, err := m.normalizeSortCriteria(criteria)
+	if err != nil {
+		m.Status = Status{Level: StatusError, Text: err.Error()}
+		return m, nil
+	}
+	m.UI.Mode = ModeBrowse
+	m.UI.Input = ""
+	m.UI.InputCursor = 0
+	m.UI.SortBy = criteria
+	m.UI.TaskCursor = 0
+	m.UI.SelectedTask = TaskRef{}
+	m.selectTaskAt(0)
+	m.keepVisible()
+	command.Sort = append([]SortCriterion(nil), criteria...)
+	if len(criteria) == 0 {
+		m.Status = Status{Level: StatusInfo, Text: "Task sorting cleared"}
+	} else {
+		m.Status = Status{Level: StatusInfo, Text: "Tasks sorted by " + sortCriteriaString(criteria)}
+	}
 	return m, m.emit(command)
 }
 
@@ -1595,7 +1657,17 @@ func (m Model) submitPalette() (Model, Cmd) {
 	case CommandSearch:
 		return m.applySearch(command.Query, command)
 	case CommandFilter:
+		if len(strings.Fields(strings.TrimPrefix(command.Raw, ":"))) == 1 {
+			m.beginFilter()
+			return m, nil
+		}
 		return m.applyFilter(command.Filter, command)
+	case CommandSort:
+		if len(command.Sort) == 0 && len(strings.Fields(strings.TrimPrefix(command.Raw, ":"))) == 1 {
+			m.beginSort()
+			return m, nil
+		}
+		return m.applySort(command.Sort, command)
 	case CommandGroup:
 		return m.applyGrouping(command.GroupBy, command)
 	case CommandConfigureColumns:
@@ -1645,7 +1717,7 @@ func (m Model) submitPalette() (Model, Cmd) {
 	case CommandHelp:
 		m.UI.Mode = ModeBrowse
 		m.UI.Input = ""
-		m.Status = Status{Level: StatusInfo, Text: "Keys: j/k move, tab switch panel, h/l scroll, enter open, n/e/x/d, / search, f filter, c columns, r refresh; :task move/add-list/remove-list <list-id>"}
+		m.Status = Status{Level: StatusInfo, Text: "Keys: j/k move, tab switch panel, h/l scroll, enter open, n/e/x/d, / search, f filter, o sort, c columns, r refresh; :sort and :filter edit task views"}
 		return m, nil
 	default:
 		m.Status = Status{Level: StatusError, Text: "Unsupported command"}

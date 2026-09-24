@@ -226,6 +226,9 @@ func (m Model) taskHeading() string {
 	if m.UI.FilterActive {
 		heading += " | FILTER " + quoteOrEmpty(m.UI.Filter.String())
 	}
+	if len(m.UI.SortBy) > 0 {
+		heading += " | SORT " + sortCriteriaString(m.UI.SortBy)
+	}
 	if m.UI.GroupBy != TaskGroupNone {
 		heading += " | GROUP " + string(m.UI.GroupBy)
 	}
@@ -481,7 +484,10 @@ func (m Model) modeLine(width int) string {
 		suffix = " enter apply | esc cancel"
 	case ModeFilter:
 		prefix = "FILTER"
-		suffix = " enter apply | esc cancel"
+		suffix = " tab complete | enter apply | esc cancel"
+	case ModeSort:
+		prefix = "SORT"
+		suffix = " tab complete | enter apply | esc cancel"
 	case ModeCommand:
 		prefix = "COMMAND"
 		suffix = " tab/shift+tab complete | enter run | esc cancel"
@@ -550,7 +556,7 @@ func (m Model) footerLine() string {
 	if m.UI.Mode == ModeColumnConfig {
 		return "j/k select column | space show/hide | +/- or h/l resize | enter/esc close"
 	}
-	return "j/k or up/down move | tab switch panel | h/l or left/right scroll | enter open/toggle group | space collapse/expand group | +/- expand/collapse all | g/G first/last | n new | e edit | x complete | d delete | / search | f filter | c columns | : group/filter/commands | r refresh | q quit"
+	return "j/k or up/down move | tab switch panel | h/l or left/right scroll | enter open/toggle group | space collapse/expand group | +/- expand/collapse all | g/G first/last | n new | e edit | x complete | d delete | / search | f filter | o sort | c columns | : group/filter/sort/commands | r refresh | q quit"
 }
 
 func (m Model) overallSync() SyncState {

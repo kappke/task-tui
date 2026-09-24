@@ -1845,6 +1845,7 @@ func (u *foundationUIController) SetState(state UIState) {
 			ListID:     foundationtui.ListID(view.ListID),
 		}] = foundationtui.ListViewState{
 			Filter:  view.Filter,
+			Sort:    view.Sort,
 			GroupBy: foundationtui.TaskGroupMode(view.GroupBy),
 			Columns: foundationTaskColumnPreferences(view.Columns),
 		}
@@ -1867,11 +1868,13 @@ func (u *foundationUIController) SetState(state UIState) {
 	if key, ok := foundationListViewKey(state); ok {
 		if view, exists := u.model.UI.ListViews[key]; exists {
 			state.Filter = view.Filter
+			state.Sort = view.Sort
 			state.GroupBy = string(view.GroupBy)
 			u.model.UI.ColumnPreferences = append([]foundationtui.TaskColumnPreference(nil), view.Columns...)
 		} else {
 			u.model.UI.ListViews[key] = foundationtui.ListViewState{
 				Filter:  state.Filter,
+				Sort:    state.Sort,
 				GroupBy: foundationtui.TaskGroupMode(state.GroupBy),
 			}
 			u.model.UI.ColumnPreferences = nil
@@ -1885,6 +1888,12 @@ func (u *foundationUIController) SetState(state UIState) {
 		if filter, err := foundationtui.ParseFilter(state.Filter); err == nil {
 			u.model.UI.Filter = filter
 			u.model.UI.FilterActive = true
+		}
+	}
+	u.model.UI.SortBy = nil
+	if strings.TrimSpace(state.Sort) != "" {
+		if criteria, err := foundationtui.ParseSort(state.Sort); err == nil {
+			u.model.UI.SortBy = criteria
 		}
 	}
 	u.model.UI.FocusedGroup = ""
@@ -2038,6 +2047,7 @@ func (u *foundationUIController) State() UIState {
 	if model.UI.FilterActive {
 		state.Filter = model.UI.Filter.String()
 	}
+	state.Sort = foundationSortString(model.UI.SortBy)
 	state.GroupBy = string(model.UI.GroupBy)
 	for key, collapsed := range model.UI.CollapsedGroups {
 		if collapsed && strings.TrimSpace(key) != "" {
@@ -2051,6 +2061,7 @@ func (u *foundationUIController) State() UIState {
 	}
 	if key, ok := foundationListViewKey(state); ok {
 		view := foundationtui.ListViewState{
+			Sort:    foundationSortString(model.UI.SortBy),
 			GroupBy: model.UI.GroupBy,
 			Columns: append([]foundationtui.TaskColumnPreference(nil), model.UI.ColumnPreferences...),
 		}
@@ -2065,6 +2076,7 @@ func (u *foundationUIController) State() UIState {
 			ProviderID: string(key.ProviderID),
 			ListID:     string(key.ListID),
 			Filter:     view.Filter,
+			Sort:       view.Sort,
 			GroupBy:    string(view.GroupBy),
 			Columns:    bootstrapTaskColumnPreferences(view.Columns),
 		})
@@ -2087,6 +2099,14 @@ func foundationTaskColumnPreferences(values []TaskColumnPreference) []foundation
 		result = append(result, foundationtui.TaskColumnPreference{ID: value.ID, Visible: value.Visible, Width: value.Width})
 	}
 	return result
+}
+
+func foundationSortString(criteria []foundationtui.SortCriterion) string {
+	parts := make([]string, 0, len(criteria))
+	for _, criterion := range criteria {
+		parts = append(parts, criterion.Column+" "+string(criterion.Direction))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func bootstrapTaskColumnPreferences(values []foundationtui.TaskColumnPreference) []TaskColumnPreference {
@@ -2551,8 +2571,8 @@ func foundationUICommand(input foundationtui.AppCommand) (command.Command, bool,
 		return command.Command{Kind: command.KindRefresh, ProviderID: string(input.ProviderID), ListID: string(input.ListID)}, true, nil
 	case foundationtui.CommandQuit:
 		return command.Command{Kind: command.KindQuit}, true, nil
-	case foundationtui.CommandFilter, foundationtui.CommandGroup, foundationtui.CommandHelp:
-		// Filtering and help are presentation-local operations.
+	case foundationtui.CommandFilter, foundationtui.CommandSort, foundationtui.CommandGroup, foundationtui.CommandHelp:
+		// Filtering, sorting, grouping, and help are presentation-local operations.
 		return command.Command{}, false, nil
 	default:
 		return command.Command{}, false, fmt.Errorf("translate UI command %q: unsupported command", input.Kind)

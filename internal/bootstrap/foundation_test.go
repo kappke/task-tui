@@ -225,8 +225,8 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 		GroupBy:         string(foundationtui.TaskGroupStatus),
 		CollapsedGroups: []string{" status:done ", "status:done", "assignee:alice"},
 		ListViews: []ListViewState{
-			{ProviderID: "work", ListID: "backend", Filter: "status:open", GroupBy: string(foundationtui.TaskGroupStatus), Columns: []TaskColumnPreference{{ID: "status", Visible: false, Width: 9}}},
-			{ProviderID: "personal", ListID: "today", Filter: "priority:high", GroupBy: string(foundationtui.TaskGroupPriority), Columns: []TaskColumnPreference{{ID: "task", Visible: true, Width: 55}}},
+			{ProviderID: "work", ListID: "backend", Filter: "status:open", Sort: "status asc, priority desc", GroupBy: string(foundationtui.TaskGroupStatus), Columns: []TaskColumnPreference{{ID: "status", Visible: false, Width: 9}}},
+			{ProviderID: "personal", ListID: "today", Filter: "priority:high", Sort: "title desc", GroupBy: string(foundationtui.TaskGroupPriority), Columns: []TaskColumnPreference{{ID: "task", Visible: true, Width: 55}}},
 		},
 	})
 	if ui.model.UI.ActiveProviderID != "work" || ui.model.UI.SelectedNode.ListID != "backend" {
@@ -239,8 +239,8 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 	if !ui.model.UI.CollapsedGroups["status:done"] || !ui.model.UI.CollapsedGroups["assignee:alice"] || len(ui.model.UI.CollapsedGroups) != 2 {
 		t.Fatalf("restored collapsed groups = %#v, want two unique keys", ui.model.UI.CollapsedGroups)
 	}
-	if !ui.model.UI.FilterActive || ui.model.UI.Filter.String() != "status:open" || ui.model.UI.GroupBy != foundationtui.TaskGroupStatus {
-		t.Fatalf("restored active list view = filter %q active %v group %q", ui.model.UI.Filter.String(), ui.model.UI.FilterActive, ui.model.UI.GroupBy)
+	if !ui.model.UI.FilterActive || ui.model.UI.Filter.String() != "status:open" || ui.model.UI.GroupBy != foundationtui.TaskGroupStatus || foundationSortString(ui.model.UI.SortBy) != "status asc, priority desc" {
+		t.Fatalf("restored active list view = filter %q active %v group %q sort %q", ui.model.UI.Filter.String(), ui.model.UI.FilterActive, ui.model.UI.GroupBy, foundationSortString(ui.model.UI.SortBy))
 	}
 	if len(state.ListViews) != 2 || state.ListViews[0].ProviderID != "personal" || state.ListViews[1].ProviderID != "work" {
 		t.Fatalf("saved per-list views = %#v, want sorted personal and work preferences", state.ListViews)
@@ -248,6 +248,9 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 	if len(state.ListViews[0].Columns) != 1 || state.ListViews[0].Columns[0].ID != "task" || state.ListViews[0].Columns[0].Width != 55 ||
 		len(state.ListViews[1].Columns) != 1 || state.ListViews[1].Columns[0].ID != "status" || state.ListViews[1].Columns[0].Visible {
 		t.Fatalf("saved per-list column preferences = %#v", state.ListViews)
+	}
+	if state.ListViews[0].Sort != "title desc" || state.ListViews[1].Sort != "status asc, priority desc" || state.Sort != "status asc, priority desc" {
+		t.Fatalf("saved per-list sorting = %#v (active sort %q)", state.ListViews, state.Sort)
 	}
 }
 
@@ -389,6 +392,16 @@ func TestFoundationUICommandRefreshPreservesListID(t *testing.T) {
 	}
 	if translated.Kind != command.KindRefresh || translated.ProviderID != "clickup" || translated.ListID != "list-local" {
 		t.Fatalf("refresh translation = %#v", translated)
+	}
+}
+
+func TestPresentationOnlySortCommandIsNotDispatchedToApplication(t *testing.T) {
+	translated, dispatch, err := foundationUICommand(foundationtui.AppCommand{
+		Kind: foundationtui.CommandSort,
+		Sort: []foundationtui.SortCriterion{{Column: "priority", Direction: foundationtui.SortDescending}},
+	})
+	if err != nil || dispatch || translated.Kind != "" {
+		t.Fatalf("sort command translation = %#v, dispatch=%v, err=%v; sorting is presentation-local", translated, dispatch, err)
 	}
 }
 

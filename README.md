@@ -32,8 +32,28 @@ x              complete task
 d              delete task
 m              move task
 r              refresh/sync
+/              search
+f              filter tasks
+o              sort tasks
+:              open command palette
 q              quit
 ```
+
+Filters accept column expressions combined with `AND`, `OR`, `NOT`, and
+parentheses. Quote values or column names with spaces. Sort criteria are
+comma-separated and their order determines precedence; each column can be
+ascending or descending.
+Both editors reopen with the current list's settings so they can be refined:
+
+```text
+status:open AND (priority:high OR "ROI" >= 10) AND NOT assignee:"Ada Lovelace"
+priority desc, due asc, "ROI" desc
+```
+
+Press `tab`/`shift+tab` in either editor to cycle through available columns,
+operators, Boolean conditions, and applicable values such as the current list's
+statuses and task priorities. In the command palette, bare `:filter` and
+`:sort` open the same editable prompts; arguments apply an expression directly.
 
 Use `--headless` to render the cached view and exit:
 

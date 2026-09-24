@@ -163,6 +163,7 @@ type UIState struct {
 	Panel           string          `json:"panel,omitempty"`
 	Cursor          int             `json:"cursor,omitempty"`
 	Filter          string          `json:"filter,omitempty"`
+	Sort            string          `json:"sort,omitempty"`
 	GroupBy         string          `json:"group_by,omitempty"`
 	CollapsedGroups []string        `json:"collapsed_groups,omitempty"`
 	ListViews       []ListViewState `json:"list_views,omitempty"`
@@ -173,6 +174,7 @@ type ListViewState struct {
 	ProviderID string                 `json:"provider_id"`
 	ListID     string                 `json:"list_id"`
 	Filter     string                 `json:"filter,omitempty"`
+	Sort       string                 `json:"sort,omitempty"`
 	GroupBy    string                 `json:"group_by,omitempty"`
 	Columns    []TaskColumnPreference `json:"columns,omitempty"`
 }

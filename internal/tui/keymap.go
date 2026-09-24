@@ -28,6 +28,7 @@ const (
 	ActionDelete           Action = "delete"
 	ActionSearch           Action = "search"
 	ActionFilter           Action = "filter"
+	ActionSort             Action = "sort"
 	ActionConfigureColumns Action = "configure_columns"
 	ActionRefresh          Action = "refresh"
 	ActionCommand          Action = "command"
@@ -72,6 +73,7 @@ func DefaultKeyMap() KeyMap {
 		"d":           ActionDelete,
 		"/":           ActionSearch,
 		"f":           ActionFilter,
+		"o":           ActionSort,
 		"c":           ActionConfigureColumns,
 		"r":           ActionRefresh,
 		":":           ActionCommand,

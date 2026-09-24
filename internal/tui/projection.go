@@ -92,10 +92,7 @@ func (m Model) Nodes() []TreeNode {
 // VisibleTasks returns the task rows for the active hierarchy/search/filter
 // view, arranged according to the active grouping mode.
 func (m Model) VisibleTasks() []TaskRow {
-	aggregate := false
-	if m.UI.FilterActive && (m.UI.Filter.ProviderID != "" || m.UI.Filter.SpaceID != "" || m.UI.Filter.ListID != "") {
-		aggregate = true
-	}
+	aggregate := m.UI.FilterActive && (m.UI.Filter.ProviderID != "" || m.UI.Filter.SpaceID != "" || m.UI.Filter.ListID != "" || filterExpressionRequiresAggregate(m.UI.Filter.Expression))
 	return flattenTaskGroups(m.visibleTaskGroups(aggregate))
 }
 
@@ -113,10 +110,7 @@ func (m Model) SearchResults() []TaskRow {
 // VisibleTaskGroups returns the filtered task rows arranged according to the
 // active grouping mode. An empty grouping mode returns one unlabelled group.
 func (m Model) VisibleTaskGroups() []TaskGroup {
-	aggregate := false
-	if m.UI.FilterActive && (m.UI.Filter.ProviderID != "" || m.UI.Filter.SpaceID != "" || m.UI.Filter.ListID != "") {
-		aggregate = true
-	}
+	aggregate := m.UI.FilterActive && (m.UI.Filter.ProviderID != "" || m.UI.Filter.SpaceID != "" || m.UI.Filter.ListID != "" || filterExpressionRequiresAggregate(m.UI.Filter.Expression))
 	return m.visibleTaskGroups(aggregate)
 }
 
@@ -209,7 +203,7 @@ func (m Model) taskRows(aggregate bool) []TaskRow {
 			break
 		}
 	}
-	return rows
+	return m.sortTaskRows(rows)
 }
 
 func (m Model) visibleTaskGroups(aggregate bool) []TaskGroup {
@@ -490,6 +484,9 @@ func (m Model) matchesRow(row TaskRow) bool {
 	}
 	if !m.UI.FilterActive {
 		return true
+	}
+	if m.UI.Filter.Expression != nil {
+		return m.matchesFilterExpression(row, m.UI.Filter.Expression)
 	}
 
 	filter := m.UI.Filter
