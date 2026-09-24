@@ -85,8 +85,7 @@ type wireListDetails struct {
 }
 
 type tasksResponse struct {
-	Tasks    []wireTask `json:"tasks"`
-	LastPage bool       `json:"last_page"`
+	Tasks []wireTask `json:"tasks"`
 }
 
 type wireTask struct {
@@ -106,6 +105,7 @@ type wireTask struct {
 	TimeSpent    *wireString    `json:"time_spent"`
 	List         wireList       `json:"list"`
 	Lists        []wireList     `json:"lists"`
+	Locations    []wireList     `json:"locations"`
 }
 
 type wireAssignee struct {

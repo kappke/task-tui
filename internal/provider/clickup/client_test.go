@@ -121,22 +121,24 @@ func TestClientResolvesTokenLazily(t *testing.T) {
 	}
 }
 
-func TestClientPaginatesIncludingClosedTasks(t *testing.T) {
+func TestClientPaginatesIncludingClosedAndMultiListTasks(t *testing.T) {
 	var pages []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/list/list-1/task" {
 			http.NotFound(w, r)
 			return
 		}
-		if r.URL.Query().Get("include_closed") != "true" || r.URL.Query().Get("subtasks") != "true" {
+		if r.URL.Query().Get("include_closed") != "true" || r.URL.Query().Get("subtasks") != "true" || r.URL.Query().Get("include_timl") != "true" {
 			t.Errorf("query = %v", r.URL.Query())
 		}
 		pages = append(pages, r.URL.Query().Get("page"))
 		switch r.URL.Query().Get("page") {
 		case "0":
-			_, _ = io.WriteString(w, `{"tasks":[{"id":"task-1","name":"Open"}],"last_page":false}`)
+			_, _ = io.WriteString(w, `{"tasks":[{"id":"task-1","name":"Open"}],"last_page":true}`)
 		case "1":
-			_, _ = io.WriteString(w, `{"tasks":[{"id":"task-2","name":"Closed"}],"last_page":true}`)
+			_, _ = io.WriteString(w, `{"tasks":[{"id":"task-2","name":"Shared"}],"last_page":false}`)
+		case "2":
+			_, _ = io.WriteString(w, `{"tasks":[],"last_page":true}`)
 		default:
 			http.Error(w, "unexpected page", http.StatusBadRequest)
 		}
@@ -152,7 +154,7 @@ func TestClientPaginatesIncludingClosedTasks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTasks() error = %v", err)
 	}
-	if len(tasks) != 2 || pages[0] != "0" || pages[1] != "1" {
+	if len(tasks) != 2 || len(pages) != 3 || pages[0] != "0" || pages[1] != "1" || pages[2] != "2" {
 		t.Fatalf("tasks = %#v, pages = %#v", tasks, pages)
 	}
 }

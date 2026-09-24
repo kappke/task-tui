@@ -392,12 +392,14 @@ func (p *Provider) taskPrimaryListID(ctx context.Context, task wireTask, fallbac
 }
 
 func (p *Provider) resolveTaskListIDs(ctx context.Context, task wireTask, primary domain.ListID, included ...domain.ListID) []domain.ListID {
-	memberships := make([]domain.ListID, 0, len(task.Lists)+1+len(included))
+	memberships := make([]domain.ListID, 0, len(task.Lists)+len(task.Locations)+1+len(included))
 	memberships = append(memberships, primary)
-	for _, remoteList := range task.Lists {
-		resolved, err := p.resolveListLocalID(ctx, remoteList.ID.String())
-		if err == nil {
-			memberships = append(memberships, resolved)
+	for _, remoteLists := range [][]wireList{task.Lists, task.Locations} {
+		for _, remoteList := range remoteLists {
+			resolved, err := p.resolveListLocalID(ctx, remoteList.ID.String())
+			if err == nil {
+				memberships = append(memberships, resolved)
+			}
 		}
 	}
 	memberships = append(memberships, included...)

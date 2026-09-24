@@ -431,6 +431,7 @@ func (c *Client) GetTasks(ctx context.Context, listID string) ([]wireTask, error
 
 		values := url.Values{}
 		values.Set("include_closed", "true")
+		values.Set("include_timl", "true")
 		values.Set("page", strconv.Itoa(page))
 		values.Set("subtasks", "true")
 
@@ -444,10 +445,12 @@ func (c *Client) GetTasks(ctx context.Context, listID string) ([]wireTask, error
 				return nil, c.malformedResponse(http.MethodGet, path, "task ID is missing")
 			}
 		}
-		allTasks = append(allTasks, response.Tasks...)
-		if response.LastPage {
+		if len(response.Tasks) == 0 {
+			// ClickUp can mark a non-empty page as the last page, so an empty
+			// response is the reliable end-of-pagination signal.
 			return allTasks, nil
 		}
+		allTasks = append(allTasks, response.Tasks...)
 	}
 }
 

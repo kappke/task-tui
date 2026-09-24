@@ -281,7 +281,18 @@ func TestProviderFetchTasksKeepsHomeListAndEveryMembership(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		_, _ = io.WriteString(w, `{"last_page":true,"tasks":[{"id":"remote-task","name":"Shared","list":{"id":"remote-home-list"},"lists":[{"id":"remote-extra-list"}]}]}`)
+		if r.URL.Query().Get("page") == "0" {
+			if r.URL.Query().Get("include_timl") != "true" {
+				t.Errorf("include_timl query = %q", r.URL.Query().Get("include_timl"))
+			}
+			_, _ = io.WriteString(w, `{"last_page":true,"tasks":[{"id":"remote-task","name":"Shared","list":{"id":"remote-home-list"},"lists":[{"id":"remote-extra-list"}],"locations":[{"id":"remote-location-list"}]}]}`)
+			return
+		}
+		if r.URL.Query().Get("page") == "1" {
+			_, _ = io.WriteString(w, `{"last_page":true,"tasks":[]}`)
+			return
+		}
+		http.Error(w, "unexpected page", http.StatusBadRequest)
 	}))
 	defer server.Close()
 	provider := New(NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
@@ -293,6 +304,8 @@ func TestProviderFetchTasksKeepsHomeListAndEveryMembership(t *testing.T) {
 				return "local-home-list", nil
 			case "remote-extra-list":
 				return "local-extra-list", nil
+			case "remote-location-list":
+				return "local-location-list", nil
 			default:
 				return "local-request-list", nil
 			}
@@ -306,7 +319,7 @@ func TestProviderFetchTasksKeepsHomeListAndEveryMembership(t *testing.T) {
 	if len(tasks) != 1 || tasks[0].ListID != "local-home-list" {
 		t.Fatalf("FetchTasks() primary list = %#v", tasks)
 	}
-	want := []domain.ListID{"local-home-list", "local-extra-list", "local-request-list"}
+	want := []domain.ListID{"local-home-list", "local-extra-list", "local-location-list", "local-request-list"}
 	if !reflect.DeepEqual(tasks[0].ListIDs, want) {
 		t.Fatalf("FetchTasks() memberships = %v, want %v", tasks[0].ListIDs, want)
 	}

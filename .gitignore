@@ -1,2 +1,3 @@
 .tasks/
+.tests/
 config.toml
