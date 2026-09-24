@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -224,8 +225,8 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 		GroupBy:         string(foundationtui.TaskGroupStatus),
 		CollapsedGroups: []string{" status:done ", "status:done", "assignee:alice"},
 		ListViews: []ListViewState{
-			{ProviderID: "work", ListID: "backend", Filter: "status:open", GroupBy: string(foundationtui.TaskGroupStatus)},
-			{ProviderID: "personal", ListID: "today", Filter: "priority:high", GroupBy: string(foundationtui.TaskGroupPriority)},
+			{ProviderID: "work", ListID: "backend", Filter: "status:open", GroupBy: string(foundationtui.TaskGroupStatus), Columns: []TaskColumnPreference{{ID: "status", Visible: false, Width: 9}}},
+			{ProviderID: "personal", ListID: "today", Filter: "priority:high", GroupBy: string(foundationtui.TaskGroupPriority), Columns: []TaskColumnPreference{{ID: "task", Visible: true, Width: 55}}},
 		},
 	})
 	if ui.model.UI.ActiveProviderID != "work" || ui.model.UI.SelectedNode.ListID != "backend" {
@@ -243,6 +244,10 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 	}
 	if len(state.ListViews) != 2 || state.ListViews[0].ProviderID != "personal" || state.ListViews[1].ProviderID != "work" {
 		t.Fatalf("saved per-list views = %#v, want sorted personal and work preferences", state.ListViews)
+	}
+	if len(state.ListViews[0].Columns) != 1 || state.ListViews[0].Columns[0].ID != "task" || state.ListViews[0].Columns[0].Width != 55 ||
+		len(state.ListViews[1].Columns) != 1 || state.ListViews[1].Columns[0].ID != "status" || state.ListViews[1].Columns[0].Visible {
+		t.Fatalf("saved per-list column preferences = %#v", state.ListViews)
 	}
 }
 
@@ -464,6 +469,62 @@ func TestCachedProviderFetchesOnlyTheRequestedHierarchyScope(t *testing.T) {
 	}
 	if len(fake.taskDetailFetches) != 1 || fake.taskDetailFetches[0] != "task-a" {
 		t.Fatalf("task detail fetch calls = %v, want only task-a", fake.taskDetailFetches)
+	}
+}
+
+func TestCachedProviderPersistsDynamicListColumnsAndTaskValues(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	providerID := domain.ProviderID("clickup-work")
+	if _, err := store.UpsertProvider(ctx, domain.Provider{ID: providerID, Type: domain.ProviderTypeClickUp, Name: "Work", Enabled: true}); err != nil {
+		t.Fatalf("insert provider: %v", err)
+	}
+	now := time.Now().UTC()
+	space := domain.Space{ID: "space-local", ProviderID: providerID, Name: "Engineering", SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now}
+	if _, err := store.UpsertSpace(ctx, space); err != nil {
+		t.Fatalf("insert space: %v", err)
+	}
+	listRemoteID := "list-remote"
+	taskRemoteID := "task-remote"
+	list := domain.List{ID: "list-local", ProviderID: providerID, SpaceID: space.ID, RemoteID: &listRemoteID, Name: "Roadmap", SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now}
+	task := domain.Task{ID: "task-local", ProviderID: providerID, ListID: list.ID, RemoteID: &taskRemoteID, Title: "Ship feature", Status: "todo", Priority: domain.PriorityNormal, SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now}
+	fake := &foundationTestProvider{
+		id:    providerID,
+		lists: map[domain.SpaceID][]domain.List{space.ID: {list}},
+		tasks: map[domain.ListID][]domain.Task{list.ID: {task}},
+		listColumns: map[domain.ListID][]domain.TaskColumn{
+			list.ID: {{ID: "custom:estimate", Name: "Estimate", Type: "number"}},
+		},
+		taskColumnValues: map[domain.TaskID]domain.TaskColumnValues{
+			task.ID: {"custom:estimate": "13"},
+		},
+	}
+	cached := newCachedProvider(fake, store)
+	if err := cached.FetchListsIntoCache(ctx, space.ID); err != nil {
+		t.Fatalf("refresh list metadata: %v", err)
+	}
+	if err := cached.FetchTasksIntoCache(ctx, list.ID); err != nil {
+		t.Fatalf("refresh task values: %v", err)
+	}
+
+	view, err := newFoundationDataStore(store).SnapshotForList(ctx, ProviderID(providerID), ListID(list.ID))
+	if err != nil {
+		t.Fatalf("load refreshed list snapshot: %v", err)
+	}
+	if len(view.TaskColumns) != 1 || view.TaskColumns[0].ID != "custom:estimate" || view.TaskColumns[0].ListID != ListID(list.ID) {
+		t.Fatalf("task columns = %#v", view.TaskColumns)
+	}
+	if len(view.TaskColumnValues) != 1 || view.TaskColumnValues[0].Values["custom:estimate"] != "13" {
+		t.Fatalf("task column values = %#v", view.TaskColumnValues)
+	}
+	snapshot := foundationSnapshot(view)
+	if len(snapshot.TaskColumns) != 1 || len(snapshot.TaskColumnValues) != 1 || snapshot.TaskColumnValues[0].Values["custom:estimate"] != "13" {
+		t.Fatalf("TUI snapshot columns = %#v values = %#v", snapshot.TaskColumns, snapshot.TaskColumnValues)
 	}
 }
 
@@ -866,6 +927,8 @@ type foundationTestProvider struct {
 	listFetches       []domain.SpaceID
 	taskFetches       []domain.ListID
 	taskDetailFetches []domain.TaskID
+	listColumns       map[domain.ListID][]domain.TaskColumn
+	taskColumnValues  map[domain.TaskID]domain.TaskColumnValues
 }
 
 type foundationNoopHandler struct{}
@@ -884,6 +947,7 @@ func (h *foundationCaptureHandler) Handle(_ context.Context, value command.Comma
 }
 
 var _ providerpkg.Provider = (*foundationTestProvider)(nil)
+var _ providerpkg.TaskColumnMetadataProvider = (*foundationTestProvider)(nil)
 
 func (p *foundationTestProvider) ID() domain.ProviderID { return p.id }
 
@@ -930,6 +994,42 @@ func (p *foundationTestProvider) FetchTask(_ context.Context, taskID domain.Task
 		}
 	}
 	return domain.Task{}, domain.ErrNotFound
+}
+
+func (p *foundationTestProvider) ListTaskColumns(list domain.List) []domain.ProviderMetadata {
+	columns, ok := p.listColumns[list.ID]
+	if !ok {
+		return nil
+	}
+	value, err := json.Marshal(columns)
+	if err != nil {
+		return nil
+	}
+	return []domain.ProviderMetadata{{
+		ProviderID: list.ProviderID,
+		EntityType: domain.EntityTypeList,
+		EntityID:   string(list.ID),
+		Key:        domain.MetadataKeyTaskColumns,
+		Value:      string(value),
+	}}
+}
+
+func (p *foundationTestProvider) TaskColumnValues(task domain.Task) []domain.ProviderMetadata {
+	values, ok := p.taskColumnValues[task.ID]
+	if !ok {
+		return nil
+	}
+	value, err := json.Marshal(values)
+	if err != nil {
+		return nil
+	}
+	return []domain.ProviderMetadata{{
+		ProviderID: task.ProviderID,
+		EntityType: domain.EntityTypeTask,
+		EntityID:   string(task.ID),
+		Key:        domain.MetadataKeyTaskColumnValues,
+		Value:      string(value),
+	}}
 }
 
 func (p *foundationTestProvider) CreateTask(context.Context, domain.Task) (domain.Task, error) {

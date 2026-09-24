@@ -86,6 +86,9 @@ func (m Model) bodyLines(width, height int) []string {
 	if m.UI.Mode == ModeDetail {
 		return m.visibleDetailLines(width, height)
 	}
+	if m.UI.Mode == ModeColumnConfig {
+		return m.visibleColumnConfigLines(width, height)
+	}
 	if width < 60 {
 		lines := m.treeLines(width)
 		lines = append(lines, fit("", width))
@@ -163,7 +166,7 @@ func (m Model) treeLines(width int) []string {
 func (m Model) taskLines(width int) []string {
 	lines := []string{
 		fitAtOffset(m.taskHeading(), width, m.UI.TaskHorizontalOffset),
-		fitAtOffset(taskTableHeaderLine(width), width, m.UI.TaskHorizontalOffset),
+		fitAtOffset(m.taskTableHeaderLine(width), width, m.UI.TaskHorizontalOffset),
 	}
 	groups := m.VisibleTaskGroups()
 	rows := flattenTaskGroups(groups)
@@ -264,7 +267,7 @@ func (m Model) taskRowLine(row TaskRow, index, width int) string {
 	if index == m.UI.TaskCursor && m.UI.Focus == PanelTasks {
 		marker = "> "
 	}
-	return fitAtOffset(taskTableLine(row, marker, taskTableLayoutFor(width)), width, m.UI.TaskHorizontalOffset)
+	return fitAtOffset(m.taskTableLine(row, marker, width), width, m.UI.TaskHorizontalOffset)
 }
 
 func (m Model) detailLines(width int) []string {
@@ -360,6 +363,64 @@ func (m Model) visibleDetailLines(width, height int) []string {
 	return lines[offset : offset+height]
 }
 
+func (m Model) visibleModeLines(width, height int) []string {
+	if m.UI.Mode == ModeDetail {
+		return m.visibleDetailLines(width, height)
+	}
+	return m.visibleColumnConfigLines(width, height)
+}
+
+func (m Model) columnConfigLines(width int) []string {
+	list, ok := m.selectedList()
+	if !ok {
+		return []string{fit("TASK COLUMNS", width), fit("Select a list to configure its columns", width)}
+	}
+	columns := m.availableTaskColumns()
+	lines := []string{
+		fit("TASK COLUMNS | "+safeText(list.Name), width),
+		fit("j/k select | space toggle | +/- resize | enter or esc close", width),
+	}
+	for index, column := range columns {
+		marker := "  "
+		if index == m.UI.ColumnCursor {
+			marker = "> "
+		}
+		preference, configured := m.taskColumnPreference(column.ID)
+		visible := true
+		if configured {
+			visible = preference.Visible
+		}
+		if column.ID == taskColumnTask {
+			visible = true
+		}
+		check := "[ ]"
+		if visible {
+			check = "[x]"
+		}
+		columnWidth := column.Width
+		if configured && preference.Width > 0 {
+			columnWidth = clamp(preference.Width, 1, 120)
+		}
+		detail := ""
+		if column.ID == taskColumnTask {
+			detail = " (required)"
+		}
+		lines = append(lines, fit(fmt.Sprintf("%s%s %s  width %d%s", marker, check, safeText(column.Label), columnWidth, detail), width))
+	}
+	return lines
+}
+
+func (m Model) visibleColumnConfigLines(width, height int) []string {
+	lines := m.columnConfigLines(width)
+	if len(lines) <= height || height <= 0 {
+		return lines
+	}
+	columnCount := len(m.availableTaskColumns())
+	selectedLine := 2 + clamp(m.UI.ColumnCursor, 0, maxInt(columnCount-1, 0))
+	start := clamp(selectedLine-height/2, 0, len(lines)-height)
+	return lines[start : start+height]
+}
+
 func wrapDetailText(text string, width int) []string {
 	width = maxInt(width, 1)
 	text = strings.ReplaceAll(text, "\r\n", "\n")
@@ -410,6 +471,9 @@ func wrapDetailText(text string, width int) []string {
 }
 
 func (m Model) modeLine(width int) string {
+	if m.UI.Mode == ModeColumnConfig {
+		return fit("COLUMNS: j/k select | space toggle | +/- resize | enter/esc close", width)
+	}
 	var prefix, suffix string
 	switch m.UI.Mode {
 	case ModeSearch:
@@ -483,7 +547,10 @@ func (m Model) footerLine() string {
 	if m.UI.Mode == ModeDetail {
 		return "j/k or up/down scroll | g/G top/bottom | esc close | q quit"
 	}
-	return "j/k or up/down move | tab switch panel | h/l or left/right scroll | enter open/toggle group | space collapse/expand group | +/- expand/collapse all | g/G first/last | n new | e edit | x complete | d delete | / search | f filter | : group/filter/commands | r refresh | q quit"
+	if m.UI.Mode == ModeColumnConfig {
+		return "j/k select column | space show/hide | +/- or h/l resize | enter/esc close"
+	}
+	return "j/k or up/down move | tab switch panel | h/l or left/right scroll | enter open/toggle group | space collapse/expand group | +/- expand/collapse all | g/G first/last | n new | e edit | x complete | d delete | / search | f filter | c columns | : group/filter/commands | r refresh | q quit"
 }
 
 func (m Model) overallSync() SyncState {
@@ -568,57 +635,167 @@ func fitAtOffset(value string, width, offset int) string {
 	return visible + strings.Repeat(" ", width-runeCount(visible))
 }
 
-type taskTableLayout struct {
-	Name      int
-	Status    int
-	Assignees int
-	Priority  int
-	Estimate  int
-	Tracked   int
-	Due       int
-}
-
 const taskTableGap = "  "
 
-func taskTableLayoutFor(width int) taskTableLayout {
-	columns := taskTableLayout{
-		Name:      40,
-		Status:    12,
-		Assignees: 18,
-		Priority:  10,
-		Estimate:  14,
-		Tracked:   13,
-		Due:       12,
+type taskTableColumn struct {
+	ID    string
+	Label string
+	Width int
+}
+
+const (
+	taskColumnTask      = "task"
+	taskColumnStatus    = "status"
+	taskColumnAssignees = "assignees"
+	taskColumnPriority  = "priority"
+	taskColumnEstimate  = "estimate"
+	taskColumnTracked   = "tracked"
+	taskColumnDue       = "due"
+)
+
+var defaultTaskColumns = []taskTableColumn{
+	{ID: taskColumnTask, Label: "TASK", Width: 40},
+	{ID: taskColumnStatus, Label: "STATUS", Width: 12},
+	{ID: taskColumnAssignees, Label: "ASSIGNEES", Width: 18},
+	{ID: taskColumnPriority, Label: "PRIORITY", Width: 10},
+	{ID: taskColumnEstimate, Label: "TIME ESTIMATE", Width: 14},
+	{ID: taskColumnTracked, Label: "TIME TRACKED", Width: 13},
+	{ID: taskColumnDue, Label: "DUE DATE", Width: 12},
+}
+
+func (m Model) availableTaskColumns() []taskTableColumn {
+	columns := append([]taskTableColumn(nil), defaultTaskColumns...)
+	seen := make(map[string]struct{}, len(m.Data.TaskColumns))
+	selected, hasSelectedList := m.selectedList()
+	for _, column := range m.Data.TaskColumns {
+		if hasSelectedList {
+			if column.ProviderID != selected.ProviderID || column.ListID != selected.ID {
+				continue
+			}
+		} else {
+			if m.UI.ActiveProviderID != "" && column.ProviderID != m.UI.ActiveProviderID {
+				continue
+			}
+			if m.UI.SelectedNode.Kind == TreeNodeSpace {
+				list, ok := m.listByID(column.ProviderID, column.ListID)
+				if !ok || list.SpaceID != m.UI.SelectedNode.SpaceID {
+					continue
+				}
+			}
+		}
+		if strings.TrimSpace(column.ID) == "" {
+			continue
+		}
+		if _, ok := seen[column.ID]; ok {
+			continue
+		}
+		seen[column.ID] = struct{}{}
+		width := clamp(runeCount(column.Name)+2, 12, 24)
+		columns = append(columns, taskTableColumn{ID: column.ID, Label: strings.ToUpper(column.Name), Width: width})
 	}
-	if width > 0 {
-		baseWidth := 2 + columns.Name + columns.Status + columns.Assignees + columns.Priority + columns.Estimate + columns.Tracked + columns.Due + runeCount(taskTableGap)*6
-		if width > baseWidth {
-			columns.Name += width - baseWidth
+	return columns
+}
+
+func (m Model) listByID(providerID ProviderID, listID ListID) (List, bool) {
+	for _, list := range m.Data.Lists {
+		if list.ProviderID == providerID && list.ID == listID {
+			return list, true
+		}
+	}
+	return List{}, false
+}
+
+func (m Model) taskTableColumns(width int) []taskTableColumn {
+	available := m.availableTaskColumns()
+	columns := make([]taskTableColumn, 0, len(available))
+	for _, column := range available {
+		preference, ok := m.taskColumnPreference(column.ID)
+		if ok && !preference.Visible && column.ID != taskColumnTask {
+			continue
+		}
+		if ok && preference.Width > 0 {
+			column.Width = clamp(preference.Width, 1, 120)
+		}
+		columns = append(columns, column)
+	}
+	if len(columns) == 0 {
+		columns = append(columns, defaultTaskColumns[0])
+	}
+	_, taskWidthConfigured := m.taskColumnPreference(taskColumnTask)
+	if width > 0 && !taskWidthConfigured {
+		total := 2 + runeCount(taskTableGap)*(len(columns)-1)
+		for _, column := range columns {
+			total += column.Width
+		}
+		if width > total {
+			columns[0].Width += width - total
 		}
 	}
 	return columns
 }
 
-func taskTableHeaderLine(width int) string {
-	columns := taskTableLayoutFor(width)
-	return taskTableCell("  "+"TASK", 2+columns.Name) + taskTableGap +
-		taskTableCell("STATUS", columns.Status) + taskTableGap +
-		taskTableCell("ASSIGNEES", columns.Assignees) + taskTableGap +
-		taskTableCell("PRIORITY", columns.Priority) + taskTableGap +
-		taskTableCell("TIME ESTIMATE", columns.Estimate) + taskTableGap +
-		taskTableCell("TIME TRACKED", columns.Tracked) + taskTableGap +
-		taskTableCell("DUE DATE", columns.Due)
+func (m Model) taskColumnPreference(id string) (TaskColumnPreference, bool) {
+	for _, preference := range m.UI.ColumnPreferences {
+		if preference.ID == id {
+			return preference, true
+		}
+	}
+	return TaskColumnPreference{}, false
 }
 
-func taskTableLine(row TaskRow, marker string, columns taskTableLayout) string {
-	name := "  " + strings.Repeat("  ", maxInt(row.HierarchyDepth, 0)) + taskTitle(row)
-	return marker + taskTableCell(name, columns.Name) + taskTableGap +
-		taskTableCell(displayTaskStatus(row.Task.Status), columns.Status) + taskTableGap +
-		taskTableCell(taskAssigneeLabel(row), columns.Assignees) + taskTableGap +
-		taskTableCell(displayTaskPriority(row.Task.Priority), columns.Priority) + taskTableGap +
-		taskTableCell(formatTaskDuration(row.Task.TimeEstimate), columns.Estimate) + taskTableGap +
-		taskTableCell(formatTaskDuration(row.Task.TimeTracked), columns.Tracked) + taskTableGap +
-		taskTableCell(formatTaskDueDate(row.Task.DueAt), columns.Due)
+func (m Model) taskTableHeaderLine(width int) string {
+	columns := m.taskTableColumns(width)
+	var line strings.Builder
+	for index, column := range columns {
+		if index > 0 {
+			line.WriteString(taskTableGap)
+		}
+		label := column.Label
+		cellWidth := column.Width
+		if column.ID == taskColumnTask {
+			label = "  TASK"
+			cellWidth += 2
+		}
+		line.WriteString(taskTableCell(label, cellWidth))
+	}
+	return line.String()
+}
+
+func (m Model) taskTableLine(row TaskRow, marker string, width int) string {
+	columns := m.taskTableColumns(width)
+	var line strings.Builder
+	line.WriteString(marker)
+	for index, column := range columns {
+		if index > 0 {
+			line.WriteString(taskTableGap)
+		}
+		line.WriteString(taskTableCell(m.taskTableColumnValue(row, column), column.Width))
+	}
+	return line.String()
+}
+
+func (m Model) taskTableColumnValue(row TaskRow, column taskTableColumn) string {
+	switch column.ID {
+	case taskColumnTask:
+		return "  " + strings.Repeat("  ", maxInt(row.HierarchyDepth, 0)) + taskTitle(row)
+	case taskColumnStatus:
+		return displayTaskStatus(row.Task.Status)
+	case taskColumnAssignees:
+		return taskAssigneeLabel(row)
+	case taskColumnPriority:
+		return displayTaskPriority(row.Task.Priority)
+	case taskColumnEstimate:
+		return formatTaskDuration(row.Task.TimeEstimate)
+	case taskColumnTracked:
+		return formatTaskDuration(row.Task.TimeTracked)
+	case taskColumnDue:
+		return formatTaskDueDate(row.Task.DueAt)
+	default:
+		if value := strings.TrimSpace(row.ColumnValues[column.ID]); value != "" {
+			return value
+		}
+		return "-"
+	}
 }
 
 func taskTableCell(value string, width int) string {
@@ -692,10 +869,6 @@ func formatTaskDueDate(value *time.Time) string {
 	return value.Format("2006-01-02")
 }
 
-func taskLineText(row TaskRow, marker string) string {
-	return taskTableLine(row, marker, taskTableLayoutFor(0))
-}
-
 func (m Model) maxHorizontalOffset(panel Panel) int {
 	width := m.horizontalPanelWidth(panel)
 	return maxInt(m.maxPanelLineWidth(panel)-width, 0)
@@ -743,7 +916,7 @@ func (m Model) maxPanelLineWidth(panel Panel) int {
 		maxWidth = maxInt(maxWidth, runeCount(m.taskGroupLine(group)))
 	}
 	for _, row := range flattenTaskGroups(groups) {
-		maxWidth = maxInt(maxWidth, runeCount(taskLineText(row, "  ")))
+		maxWidth = maxInt(maxWidth, runeCount(m.taskTableLine(row, "  ", 0)))
 	}
 	return maxWidth
 }

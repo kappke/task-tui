@@ -84,28 +84,40 @@ type wireListDetails struct {
 	Statuses         []wireStatus `json:"statuses"`
 }
 
+type customFieldsResponse struct {
+	Fields []wireCustomField `json:"fields"`
+}
+
+type wireCustomField struct {
+	ID    wireString      `json:"id"`
+	Name  string          `json:"name"`
+	Type  string          `json:"type"`
+	Value json.RawMessage `json:"value"`
+}
+
 type tasksResponse struct {
 	Tasks []wireTask `json:"tasks"`
 }
 
 type wireTask struct {
-	ID           wireString     `json:"id"`
-	Name         string         `json:"name"`
-	Description  string         `json:"description"`
-	Status       wireStatus     `json:"status"`
-	Priority     *wirePriority  `json:"priority"`
-	DueDate      *wireString    `json:"due_date"`
-	DateCreated  wireString     `json:"date_created"`
-	DateUpdated  wireString     `json:"date_updated"`
-	DateClosed   *wireString    `json:"date_closed"`
-	DateDone     *wireString    `json:"date_done"`
-	Parent       *wireString    `json:"parent"`
-	Assignees    []wireAssignee `json:"assignees"`
-	TimeEstimate *wireString    `json:"time_estimate"`
-	TimeSpent    *wireString    `json:"time_spent"`
-	List         wireList       `json:"list"`
-	Lists        []wireList     `json:"lists"`
-	Locations    []wireList     `json:"locations"`
+	ID           wireString        `json:"id"`
+	Name         string            `json:"name"`
+	Description  string            `json:"description"`
+	Status       wireStatus        `json:"status"`
+	Priority     *wirePriority     `json:"priority"`
+	DueDate      *wireString       `json:"due_date"`
+	DateCreated  wireString        `json:"date_created"`
+	DateUpdated  wireString        `json:"date_updated"`
+	DateClosed   *wireString       `json:"date_closed"`
+	DateDone     *wireString       `json:"date_done"`
+	Parent       *wireString       `json:"parent"`
+	Assignees    []wireAssignee    `json:"assignees"`
+	TimeEstimate *wireString       `json:"time_estimate"`
+	TimeSpent    *wireString       `json:"time_spent"`
+	List         wireList          `json:"list"`
+	Lists        []wireList        `json:"lists"`
+	Locations    []wireList        `json:"locations"`
+	CustomFields []wireCustomField `json:"custom_fields"`
 }
 
 type wireAssignee struct {

@@ -140,6 +140,10 @@ func (m Model) taskRows(aggregate bool) []TaskRow {
 	for _, list := range m.Data.Lists {
 		lists[scopedID{provider: list.ProviderID, id: string(list.ID)}] = list
 	}
+	columnValues := make(map[scopedID]map[string]string, len(m.Data.TaskColumnValues))
+	for _, values := range m.Data.TaskColumnValues {
+		columnValues[scopedID{provider: values.ProviderID, id: string(values.TaskID)}] = values.Values
+	}
 
 	rows := make([]TaskRow, 0, len(m.Data.Tasks))
 	for _, task := range m.Data.Tasks {
@@ -177,6 +181,7 @@ func (m Model) taskRows(aggregate bool) []TaskRow {
 			SpaceID:      list.SpaceID,
 			ListID:       listID,
 			ListNames:    listNames,
+			ColumnValues: columnValues[scopedID{provider: task.ProviderID, id: string(task.ID)}],
 			SearchResult: m.UI.SearchActive,
 		}
 		if listOK {
@@ -554,6 +559,9 @@ func containsTaskText(row TaskRow, query string) bool {
 		row.SpaceName,
 		row.ProviderName,
 		string(row.ProviderID),
+	}
+	for _, value := range row.ColumnValues {
+		values = append(values, value)
 	}
 	for _, term := range terms {
 		found := false

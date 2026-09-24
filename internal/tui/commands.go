@@ -36,6 +36,7 @@ const (
 	CommandSearch             CommandKind = "search_tasks"
 	CommandFilter             CommandKind = "filter_tasks"
 	CommandGroup              CommandKind = "group_tasks"
+	CommandConfigureColumns   CommandKind = "configure_columns"
 	CommandSwitchProvider     CommandKind = "switch_provider"
 	CommandRefresh            CommandKind = "refresh"
 	CommandQuit               CommandKind = "quit"
@@ -206,6 +207,8 @@ func ParseCommand(input string) (AppCommand, error) {
 			return AppCommand{}, err
 		}
 		command.GroupBy = mode
+	case "columns", "column":
+		command.Kind = CommandConfigureColumns
 	case "ungroup", "ungrouped":
 		command.Kind = CommandGroup
 		command.GroupBy = TaskGroupNone

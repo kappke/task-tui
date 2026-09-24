@@ -81,3 +81,10 @@ type StatusMetadataProvider interface {
 	SpaceStatusMetadata(domain.Space) []domain.ProviderMetadata
 	ListStatusMetadata(domain.List) []domain.ProviderMetadata
 }
+
+// TaskColumnMetadataProvider exposes provider-neutral dynamic column metadata
+// and display values without adding provider-specific fields to core entities.
+type TaskColumnMetadataProvider interface {
+	ListTaskColumns(domain.List) []domain.ProviderMetadata
+	TaskColumnValues(domain.Task) []domain.ProviderMetadata
+}

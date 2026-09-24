@@ -408,6 +408,23 @@ func (s *Store) ListMetadata(ctx context.Context, providerID domain.ProviderID, 
 	return result, nil
 }
 
+// ListMetadataForEntities loads metadata for a provider-scoped entity batch.
+func (s *Store) ListMetadataForEntities(ctx context.Context, providerID domain.ProviderID, entityType domain.EntityType, entityIDs []string) (map[string][]domain.ProviderMetadata, error) {
+	metadata, err := s.listMetadataForEntities(ctx, providerID.String(), EntityType(entityType), entityIDs)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string][]domain.ProviderMetadata, len(metadata))
+	for entityID, items := range metadata {
+		values := make([]domain.ProviderMetadata, 0, len(items))
+		for _, item := range items {
+			values = append(values, domainMetadata(item))
+		}
+		result[entityID] = values
+	}
+	return result, nil
+}
+
 func (s *Store) UpsertMetadata(ctx context.Context, metadata domain.ProviderMetadata) error {
 	return s.PutMetadata(ctx, metadata)
 }

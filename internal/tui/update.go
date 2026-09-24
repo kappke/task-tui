@@ -27,6 +27,9 @@ func (m Model) Update(msg Message) (Model, Cmd) {
 		} else {
 			updated.restoreListViewState(ListViewState{})
 		}
+	} else if hadPreviousList && !hasCurrentList {
+		updated.UI.ColumnPreferences = nil
+		updated.UI.ColumnCursor = 0
 	}
 	if hasCurrentList {
 		updated.rememberListView(currentList, updated.currentListViewState())
@@ -116,7 +119,7 @@ func (m Model) selectedListViewKey() (ListViewKey, bool) {
 }
 
 func (m Model) currentListViewState() ListViewState {
-	state := ListViewState{GroupBy: m.UI.GroupBy}
+	state := ListViewState{GroupBy: m.UI.GroupBy, Columns: cloneColumnPreferences(m.UI.ColumnPreferences)}
 	if m.UI.FilterActive {
 		state.Filter = m.UI.Filter.String()
 	}
@@ -124,18 +127,34 @@ func (m Model) currentListViewState() ListViewState {
 }
 
 func (m *Model) rememberListView(key ListViewKey, state ListViewState) {
-	if current, ok := m.UI.ListViews[key]; ok && current == state {
+	if current, ok := m.UI.ListViews[key]; ok && sameListViewState(current, state) {
 		return
 	}
 	views := make(map[ListViewKey]ListViewState, len(m.UI.ListViews)+1)
 	for currentKey, currentState := range m.UI.ListViews {
+		currentState.Columns = cloneColumnPreferences(currentState.Columns)
 		views[currentKey] = currentState
 	}
+	state.Columns = cloneColumnPreferences(state.Columns)
 	views[key] = state
 	m.UI.ListViews = views
 }
 
+func sameListViewState(left, right ListViewState) bool {
+	if left.Filter != right.Filter || left.GroupBy != right.GroupBy || len(left.Columns) != len(right.Columns) {
+		return false
+	}
+	for index := range left.Columns {
+		if left.Columns[index] != right.Columns[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func (m *Model) restoreListViewState(state ListViewState) {
+	m.UI.ColumnPreferences = cloneColumnPreferences(state.Columns)
+	m.UI.ColumnCursor = 0
 	m.UI.Filter = Filter{}
 	m.UI.FilterActive = false
 	if strings.TrimSpace(state.Filter) != "" {
@@ -537,6 +556,9 @@ func (m Model) updateKey(key KeyMsg) (Model, Cmd) {
 		m.Status = Status{Level: StatusInfo, Text: "Quit requested"}
 		return m, m.emit(AppCommand{Kind: CommandQuit})
 	}
+	if m.UI.Mode == ModeColumnConfig {
+		return m.updateColumnConfig(keyName)
+	}
 	if m.UI.Mode == ModeDetail {
 		return m.updateDetail(key)
 	}
@@ -639,6 +661,8 @@ func (m Model) updateBrowse(key KeyMsg, action Action) (Model, Cmd) {
 		m.beginSearch()
 	case ActionFilter:
 		m.beginFilter()
+	case ActionConfigureColumns:
+		m.beginColumnConfiguration()
 	case ActionRefresh:
 		return m, m.refreshFocusedPane()
 	case ActionCommand:
@@ -916,6 +940,84 @@ func (m *Model) refreshFocusedPane() Cmd {
 	}
 	m.Status = Status{Level: StatusInfo, Text: "Task refresh requested; cached data remains available"}
 	return m.emit(AppCommand{Kind: CommandFetchTasks, ProviderID: providerID, ListID: listID})
+}
+
+func (m *Model) beginColumnConfiguration() {
+	list, ok := m.selectedList()
+	if !ok {
+		m.Status = Status{Level: StatusWarning, Text: "Select a list before configuring columns"}
+		return
+	}
+	m.UI.Mode = ModeColumnConfig
+	m.UI.ColumnCursor = clamp(m.UI.ColumnCursor, 0, maxInt(len(m.availableTaskColumns())-1, 0))
+	m.Status = Status{Level: StatusInfo, Text: "Configure task columns for " + list.Name}
+}
+
+func (m Model) updateColumnConfig(key string) (Model, Cmd) {
+	columns := m.availableTaskColumns()
+	if len(columns) == 0 {
+		m.UI.Mode = ModeBrowse
+		return m, nil
+	}
+	m.UI.ColumnCursor = clamp(m.UI.ColumnCursor, 0, len(columns)-1)
+	column := columns[m.UI.ColumnCursor]
+	switch key {
+	case "j", "down":
+		m.UI.ColumnCursor = clamp(m.UI.ColumnCursor+1, 0, len(columns)-1)
+	case "k", "up":
+		m.UI.ColumnCursor = clamp(m.UI.ColumnCursor-1, 0, len(columns)-1)
+	case "space":
+		if column.ID == taskColumnTask {
+			m.Status = Status{Level: StatusWarning, Text: "The task title column is required"}
+			return m, nil
+		}
+		preference, configured := m.taskColumnPreference(column.ID)
+		if !configured {
+			preference = TaskColumnPreference{ID: column.ID, Visible: true, Width: column.Width}
+		}
+		preference.Visible = !preference.Visible
+		m.setTaskColumnPreference(preference)
+		state := "Hidden"
+		if preference.Visible {
+			state = "Shown"
+		}
+		list, _ := m.selectedList()
+		m.Status = Status{Level: StatusSuccess, Text: fmt.Sprintf("%s %s for %s", state, column.Label, list.Name)}
+	case "+", "=", "right", "l":
+		m.resizeTaskColumn(column, 1)
+	case "-", "left", "h":
+		m.resizeTaskColumn(column, -1)
+	case "enter", "esc", "escape", "q":
+		m.UI.Mode = ModeBrowse
+		m.Status = Status{Level: StatusInfo, Text: "Column configuration closed"}
+	}
+	return m, nil
+}
+
+func (m *Model) resizeTaskColumn(column taskTableColumn, delta int) {
+	preference, configured := m.taskColumnPreference(column.ID)
+	if !configured {
+		preference = TaskColumnPreference{ID: column.ID, Visible: true, Width: column.Width}
+	}
+	if preference.Width <= 0 {
+		preference.Width = column.Width
+	}
+	preference.Width = clamp(preference.Width+delta, 1, 120)
+	preference.Visible = true
+	m.setTaskColumnPreference(preference)
+	m.Status = Status{Level: StatusInfo, Text: fmt.Sprintf("%s width: %d", column.Label, preference.Width)}
+}
+
+func (m *Model) setTaskColumnPreference(preference TaskColumnPreference) {
+	preferences := cloneColumnPreferences(m.UI.ColumnPreferences)
+	for index := range preferences {
+		if preferences[index].ID == preference.ID {
+			preferences[index] = preference
+			m.UI.ColumnPreferences = preferences
+			return
+		}
+	}
+	m.UI.ColumnPreferences = append(preferences, preference)
 }
 
 func (m *Model) selectCurrent() Cmd {
@@ -1234,7 +1336,7 @@ func (m *Model) beginCommand() {
 	m.UI.InputCursor = 0
 	m.UI.InputOrigin = ""
 	m.resetCommandCompletion()
-	m.Status = Status{Level: StatusInfo, Text: "Command palette: create, edit, complete, delete, search, filter, group, refresh"}
+	m.Status = Status{Level: StatusInfo, Text: "Commands: create, edit, complete, delete, search, filter, group, columns, refresh"}
 }
 
 func (m Model) updateInput(key KeyMsg) (Model, Cmd) {
@@ -1496,6 +1598,10 @@ func (m Model) submitPalette() (Model, Cmd) {
 		return m.applyFilter(command.Filter, command)
 	case CommandGroup:
 		return m.applyGrouping(command.GroupBy, command)
+	case CommandConfigureColumns:
+		m.UI.Mode = ModeBrowse
+		m.beginColumnConfiguration()
+		return m, nil
 	case CommandCreateTask:
 		if command.Title == "" {
 			m.UI.Mode = modeForCreation(command.Kind)
@@ -1539,7 +1645,7 @@ func (m Model) submitPalette() (Model, Cmd) {
 	case CommandHelp:
 		m.UI.Mode = ModeBrowse
 		m.UI.Input = ""
-		m.Status = Status{Level: StatusInfo, Text: "Keys: j/k move, tab switch panel, h/l scroll, enter open, n/e/x/d, / search, f filter, r refresh; :task move/add-list/remove-list <list-id>"}
+		m.Status = Status{Level: StatusInfo, Text: "Keys: j/k move, tab switch panel, h/l scroll, enter open, n/e/x/d, / search, f filter, c columns, r refresh; :task move/add-list/remove-list <list-id>"}
 		return m, nil
 	default:
 		m.Status = Status{Level: StatusError, Text: "Unsupported command"}

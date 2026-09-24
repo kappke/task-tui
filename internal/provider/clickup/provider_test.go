@@ -224,6 +224,72 @@ func TestProviderResolvesLocalSpaceIDBeforeFetchingLists(t *testing.T) {
 	}
 }
 
+func TestProviderMapsPerListTaskColumnsAndCustomValues(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/space/remote-space/list":
+			_, _ = io.WriteString(w, `{"lists":[{"id":"remote-list","name":"Roadmap"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/space/remote-space/folder":
+			_, _ = io.WriteString(w, `{"folders":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/list/remote-list":
+			_, _ = io.WriteString(w, `{"id":"remote-list","statuses":[]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/list/remote-list/field":
+			_, _ = io.WriteString(w, `{"fields":[{"id":"field-cost","name":"Cost","type":"currency"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/list/remote-list/task":
+			if r.URL.Query().Get("page") == "0" {
+				_, _ = io.WriteString(w, `{"tasks":[{"id":"remote-task","name":"Ship feature","list":{"id":"remote-list"},"custom_fields":[{"id":"field-cost","name":"Cost","type":"currency","value":45.5},{"id":"field-owner","name":"Owner","type":"users","value":[{"id":1,"username":"sam"}]}]}]}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"tasks":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	var localListID domain.ListID
+	provider := New(NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
+		ProviderID:          "clickup-work",
+		RemoteSpaceResolver: func(domain.SpaceID) (string, error) { return "remote-space", nil },
+		RemoteListResolver:  func(domain.ListID) (string, error) { return "remote-list", nil },
+		LocalListResolver: func(string) (domain.ListID, error) {
+			return localListID, nil
+		},
+	})
+	lists, err := provider.FetchLists(context.Background(), "local-space")
+	if err != nil || len(lists) != 1 {
+		t.Fatalf("FetchLists() = %#v, %v", lists, err)
+	}
+	localListID = lists[0].ID
+	var columns []domain.TaskColumn
+	for _, metadata := range provider.ListTaskColumns(lists[0]) {
+		if metadata.Key == domain.MetadataKeyTaskColumns {
+			if err := json.Unmarshal([]byte(metadata.Value), &columns); err != nil {
+				t.Fatalf("decode mapped columns: %v", err)
+			}
+		}
+	}
+	if len(columns) != 1 || columns[0].ID != "custom:field-cost" || columns[0].Name != "Cost" || columns[0].Type != "currency" {
+		t.Fatalf("mapped columns = %#v", columns)
+	}
+
+	tasks, err := provider.FetchTasks(context.Background(), localListID)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("FetchTasks() = %#v, %v", tasks, err)
+	}
+	var values domain.TaskColumnValues
+	for _, metadata := range provider.TaskColumnValues(tasks[0]) {
+		if metadata.Key == domain.MetadataKeyTaskColumnValues {
+			if err := json.Unmarshal([]byte(metadata.Value), &values); err != nil {
+				t.Fatalf("decode mapped custom values: %v", err)
+			}
+		}
+	}
+	if values["custom:field-cost"] != "45.5" || values["custom:field-owner"] != "sam" {
+		t.Fatalf("mapped custom values = %#v", values)
+	}
+}
+
 func TestProviderFetchTaskUsesRemoteTaskCallAndLocalListIdentity(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/task/remote-task" {

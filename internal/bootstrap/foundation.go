@@ -106,7 +106,94 @@ func (s *foundationDataStore) snapshotWithTaskScope(ctx context.Context, provide
 		return View{}, err
 	}
 	view.EditorOptions = options
+	view.TaskColumns, err = s.taskColumns(ctx, providers, lists)
+	if err != nil {
+		return View{}, err
+	}
+	view.TaskColumnValues, err = s.taskColumnValues(ctx, providers, tasks)
+	if err != nil {
+		return View{}, err
+	}
 	return view, nil
+}
+
+func (s *foundationDataStore) taskColumns(ctx context.Context, providers []domain.Provider, lists []domain.List) ([]TaskColumn, error) {
+	columns := make([]TaskColumn, 0)
+	for _, provider := range providers {
+		listIDs := make([]string, 0)
+		for _, list := range lists {
+			if list.ProviderID == provider.ID {
+				listIDs = append(listIDs, string(list.ID))
+			}
+		}
+		metadataByList, err := s.store.ListMetadataForEntities(ctx, provider.ID, domain.EntityTypeList, listIDs)
+		if err != nil {
+			return nil, fmt.Errorf("list task columns for provider %s: %w", provider.ID, err)
+		}
+		for _, list := range lists {
+			if list.ProviderID != provider.ID {
+				continue
+			}
+			for _, item := range metadataByList[string(list.ID)] {
+				if item.Key != domain.MetadataKeyTaskColumns {
+					continue
+				}
+				var definitions []domain.TaskColumn
+				if err := json.Unmarshal([]byte(item.Value), &definitions); err != nil {
+					return nil, fmt.Errorf("decode task columns for list %s: %w", list.ID, err)
+				}
+				for _, definition := range definitions {
+					if strings.TrimSpace(definition.ID) == "" || strings.TrimSpace(definition.Name) == "" {
+						continue
+					}
+					columns = append(columns, TaskColumn{
+						ProviderID: ProviderID(provider.ID),
+						ListID:     ListID(list.ID),
+						ID:         definition.ID,
+						Name:       definition.Name,
+						Type:       definition.Type,
+					})
+				}
+			}
+		}
+	}
+	return columns, nil
+}
+
+func (s *foundationDataStore) taskColumnValues(ctx context.Context, providers []domain.Provider, tasks []domain.Task) ([]TaskColumnValueSet, error) {
+	values := make([]TaskColumnValueSet, 0)
+	for _, provider := range providers {
+		taskIDs := make([]string, 0)
+		for _, task := range tasks {
+			if task.ProviderID == provider.ID {
+				taskIDs = append(taskIDs, string(task.ID))
+			}
+		}
+		metadataByTask, err := s.store.ListMetadataForEntities(ctx, provider.ID, domain.EntityTypeTask, taskIDs)
+		if err != nil {
+			return nil, fmt.Errorf("list task column values for provider %s: %w", provider.ID, err)
+		}
+		for _, task := range tasks {
+			if task.ProviderID != provider.ID {
+				continue
+			}
+			for _, item := range metadataByTask[string(task.ID)] {
+				if item.Key != domain.MetadataKeyTaskColumnValues {
+					continue
+				}
+				var taskValues domain.TaskColumnValues
+				if err := json.Unmarshal([]byte(item.Value), &taskValues); err != nil {
+					return nil, fmt.Errorf("decode task column values for task %s: %w", task.ID, err)
+				}
+				values = append(values, TaskColumnValueSet{
+					ProviderID: ProviderID(provider.ID),
+					TaskID:     TaskID(task.ID),
+					Values:     taskValues,
+				})
+			}
+		}
+	}
+	return values, nil
 }
 
 func (s *foundationDataStore) editorOptions(ctx context.Context, spaces []domain.Space, lists []domain.List) ([]TaskEditorOptions, error) {
@@ -659,6 +746,13 @@ func (p *cachedProvider) pullListsForSpace(ctx context.Context, space domain.Spa
 				}
 			}
 		}
+		if metadata, ok := p.Provider.(providerpkg.TaskColumnMetadataProvider); ok && !conflict {
+			for _, item := range metadata.ListTaskColumns(stored) {
+				if err := p.store.UpsertMetadata(ctx, item); err != nil {
+					return nil, nil, fmt.Errorf("store task columns for list %s: %w", stored.ID, err)
+				}
+			}
+		}
 	}
 	return storedLists, seen, nil
 }
@@ -676,6 +770,13 @@ func (p *cachedProvider) pullTasksForList(ctx context.Context, list domain.List)
 	tasks, err := p.Provider.FetchTasks(ctx, list.ID)
 	if err != nil {
 		return fmt.Errorf("fetch tasks for list %s: %w", list.ID, err)
+	}
+	if metadata, ok := p.Provider.(providerpkg.TaskColumnMetadataProvider); ok {
+		for _, item := range metadata.ListTaskColumns(list) {
+			if err := p.store.UpsertMetadata(ctx, item); err != nil {
+				return fmt.Errorf("store task columns for list %s: %w", list.ID, err)
+			}
+		}
 	}
 	seenTasks := make(map[string]struct{}, len(tasks))
 	if err := p.reconcileTasks(ctx, list.ID, tasks, seenTasks); err != nil {
@@ -696,8 +797,16 @@ func (p *cachedProvider) pullTask(ctx context.Context, requestedTaskID domain.Ta
 	if remote.ID != task.ID || remote.ProviderID != p.ID() || remote.ListID != task.ListID {
 		return fmt.Errorf("%w: fetched task %s has invalid identity or parent", domain.ErrProviderMismatch, task.ID)
 	}
-	if _, _, err := p.reconcileTask(ctx, remote); err != nil {
+	stored, conflict, err := p.reconcileTask(ctx, remote)
+	if err != nil {
 		return fmt.Errorf("store task %s: %w", task.ID, err)
+	}
+	if metadata, ok := p.Provider.(providerpkg.TaskColumnMetadataProvider); ok && !conflict {
+		for _, item := range metadata.TaskColumnValues(stored) {
+			if err := p.store.UpsertMetadata(ctx, item); err != nil {
+				return fmt.Errorf("store task column values for task %s: %w", stored.ID, err)
+			}
+		}
 	}
 	return nil
 }
@@ -788,9 +897,16 @@ func (p *cachedProvider) reconcileTasks(ctx context.Context, listID domain.ListI
 					continue
 				}
 			}
-			_, _, err := p.reconcileTask(ctx, task)
+			stored, conflict, err := p.reconcileTask(ctx, task)
 			if err != nil {
 				return fmt.Errorf("store task %s: %w", task.ID, err)
+			}
+			if metadata, ok := p.Provider.(providerpkg.TaskColumnMetadataProvider); ok && !conflict {
+				for _, item := range metadata.TaskColumnValues(stored) {
+					if err := p.store.UpsertMetadata(ctx, item); err != nil {
+						return fmt.Errorf("store task column values for task %s: %w", stored.ID, err)
+					}
+				}
 			}
 			if task.RemoteID != nil {
 				seen[*task.RemoteID] = struct{}{}
@@ -1730,6 +1846,7 @@ func (u *foundationUIController) SetState(state UIState) {
 		}] = foundationtui.ListViewState{
 			Filter:  view.Filter,
 			GroupBy: foundationtui.TaskGroupMode(view.GroupBy),
+			Columns: foundationTaskColumnPreferences(view.Columns),
 		}
 	}
 	if state.ProviderID != "" && state.ListID != "" {
@@ -1751,12 +1868,16 @@ func (u *foundationUIController) SetState(state UIState) {
 		if view, exists := u.model.UI.ListViews[key]; exists {
 			state.Filter = view.Filter
 			state.GroupBy = string(view.GroupBy)
+			u.model.UI.ColumnPreferences = append([]foundationtui.TaskColumnPreference(nil), view.Columns...)
 		} else {
 			u.model.UI.ListViews[key] = foundationtui.ListViewState{
 				Filter:  state.Filter,
 				GroupBy: foundationtui.TaskGroupMode(state.GroupBy),
 			}
+			u.model.UI.ColumnPreferences = nil
 		}
+	} else {
+		u.model.UI.ColumnPreferences = nil
 	}
 	u.model.UI.Filter = foundationtui.Filter{}
 	u.model.UI.FilterActive = false
@@ -1929,7 +2050,10 @@ func (u *foundationUIController) State() UIState {
 		listViews[key] = view
 	}
 	if key, ok := foundationListViewKey(state); ok {
-		view := foundationtui.ListViewState{GroupBy: model.UI.GroupBy}
+		view := foundationtui.ListViewState{
+			GroupBy: model.UI.GroupBy,
+			Columns: append([]foundationtui.TaskColumnPreference(nil), model.UI.ColumnPreferences...),
+		}
 		if model.UI.FilterActive {
 			view.Filter = model.UI.Filter.String()
 		}
@@ -1942,6 +2066,7 @@ func (u *foundationUIController) State() UIState {
 			ListID:     string(key.ListID),
 			Filter:     view.Filter,
 			GroupBy:    string(view.GroupBy),
+			Columns:    bootstrapTaskColumnPreferences(view.Columns),
 		})
 	}
 	sort.Slice(state.ListViews, func(i, j int) bool {
@@ -1951,6 +2076,28 @@ func (u *foundationUIController) State() UIState {
 		return state.ListViews[i].ListID < state.ListViews[j].ListID
 	})
 	return state
+}
+
+func foundationTaskColumnPreferences(values []TaskColumnPreference) []foundationtui.TaskColumnPreference {
+	result := make([]foundationtui.TaskColumnPreference, 0, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value.ID) == "" {
+			continue
+		}
+		result = append(result, foundationtui.TaskColumnPreference{ID: value.ID, Visible: value.Visible, Width: value.Width})
+	}
+	return result
+}
+
+func bootstrapTaskColumnPreferences(values []foundationtui.TaskColumnPreference) []TaskColumnPreference {
+	result := make([]TaskColumnPreference, 0, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value.ID) == "" {
+			continue
+		}
+		result = append(result, TaskColumnPreference{ID: value.ID, Visible: value.Visible, Width: value.Width})
+	}
+	return result
 }
 
 func (u *foundationUIController) StopAccepting() {
@@ -2508,6 +2655,26 @@ func foundationSnapshot(view View) foundationtui.Snapshot {
 			SpaceID:    foundationtui.SpaceID(option.SpaceID),
 			ListID:     foundationtui.ListID(option.ListID),
 			Statuses:   append([]string(nil), option.Statuses...),
+		})
+	}
+	for _, column := range view.TaskColumns {
+		snapshot.TaskColumns = append(snapshot.TaskColumns, foundationtui.ListTaskColumn{
+			ProviderID: foundationtui.ProviderID(column.ProviderID),
+			ListID:     foundationtui.ListID(column.ListID),
+			ID:         column.ID,
+			Name:       column.Name,
+			Type:       column.Type,
+		})
+	}
+	for _, values := range view.TaskColumnValues {
+		cloned := make(map[string]string, len(values.Values))
+		for id, value := range values.Values {
+			cloned[id] = value
+		}
+		snapshot.TaskColumnValues = append(snapshot.TaskColumnValues, foundationtui.TaskColumnValueSet{
+			ProviderID: foundationtui.ProviderID(values.ProviderID),
+			TaskID:     foundationtui.TaskID(values.TaskID),
+			Values:     cloned,
 		})
 	}
 	return snapshot

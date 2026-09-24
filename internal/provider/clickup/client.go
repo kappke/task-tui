@@ -482,6 +482,21 @@ func (c *Client) GetListDetails(ctx context.Context, listID string) (wireListDet
 	return response, nil
 }
 
+// GetListFields fetches the custom fields available to tasks in a list.
+func (c *Client) GetListFields(ctx context.Context, listID string) ([]wireCustomField, error) {
+	var response customFieldsResponse
+	path := "/list/" + url.PathEscape(listID) + "/field"
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return nil, err
+	}
+	for _, field := range response.Fields {
+		if strings.TrimSpace(field.ID.String()) == "" {
+			return nil, c.malformedResponse(http.MethodGet, path, "custom field ID is missing")
+		}
+	}
+	return response.Fields, nil
+}
+
 func (c *Client) Task(ctx context.Context, taskID string) (wireTask, error) {
 	return c.GetTask(ctx, taskID)
 }

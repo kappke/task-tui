@@ -55,11 +55,36 @@ const (
 // Snapshot is the cached, normalized data supplied by the application layer.
 // The TUI treats it as input state and never performs persistence itself.
 type Snapshot struct {
-	Providers     []Provider
-	Spaces        []Space
-	Lists         []List
-	Tasks         []Task
-	EditorOptions []TaskEditorOptions
+	Providers        []Provider
+	Spaces           []Space
+	Lists            []List
+	Tasks            []Task
+	EditorOptions    []TaskEditorOptions
+	TaskColumns      []ListTaskColumn
+	TaskColumnValues []TaskColumnValueSet
+}
+
+// ListTaskColumn describes a provider-neutral dynamic column available in one list.
+type ListTaskColumn struct {
+	ProviderID ProviderID
+	ListID     ListID
+	ID         string
+	Name       string
+	Type       string
+}
+
+// TaskColumnValueSet contains display-ready dynamic values for one task.
+type TaskColumnValueSet struct {
+	ProviderID ProviderID
+	TaskID     TaskID
+	Values     map[string]string
+}
+
+// TaskColumnPreference stores a visibility or width override for one column.
+type TaskColumnPreference struct {
+	ID      string
+	Visible bool
+	Width   int
 }
 
 // TaskEditorOptions contains cached values used by the external editor's
@@ -125,6 +150,7 @@ type TaskRow struct {
 	ListID         ListID
 	ListName       string
 	ListNames      []string
+	ColumnValues   map[string]string
 	SearchResult   bool
 	HierarchyDepth int
 }
@@ -174,6 +200,7 @@ type ListViewKey struct {
 type ListViewState struct {
 	Filter  string
 	GroupBy TaskGroupMode
+	Columns []TaskColumnPreference
 }
 
 // Panel is the focused navigation area.
@@ -188,16 +215,17 @@ const (
 type Mode string
 
 const (
-	ModeBrowse      Mode = "browse"
-	ModeDetail      Mode = "detail"
-	ModeSearch      Mode = "search"
-	ModeFilter      Mode = "filter"
-	ModeCommand     Mode = "command"
-	ModeCreateSpace Mode = "create_space"
-	ModeCreateList  Mode = "create_list"
-	ModeCreateTask  Mode = "create_task"
-	ModeEditTask    Mode = "edit_task"
-	ModeConfirm     Mode = "confirm"
+	ModeBrowse       Mode = "browse"
+	ModeDetail       Mode = "detail"
+	ModeColumnConfig Mode = "column_config"
+	ModeSearch       Mode = "search"
+	ModeFilter       Mode = "filter"
+	ModeCommand      Mode = "command"
+	ModeCreateSpace  Mode = "create_space"
+	ModeCreateList   Mode = "create_list"
+	ModeCreateTask   Mode = "create_task"
+	ModeEditTask     Mode = "edit_task"
+	ModeConfirm      Mode = "confirm"
 )
 
 // EditField identifies the editable fields shown by the task detail editor.
@@ -233,6 +261,8 @@ type UIState struct {
 	Filter                  Filter
 	GroupBy                 TaskGroupMode
 	ListViews               map[ListViewKey]ListViewState
+	ColumnPreferences       []TaskColumnPreference
+	ColumnCursor            int
 	CollapsedGroups         map[string]bool
 	FocusedGroup            string
 	TaskGroupCursor         int
@@ -352,6 +382,11 @@ func cloneSnapshot(in Snapshot) Snapshot {
 	out.Lists = append([]List(nil), in.Lists...)
 	out.Tasks = append([]Task(nil), in.Tasks...)
 	out.EditorOptions = append([]TaskEditorOptions(nil), in.EditorOptions...)
+	out.TaskColumns = append([]ListTaskColumn(nil), in.TaskColumns...)
+	out.TaskColumnValues = append([]TaskColumnValueSet(nil), in.TaskColumnValues...)
+	for index := range out.TaskColumnValues {
+		out.TaskColumnValues[index].Values = cloneColumnValues(in.TaskColumnValues[index].Values)
+	}
 	for index := range out.EditorOptions {
 		out.EditorOptions[index].Statuses = append([]string(nil), in.EditorOptions[index].Statuses...)
 	}
@@ -373,6 +408,21 @@ func cloneSnapshot(in Snapshot) Snapshot {
 		out.Tasks[i] = cloneTask(in.Tasks[i])
 	}
 	return out
+}
+
+func cloneColumnValues(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(values))
+	for id, value := range values {
+		cloned[id] = value
+	}
+	return cloned
+}
+
+func cloneColumnPreferences(values []TaskColumnPreference) []TaskColumnPreference {
+	return append([]TaskColumnPreference(nil), values...)
 }
 
 func cloneRawMessage(value json.RawMessage) json.RawMessage {

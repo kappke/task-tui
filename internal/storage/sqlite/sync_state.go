@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -71,6 +72,62 @@ func (s *Store) listMetadata(ctx context.Context, providerID string, entityType 
 		return nil, fmt.Errorf("sqlite: list metadata: %w", err)
 	}
 	return items, nil
+}
+
+func (s *Store) listMetadataForEntities(ctx context.Context, providerID string, entityType EntityType, entityIDs []string) (map[string][]Metadata, error) {
+	result := make(map[string][]Metadata, len(entityIDs))
+	uniqueIDs := make([]string, 0, len(entityIDs))
+	seen := make(map[string]struct{}, len(entityIDs))
+	for _, id := range entityIDs {
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniqueIDs = append(uniqueIDs, id)
+	}
+	const batchSize = 500
+	for start := 0; start < len(uniqueIDs); start += batchSize {
+		end := min(start+batchSize, len(uniqueIDs))
+		batch := uniqueIDs[start:end]
+		var query strings.Builder
+		query.WriteString(`SELECT provider_id, entity_type, entity_id, key, value, created_at, updated_at
+			FROM provider_metadata WHERE provider_id = ? AND entity_type = ? AND entity_id IN (`)
+		for index := range batch {
+			if index > 0 {
+				query.WriteByte(',')
+			}
+			query.WriteByte('?')
+		}
+		query.WriteString(") ORDER BY entity_id, key")
+		args := make([]any, 0, len(batch)+2)
+		args = append(args, providerID, entityType)
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		rows, err := s.db.QueryContext(ctx, query.String(), args...)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: list metadata for entities: %w", err)
+		}
+		for rows.Next() {
+			item, scanErr := scanMetadata(rows)
+			if scanErr != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("sqlite: scan metadata for entities: %w", scanErr)
+			}
+			result[item.EntityID] = append(result[item.EntityID], item)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("sqlite: list metadata for entities: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("sqlite: close metadata rows: %w", err)
+		}
+	}
+	return result, nil
 }
 
 func (s *Store) deleteMetadata(ctx context.Context, providerID string, entityType EntityType, entityID, key string) error {

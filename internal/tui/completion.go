@@ -19,6 +19,7 @@ var commandNames = []string{
 	"task",
 	"space",
 	"list",
+	"columns",
 	"quit",
 	"help",
 }

@@ -170,21 +170,47 @@ type UIState struct {
 
 // ListViewState persists task filter and grouping preferences for one list.
 type ListViewState struct {
-	ProviderID string `json:"provider_id"`
-	ListID     string `json:"list_id"`
-	Filter     string `json:"filter,omitempty"`
-	GroupBy    string `json:"group_by,omitempty"`
+	ProviderID string                 `json:"provider_id"`
+	ListID     string                 `json:"list_id"`
+	Filter     string                 `json:"filter,omitempty"`
+	GroupBy    string                 `json:"group_by,omitempty"`
+	Columns    []TaskColumnPreference `json:"columns,omitempty"`
+}
+
+// TaskColumnPreference stores visibility and width overrides for one list.
+type TaskColumnPreference struct {
+	ID      string `json:"id"`
+	Visible bool   `json:"visible"`
+	Width   int    `json:"width,omitempty"`
 }
 
 // View is the local snapshot supplied to the TUI. It is intentionally a
 // snapshot so rendering does not perform I/O or synchronize providers.
 type View struct {
-	Providers     []ProviderRecord
-	Spaces        []Space
-	Lists         []List
-	Tasks         []Task
-	EditorOptions []TaskEditorOptions
-	SyncErrors    map[ProviderID]string
+	Providers        []ProviderRecord
+	Spaces           []Space
+	Lists            []List
+	Tasks            []Task
+	EditorOptions    []TaskEditorOptions
+	TaskColumns      []TaskColumn
+	TaskColumnValues []TaskColumnValueSet
+	SyncErrors       map[ProviderID]string
+}
+
+// TaskColumn is a provider-neutral dynamic column attached to one list.
+type TaskColumn struct {
+	ProviderID ProviderID
+	ListID     ListID
+	ID         string
+	Name       string
+	Type       string
+}
+
+// TaskColumnValueSet holds display-ready dynamic values for one task.
+type TaskColumnValueSet struct {
+	ProviderID ProviderID
+	TaskID     TaskID
+	Values     map[string]string
 }
 
 // TaskEditorOptions contains provider-owned completion values for one list.

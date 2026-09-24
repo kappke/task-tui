@@ -8,32 +8,33 @@ import "strings"
 type Action string
 
 const (
-	ActionNone          Action = "none"
-	ActionMoveUp        Action = "move_up"
-	ActionMoveDown      Action = "move_down"
-	ActionPreviousPanel Action = "previous_panel"
-	ActionNextPanel     Action = "next_panel"
-	ActionScrollLeft    Action = "scroll_left"
-	ActionScrollRight   Action = "scroll_right"
-	ActionSelect        Action = "select"
-	ActionExpandAll     Action = "expand_all"
-	ActionCollapseAll   Action = "collapse_all"
-	ActionToggleGroup   Action = "toggle_group"
-	ActionFirst         Action = "first"
-	ActionLast          Action = "last"
-	ActionQuit          Action = "quit"
-	ActionCreate        Action = "create"
-	ActionEdit          Action = "edit"
-	ActionComplete      Action = "complete"
-	ActionDelete        Action = "delete"
-	ActionSearch        Action = "search"
-	ActionFilter        Action = "filter"
-	ActionRefresh       Action = "refresh"
-	ActionCommand       Action = "command"
-	ActionCancel        Action = "cancel"
-	ActionBackspace     Action = "backspace"
-	ActionCursorLeft    Action = "cursor_left"
-	ActionCursorRight   Action = "cursor_right"
+	ActionNone             Action = "none"
+	ActionMoveUp           Action = "move_up"
+	ActionMoveDown         Action = "move_down"
+	ActionPreviousPanel    Action = "previous_panel"
+	ActionNextPanel        Action = "next_panel"
+	ActionScrollLeft       Action = "scroll_left"
+	ActionScrollRight      Action = "scroll_right"
+	ActionSelect           Action = "select"
+	ActionExpandAll        Action = "expand_all"
+	ActionCollapseAll      Action = "collapse_all"
+	ActionToggleGroup      Action = "toggle_group"
+	ActionFirst            Action = "first"
+	ActionLast             Action = "last"
+	ActionQuit             Action = "quit"
+	ActionCreate           Action = "create"
+	ActionEdit             Action = "edit"
+	ActionComplete         Action = "complete"
+	ActionDelete           Action = "delete"
+	ActionSearch           Action = "search"
+	ActionFilter           Action = "filter"
+	ActionConfigureColumns Action = "configure_columns"
+	ActionRefresh          Action = "refresh"
+	ActionCommand          Action = "command"
+	ActionCancel           Action = "cancel"
+	ActionBackspace        Action = "backspace"
+	ActionCursorLeft       Action = "cursor_left"
+	ActionCursorRight      Action = "cursor_right"
 )
 
 // KeyMap maps normalized key names to semantic actions. Key names use the
@@ -71,6 +72,7 @@ func DefaultKeyMap() KeyMap {
 		"d":           ActionDelete,
 		"/":           ActionSearch,
 		"f":           ActionFilter,
+		"c":           ActionConfigureColumns,
 		"r":           ActionRefresh,
 		":":           ActionCommand,
 		"esc":         ActionCancel,

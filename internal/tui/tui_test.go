@@ -39,6 +39,7 @@ func TestDefaultKeyMap(t *testing.T) {
 		{key: "d", action: ActionDelete},
 		{key: "/", action: ActionSearch},
 		{key: "f", action: ActionFilter},
+		{key: "c", action: ActionConfigureColumns},
 		{key: "r", action: ActionRefresh},
 		{key: ":", action: ActionCommand},
 		{key: "q", action: ActionQuit},
@@ -147,6 +148,82 @@ func TestListViewFilterAndGroupingAreRememberedPerList(t *testing.T) {
 	model, _ = model.Update(KeyMsg{Key: "enter"})
 	if model.UI.SelectedNode.ListID != "today" || !model.UI.FilterActive || model.UI.Filter.String() != "priority:high" || model.UI.GroupBy != TaskGroupPriority {
 		t.Fatalf("restored personal list view: list=%q filter=%q active=%v group=%q", model.UI.SelectedNode.ListID, model.UI.Filter.String(), model.UI.FilterActive, model.UI.GroupBy)
+	}
+}
+
+func TestTaskColumnsAreDiscoveredDisplayedAndConfiguredPerList(t *testing.T) {
+	snapshot := testSnapshot()
+	snapshot.TaskColumns = []ListTaskColumn{
+		{ProviderID: "work", ListID: "backend", ID: "custom:roi", Name: "ROI", Type: "number"},
+	}
+	snapshot.TaskColumnValues = []TaskColumnValueSet{
+		{ProviderID: "work", TaskID: "same", Values: map[string]string{"custom:roi": "13"}},
+	}
+	model := New(snapshot)
+	header := model.taskTableHeaderLine(0)
+	if !strings.Contains(header, "ROI") {
+		t.Fatalf("discovered list column missing from header: %q", header)
+	}
+	rows := model.VisibleTasks()
+	if len(rows) == 0 || !strings.Contains(model.taskTableLine(rows[0], "  ", 0), "13") {
+		t.Fatalf("task column value was not displayed: %#v", rows)
+	}
+
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "columns")
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+	if model.UI.Mode != ModeColumnConfig {
+		t.Fatalf("columns command mode = %q, want column configuration", model.UI.Mode)
+	}
+	model, _ = model.Update(KeyMsg{Key: "j"})
+	model, _ = model.Update(KeyMsg{Key: "space"})
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+	if strings.Contains(model.taskTableHeaderLine(0), "STATUS") {
+		t.Fatalf("hidden status column remains visible: %q", model.taskTableHeaderLine(0))
+	}
+
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "provider personal")
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+	if !strings.Contains(model.taskTableHeaderLine(0), "STATUS") || strings.Contains(model.taskTableHeaderLine(0), "ROI") {
+		t.Fatalf("personal list inherited work columns: %q", model.taskTableHeaderLine(0))
+	}
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "provider work")
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+	if strings.Contains(model.taskTableHeaderLine(0), "STATUS") || !strings.Contains(model.taskTableHeaderLine(0), "ROI") {
+		t.Fatalf("work list preferences were not restored: %q", model.taskTableHeaderLine(0))
+	}
+
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "columns")
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+	for range 7 {
+		model, _ = model.Update(KeyMsg{Key: "j"})
+	}
+	model, _ = model.Update(KeyMsg{Key: "+"})
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+	preference, ok := model.taskColumnPreference("custom:roi")
+	if !ok || preference.Width != 13 {
+		t.Fatalf("custom column preference = %#v, exists=%v; want width 13", preference, ok)
+	}
+	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "columns")
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+	for range 20 {
+		model, _ = model.Update(KeyMsg{Key: "-"})
+	}
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+	preference, ok = model.taskColumnPreference("custom:roi")
+	columns := model.taskTableColumns(0)
+	columnWidth := 0
+	for _, column := range columns {
+		if column.ID == "custom:roi" {
+			columnWidth = column.Width
+		}
+	}
+	if !ok || preference.Width != 1 || columnWidth != 1 {
+		t.Fatalf("minimum custom column width = %#v, exists=%v, visible columns=%#v, list=%#v; want 1", preference, ok, columns, model.UI.SelectedNode)
 	}
 }
 

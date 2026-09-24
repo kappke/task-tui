@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kappke/task-tui/internal/domain"
@@ -65,6 +67,14 @@ type Provider struct {
 	remoteSpaceResolver any
 	spaceStatuses       map[string][]wireStatus
 	listStatuses        map[string]listStatusMetadata
+	columnMetadataMu    sync.RWMutex
+	listTaskColumns     map[string]listTaskColumns
+	taskColumnValues    map[string]domain.TaskColumnValues
+}
+
+type listTaskColumns struct {
+	columns []domain.TaskColumn
+	loaded  bool
 }
 
 type listStatusMetadata struct {
@@ -199,10 +209,13 @@ func newProvider(config ProviderConfig) *Provider {
 		remoteSpaceResolver: config.RemoteSpaceResolver,
 		spaceStatuses:       make(map[string][]wireStatus),
 		listStatuses:        make(map[string]listStatusMetadata),
+		listTaskColumns:     make(map[string]listTaskColumns),
+		taskColumnValues:    make(map[string]domain.TaskColumnValues),
 	}
 }
 
 var _ provider.StatusMetadataProvider = (*Provider)(nil)
+var _ provider.TaskColumnMetadataProvider = (*Provider)(nil)
 
 func (p *Provider) ID() domain.ProviderID {
 	return p.id
@@ -275,14 +288,15 @@ func (p *Provider) FetchLists(ctx context.Context, spaceID domain.SpaceID) ([]do
 	}
 	for _, list := range lists {
 		details, err := p.client.GetListDetails(ctx, list.ID.String())
-		if err != nil {
-			// List summaries are still useful offline when the detail endpoint is
-			// unavailable or an older test/server does not implement it.
-			continue
+		if err == nil {
+			p.listStatuses[list.ID.String()] = listStatusMetadata{
+				override: details.OverrideStatuses,
+				statuses: append([]wireStatus(nil), details.Statuses...),
+			}
 		}
-		p.listStatuses[list.ID.String()] = listStatusMetadata{
-			override: details.OverrideStatuses,
-			statuses: append([]wireStatus(nil), details.Statuses...),
+		fields, err := p.client.GetListFields(ctx, list.ID.String())
+		if err == nil {
+			p.rememberListTaskColumns(list.ID.String(), fields)
 		}
 	}
 	return p.mapper.MapLists(lists, spaceID), nil
@@ -316,6 +330,156 @@ func statusMetadata(providerID domain.ProviderID, entityType domain.EntityType, 
 	return domain.ProviderMetadata{ProviderID: providerID, EntityType: entityType, EntityID: entityID, Key: "clickup.statuses", Value: string(value)}
 }
 
+func (p *Provider) rememberListTaskColumns(remoteListID string, fields []wireCustomField) {
+	columns := make([]domain.TaskColumn, 0, len(fields))
+	for _, field := range fields {
+		id := strings.TrimSpace(field.ID.String())
+		if id == "" {
+			continue
+		}
+		name := strings.TrimSpace(field.Name)
+		if name == "" {
+			name = id
+		}
+		columns = append(columns, domain.TaskColumn{
+			ID:   customFieldColumnID(id),
+			Name: name,
+			Type: strings.TrimSpace(field.Type),
+		})
+	}
+	p.columnMetadataMu.Lock()
+	p.listTaskColumns[remoteListID] = listTaskColumns{columns: columns, loaded: true}
+	p.columnMetadataMu.Unlock()
+}
+
+// ListTaskColumns returns normalized dynamic task columns for a list.
+func (p *Provider) ListTaskColumns(list domain.List) []domain.ProviderMetadata {
+	if p == nil || list.ProviderID != p.id || list.RemoteID == nil {
+		return nil
+	}
+	p.columnMetadataMu.RLock()
+	metadata, ok := p.listTaskColumns[strings.TrimSpace(*list.RemoteID)]
+	p.columnMetadataMu.RUnlock()
+	if !ok || !metadata.loaded {
+		return nil
+	}
+	value, err := json.Marshal(metadata.columns)
+	if err != nil {
+		return nil
+	}
+	return []domain.ProviderMetadata{{
+		ProviderID: list.ProviderID,
+		EntityType: domain.EntityTypeList,
+		EntityID:   string(list.ID),
+		Key:        domain.MetadataKeyTaskColumns,
+		Value:      string(value),
+	}}
+}
+
+// TaskColumnValues returns display-ready dynamic field values for a task.
+func (p *Provider) TaskColumnValues(task domain.Task) []domain.ProviderMetadata {
+	if p == nil || task.ProviderID != p.id || task.RemoteID == nil {
+		return nil
+	}
+	p.columnMetadataMu.RLock()
+	values, ok := p.taskColumnValues[strings.TrimSpace(*task.RemoteID)]
+	p.columnMetadataMu.RUnlock()
+	if !ok {
+		return nil
+	}
+	value, err := json.Marshal(values)
+	if err != nil {
+		return nil
+	}
+	return []domain.ProviderMetadata{{
+		ProviderID: task.ProviderID,
+		EntityType: domain.EntityTypeTask,
+		EntityID:   string(task.ID),
+		Key:        domain.MetadataKeyTaskColumnValues,
+		Value:      string(value),
+	}}
+}
+
+func customFieldColumnID(id string) string {
+	return "custom:" + id
+}
+
+func (p *Provider) rememberTaskColumnValues(task wireTask) {
+	remoteID := strings.TrimSpace(task.ID.String())
+	if remoteID == "" {
+		return
+	}
+	values := make(domain.TaskColumnValues, len(task.CustomFields))
+	for _, field := range task.CustomFields {
+		id := strings.TrimSpace(field.ID.String())
+		if id == "" {
+			continue
+		}
+		values[customFieldColumnID(id)] = customFieldDisplayValue(field)
+	}
+	p.columnMetadataMu.Lock()
+	p.taskColumnValues[remoteID] = values
+	p.columnMetadataMu.Unlock()
+}
+
+func customFieldDisplayValue(field wireCustomField) string {
+	if len(field.Value) == 0 {
+		return ""
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(field.Value)))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return strings.TrimSpace(string(field.Value))
+	}
+	return formatCustomFieldValue(value, field.Type)
+}
+
+func formatCustomFieldValue(value any, fieldType string) string {
+	switch value := value.(type) {
+	case nil:
+		return ""
+	case string:
+		text := strings.TrimSpace(value)
+		if strings.EqualFold(fieldType, "date") {
+			if millis, err := strconv.ParseInt(text, 10, 64); err == nil && millis > 0 {
+				return time.UnixMilli(millis).UTC().Format(time.DateOnly)
+			}
+		}
+		return text
+	case json.Number:
+		if strings.EqualFold(fieldType, "date") {
+			if millis, err := value.Int64(); err == nil && millis > 0 {
+				return time.UnixMilli(millis).UTC().Format(time.DateOnly)
+			}
+		}
+		return value.String()
+	case bool:
+		return fmt.Sprint(value)
+	case []any:
+		parts := make([]string, 0, len(value))
+		for _, item := range value {
+			if text := formatCustomFieldValue(item, ""); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, ", ")
+	case map[string]any:
+		for _, key := range []string{"display_value", "name", "username", "email", "value"} {
+			if nested, ok := value[key]; ok {
+				return formatCustomFieldValue(nested, fieldType)
+			}
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return ""
+		}
+		return string(encoded)
+	default:
+		return fmt.Sprint(value)
+	}
+}
+
 func (p *Provider) FetchTasks(ctx context.Context, listID domain.ListID) ([]domain.Task, error) {
 	if err := p.ensureReady(); err != nil {
 		return nil, err
@@ -327,6 +491,25 @@ func (p *Provider) FetchTasks(ctx context.Context, listID domain.ListID) ([]doma
 	tasks, err := p.client.GetTasks(ctx, remoteListID)
 	if err != nil {
 		return nil, fmt.Errorf("fetch ClickUp tasks for list %s: %w", remoteListID, err)
+	}
+	fieldDefinitions := make([]wireCustomField, 0)
+	seenFieldIDs := make(map[string]struct{})
+	for _, task := range tasks {
+		p.rememberTaskColumnValues(task)
+		for _, field := range task.CustomFields {
+			id := strings.TrimSpace(field.ID.String())
+			if id == "" {
+				continue
+			}
+			if _, exists := seenFieldIDs[id]; exists {
+				continue
+			}
+			seenFieldIDs[id] = struct{}{}
+			fieldDefinitions = append(fieldDefinitions, field)
+		}
+	}
+	if len(fieldDefinitions) > 0 {
+		p.rememberListTaskColumns(remoteListID, fieldDefinitions)
 	}
 	mapped := p.mapper.MapTasksContext(ctx, tasks, listID)
 	for index := range mapped {
@@ -369,6 +552,7 @@ func (p *Provider) FetchTask(ctx context.Context, taskID domain.TaskID) (domain.
 		}
 		return domain.Task{}, fmt.Errorf("fetch ClickUp task %s: %w", remoteTaskID, err)
 	}
+	p.rememberTaskColumnValues(task)
 	listID, err := p.resolveListLocalID(ctx, task.List.ID.String())
 	if err != nil {
 		return domain.Task{}, fmt.Errorf("resolve ClickUp list %s: %w", task.List.ID, err)

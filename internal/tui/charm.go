@@ -499,8 +499,8 @@ func charmKeyMessage(msg tea.KeyMsg) KeyMsg {
 }
 
 func (m *CharmModel) charmBody(width, height int) string {
-	if m.core.UI.Mode == ModeDetail {
-		lines := m.core.visibleDetailLines(width, height)
+	if m.core.UI.Mode == ModeDetail || m.core.UI.Mode == ModeColumnConfig {
+		lines := m.core.visibleModeLines(width, height)
 		return m.clipBody(strings.Join(lines, "\n"), width, height)
 	}
 	if width < 72 {
@@ -618,7 +618,7 @@ func (m *CharmModel) charmTreeLines(width int) []string {
 func (m *CharmModel) charmTaskLines(width int) []string {
 	lines := []string{
 		charmSectionStyle.Render(fitAtOffset(m.core.taskHeading(), width, m.core.UI.TaskHorizontalOffset)),
-		charmTableHeaderStyle.Render(fitAtOffset(taskTableHeaderLine(width), width, m.core.UI.TaskHorizontalOffset)),
+		charmTableHeaderStyle.Render(fitAtOffset(m.core.taskTableHeaderLine(width), width, m.core.UI.TaskHorizontalOffset)),
 	}
 	groups := m.core.VisibleTaskGroups()
 	rows := flattenTaskGroups(groups)
@@ -681,8 +681,8 @@ func (m *CharmModel) charmTaskLines(width int) []string {
 }
 
 func (m *CharmModel) charmTaskRowLine(row TaskRow, marker string, width int, selected bool) string {
-	columns := taskTableLayoutFor(width)
-	fullLine := taskTableLine(row, marker, columns)
+	columns := m.core.taskTableColumns(width)
+	fullLine := m.core.taskTableLine(row, marker, width)
 	offset := clamp(m.core.UI.TaskHorizontalOffset, 0, runeCount(fullLine))
 	line := fitAtOffset(fullLine, width, offset)
 	line = colorTaskStatusCell(line, row.Task.Status, offset, marker, columns)
@@ -692,12 +692,27 @@ func (m *CharmModel) charmTaskRowLine(row TaskRow, marker string, width int, sel
 	return line
 }
 
-func colorTaskStatusCell(line, status string, offset int, marker string, columns taskTableLayout) string {
+func colorTaskStatusCell(line, status string, offset int, marker string, columns []taskTableColumn) string {
 	if line == "" {
 		return line
 	}
-	statusStart := runeCount(marker) + columns.Name + runeCount(taskTableGap)
-	statusEnd := statusStart + columns.Status
+	statusStart := runeCount(marker)
+	statusEnd := statusStart
+	statusFound := false
+	for index, column := range columns {
+		if index > 0 {
+			statusStart += runeCount(taskTableGap)
+		}
+		if column.ID == taskColumnStatus {
+			statusEnd = statusStart + column.Width
+			statusFound = true
+			break
+		}
+		statusStart += column.Width
+	}
+	if !statusFound {
+		return line
+	}
 	start := statusStart - offset
 	end := statusEnd - offset
 	visible := []rune(line)
@@ -727,6 +742,9 @@ func taskStatusStyle(status string) lipgloss.Style {
 }
 
 func (m *CharmModel) charmModeLine(width int) string {
+	if m.core.UI.Mode == ModeColumnConfig {
+		return fit("COLUMNS: j/k select | space toggle | +/- or h/l resize | enter/esc close", width)
+	}
 	if m.core.UI.Mode == ModeConfirm {
 		return charmWarnStyle.Render(fit("CONFIRM: "+safeText(m.core.UI.ConfirmPrompt)+"  [y/enter] yes  [n/esc] no", width))
 	}
@@ -818,6 +836,8 @@ func (m *CharmModel) charmFooter(width int) string {
 	helpKeys := m.helpKeys
 	if m.core.UI.Mode == ModeDetail {
 		helpKeys = newCharmDetailHelpKeyMap()
+	} else if m.core.UI.Mode == ModeColumnConfig {
+		helpKeys = newCharmColumnHelpKeyMap()
 	}
 	return fit(helpModel.View(helpKeys), width)
 }
@@ -842,6 +862,7 @@ func newCharmHelpKeyMap() charmHelpKeyMap {
 		bind([]string{"n", "e", "x", "d"}, "n/e/x/d", "task"),
 		bind([]string{"/"}, "/", "search"),
 		bind([]string{"f"}, "f", "filter"),
+		bind([]string{"c"}, "c", "columns"),
 		bind([]string{"q", "ctrl+c"}, "q", "quit"),
 	}
 	full := [][]key.Binding{
@@ -866,6 +887,19 @@ func newCharmDetailHelpKeyMap() charmHelpKeyMap {
 		bind([]string{"e"}, "e", "edit"),
 		bind([]string{"esc"}, "esc", "close"),
 		bind([]string{"q", "ctrl+c"}, "q", "quit"),
+	}
+	return charmHelpKeyMap{short: short, full: [][]key.Binding{short}}
+}
+
+func newCharmColumnHelpKeyMap() charmHelpKeyMap {
+	bind := func(keys []string, helpKey, description string) key.Binding {
+		return key.NewBinding(key.WithKeys(keys...), key.WithHelp(helpKey, description))
+	}
+	short := []key.Binding{
+		bind([]string{"j", "k", "up", "down"}, "j/k", "select"),
+		bind([]string{"space"}, "space", "show/hide"),
+		bind([]string{"+", "=", "-", "h", "l", "left", "right"}, "+/-", "resize"),
+		bind([]string{"enter", "esc"}, "enter", "close"),
 	}
 	return charmHelpKeyMap{short: short, full: [][]key.Binding{short}}
 }
