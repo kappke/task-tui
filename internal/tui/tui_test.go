@@ -252,6 +252,37 @@ func TestSearchModeEmitsLocalSearchCommand(t *testing.T) {
 	}
 }
 
+func TestSubmittingEmptySearchClearsSearchState(t *testing.T) {
+	model := New(testSnapshot())
+	model, _ = model.Update(KeyMsg{Key: "/"})
+	model, _ = typeInput(model, "fix auth")
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+	if !model.UI.SearchActive {
+		t.Fatal("search did not become active")
+	}
+	if got := len(model.VisibleTasks()); got != 1 {
+		t.Fatalf("search results = %d, want 1", got)
+	}
+
+	model, _ = model.Update(KeyMsg{Key: "/"})
+	for range runeCount(model.UI.Input) {
+		model, _ = model.Update(KeyMsg{Key: "backspace"})
+	}
+	model, command := model.Update(KeyMsg{Key: "enter"})
+	if command != nil {
+		t.Fatalf("clearing search emitted command %v", command)
+	}
+	if model.UI.Mode != ModeBrowse || model.UI.SearchActive || model.UI.SearchQuery != "" {
+		t.Fatalf("search state after clearing = mode %q, active %v, query %q", model.UI.Mode, model.UI.SearchActive, model.UI.SearchQuery)
+	}
+	if model.Status.Level != StatusInfo || model.Status.Text != "Search cleared" {
+		t.Fatalf("clear status = %#v, want informational Search cleared", model.Status)
+	}
+	if got := len(model.VisibleTasks()); got != 2 {
+		t.Fatalf("tasks after clearing search = %d, want 2", got)
+	}
+}
+
 func TestSearchStaysWithinSelectedList(t *testing.T) {
 	model := New(testSnapshot())
 	model.UI.SearchActive = true

@@ -1313,7 +1313,7 @@ func (m Model) submitInput() (Model, Cmd) {
 	switch m.UI.Mode {
 	case ModeSearch:
 		if strings.TrimSpace(m.UI.Input) == "" {
-			m.Status = Status{Level: StatusError, Text: "Search query cannot be empty"}
+			m.clearSearch()
 			return m, nil
 		}
 		return m.applySearch(m.UI.Input, AppCommand{Kind: CommandSearch, Query: m.UI.Input})
@@ -1702,12 +1702,7 @@ func (m Model) confirmInput() (Model, Cmd) {
 
 func (m *Model) cancelBrowseView() {
 	if m.UI.SearchActive {
-		m.UI.SearchActive = false
-		m.UI.SearchQuery = ""
-		m.UI.TaskCursor = 0
-		m.UI.SelectedTask = TaskRef{}
-		m.selectTaskAt(0)
-		m.Status = Status{Level: StatusInfo, Text: "Search cleared"}
+		m.clearSearch()
 		return
 	}
 	if m.UI.FilterActive {
@@ -1718,6 +1713,21 @@ func (m *Model) cancelBrowseView() {
 		m.selectTaskAt(0)
 		m.Status = Status{Level: StatusInfo, Text: "Filter cleared"}
 	}
+}
+
+func (m *Model) clearSearch() {
+	m.UI.Mode = ModeBrowse
+	m.UI.Input = ""
+	m.UI.InputCursor = 0
+	m.UI.InputOrigin = ""
+	m.UI.InputOriginSearchActive = false
+	m.UI.SearchActive = false
+	m.UI.SearchQuery = ""
+	m.UI.TaskCursor = 0
+	m.UI.SelectedTask = TaskRef{}
+	m.selectTaskAt(0)
+	m.keepVisible()
+	m.Status = Status{Level: StatusInfo, Text: "Search cleared"}
 }
 
 func (m *Model) closeDetail() {
