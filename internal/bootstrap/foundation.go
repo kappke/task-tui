@@ -17,6 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/kappke/task-tui/internal/app"
 	"github.com/kappke/task-tui/internal/command"
+	"github.com/kappke/task-tui/internal/credentials"
 	"github.com/kappke/task-tui/internal/domain"
 	providerpkg "github.com/kappke/task-tui/internal/provider"
 	clickuppkg "github.com/kappke/task-tui/internal/provider/clickup"
@@ -2751,6 +2752,12 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal, lo
 	}
 
 	if cfg.ClickUp.Enabled {
+		clickUpConfig, err := clickUpConfigWithPersistedDefaults(ctx, store, cfg.ClickUp)
+		if err != nil {
+			closeStore()
+			return nil, fmt.Errorf("load persisted ClickUp provider settings: %w", err)
+		}
+		cfg.ClickUp = clickUpConfig
 		clickupProviderID := domain.ProviderID(cfg.ClickUp.ID)
 		clickupProvider := clickuppkg.NewWithConfig(clickuppkg.ProviderConfig{
 			ProviderID: clickupProviderID,
@@ -2972,12 +2979,60 @@ func upsertFoundationProvider(ctx context.Context, store *sqlite.Store, provider
 	return nil
 }
 
+// A provider ID stays bound to its stored connection identity. Optional
+// settings omitted from config inherit the persisted values; explicit changes
+// are still rejected by UpsertProvider.
+func clickUpConfigWithPersistedDefaults(ctx context.Context, store *sqlite.Store, cfg ClickUpConfig) (ClickUpConfig, error) {
+	if store == nil {
+		return ClickUpConfig{}, errors.New("provider store is unavailable")
+	}
+	if ctx == nil {
+		return ClickUpConfig{}, errors.New("nil context")
+	}
+	existing, err := store.GetProvider(ctx, domain.ProviderID(cfg.ID))
+	if errors.Is(err, domain.ErrNotFound) {
+		return cfg, nil
+	}
+	if err != nil {
+		return ClickUpConfig{}, err
+	}
+	if existing.Type != domain.ProviderTypeClickUp || len(existing.Configuration) == 0 {
+		return cfg, nil
+	}
+	var persisted struct {
+		BaseURL     string `json:"base_url"`
+		WorkspaceID string `json:"workspace_id"`
+	}
+	if err := json.Unmarshal(existing.Configuration, &persisted); err != nil {
+		return ClickUpConfig{}, fmt.Errorf("decode stored provider settings: %w", err)
+	}
+
+	if strings.TrimRight(cfg.BaseURL, "/") == defaultClickUpBaseURL && persisted.BaseURL != "" {
+		cfg.BaseURL = persisted.BaseURL
+	}
+	if cfg.WorkspaceID == "" && (persisted.BaseURL == "" || strings.TrimRight(cfg.BaseURL, "/") == strings.TrimRight(persisted.BaseURL, "/")) {
+		cfg.WorkspaceID = persisted.WorkspaceID
+	}
+	return cfg, nil
+}
+
 func foundationTokenSource(name string) clickuppkg.TokenSourceFunc {
 	return func(ctx context.Context) (string, error) {
 		if ctx == nil {
 			return "", errors.New("nil context")
 		}
 		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		credentialPath, err := credentials.DefaultFilePath()
+		if err != nil {
+			return "", err
+		}
+		credential, err := credentials.NewFileStore(credentialPath).Lookup(ctx, "clickup")
+		if err == nil {
+			return credential.Secret.Text(), nil
+		}
+		if !credentials.IsNotFound(err) {
 			return "", err
 		}
 		value, ok := os.LookupEnv(name)

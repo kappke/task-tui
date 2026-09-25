@@ -374,11 +374,55 @@ func Run(ctx context.Context, runtime *Runtime) error {
 
 // Main is the small executable-facing composition entry point.
 func Main(ctx context.Context, options Options) error {
+	if isZeroConfig(options.Config) {
+		cfg, err := LoadConfig(ctx, options.ConfigPath)
+		if err != nil {
+			return err
+		}
+		if onboardingEnabled(options, cfg) {
+			path, pathIsExplicit, err := resolveConfigPath(options.ConfigPath)
+			if err != nil {
+				return err
+			}
+			_, statErr := os.Stat(path)
+			configExists := statErr == nil
+			if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+				return fmt.Errorf("inspect configuration file: %w", statErr)
+			}
+			if !configExists && !pathIsExplicit && !cfg.ClickUp.Enabled {
+				cfg, err = runFirstRunSetup(ctx, options, path, cfg)
+				if err != nil {
+					return err
+				}
+			} else if cfg.ClickUp.Enabled {
+				if err := promptForClickUpToken(ctx, options, cfg); err != nil {
+					return err
+				}
+			}
+		}
+		options.Config = cfg
+		options.ConfigPath = ""
+	}
 	runtime, err := Build(ctx, options)
 	if err != nil {
 		return err
 	}
 	return Run(ctx, runtime)
+}
+
+func onboardingEnabled(options Options, cfg Config) bool {
+	if options.Headless || cfg.UI.Headless {
+		return false
+	}
+	input := options.Input
+	if input == nil {
+		input = os.Stdin
+	}
+	output := options.Output
+	if output == nil {
+		output = os.Stdout
+	}
+	return isCharDevice(input) && isCharDevice(output)
 }
 
 func shutdownContext(timeout time.Duration) (context.Context, context.CancelFunc) {

@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	configpkg "github.com/kappke/task-tui/internal/config"
 )
 
 // Config is the complete typed runtime configuration. Credentials are
@@ -57,6 +59,8 @@ type DatabaseConfig struct {
 	BusyTimeout time.Duration
 }
 
+const defaultClickUpBaseURL = "https://api.clickup.com/api/v2"
+
 // ClickUpConfig describes an optional ClickUp provider instance. TokenEnv is
 // read only when the provider performs its first request.
 type ClickUpConfig struct {
@@ -95,7 +99,7 @@ func DefaultConfig() Config {
 		ClickUp: ClickUpConfig{
 			ID:       ProviderID("clickup"),
 			Name:     "ClickUp",
-			BaseURL:  "https://api.clickup.com/api/v2",
+			BaseURL:  defaultClickUpBaseURL,
 			TokenEnv: "TASKTUI_CLICKUP_TOKEN",
 		},
 	}
@@ -121,30 +125,36 @@ func defaultStateDir() string {
 	return filepath.Join(os.TempDir(), "tasktui")
 }
 
-// LoadConfig reads the supported TOML subset and applies environment
-// overrides. A missing file means defaults, which keeps first launch local and
-// usable. Unknown keys are ignored so adding unrelated provider configuration
-// does not prevent startup.
+// LoadConfig discovers the conventional user configuration file when path is
+// empty, reads the supported TOML subset, and applies environment overrides. A
+// missing conventional file means defaults, which keeps first launch usable.
+// Unknown keys are ignored so unrelated provider configuration does not
+// prevent startup.
 func LoadConfig(ctx context.Context, path string) (Config, error) {
 	if ctx == nil {
 		return Config{}, errors.New("load config: nil context")
 	}
+	resolvedPath, explicit, err := resolveConfigPath(path)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := DefaultConfig()
-	if path != "" {
-		file, err := os.Open(path)
+	file, err := os.Open(resolvedPath)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return Config{}, fmt.Errorf("open config: %w", err)
+		}
+		if explicit {
+			return Config{}, fmt.Errorf("open config: %w", err)
+		}
+	} else {
+		err = parseConfig(ctx, file, &cfg)
+		closeErr := file.Close()
 		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				return Config{}, fmt.Errorf("open config: %w", err)
-			}
-		} else {
-			err = parseConfig(ctx, file, &cfg)
-			closeErr := file.Close()
-			if err != nil {
-				return Config{}, fmt.Errorf("parse config: %w", err)
-			}
-			if closeErr != nil {
-				return Config{}, fmt.Errorf("close config: %w", closeErr)
-			}
+			return Config{}, fmt.Errorf("parse config: %w", err)
+		}
+		if closeErr != nil {
+			return Config{}, fmt.Errorf("close config: %w", closeErr)
 		}
 	}
 	applyEnvironment(&cfg)
@@ -152,6 +162,42 @@ func LoadConfig(ctx context.Context, path string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func resolveConfigPath(path string) (string, bool, error) {
+	path = strings.TrimSpace(path)
+	explicit := path != ""
+	if path == "" {
+		if configuredPath, configured := os.LookupEnv("TASKTUI_CONFIG_PATH"); configured && strings.TrimSpace(configuredPath) != "" {
+			path = configuredPath
+			explicit = true
+		} else if configuredPath, configured := os.LookupEnv("TASKTUI_CONFIG_FILE"); configured && strings.TrimSpace(configuredPath) != "" {
+			path = configuredPath
+			explicit = true
+		} else if configuredPath, configured := os.LookupEnv("TASKTUI_CONFIG"); configured && strings.TrimSpace(configuredPath) != "" {
+			path = configuredPath
+			explicit = true
+		} else {
+			var err error
+			path, err = configpkg.DefaultPath()
+			if err != nil {
+				return "", false, err
+			}
+		}
+	}
+	path = strings.TrimSpace(path)
+	if path == "~" || strings.HasPrefix(path, "~/") || strings.HasPrefix(path, "~\\") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", false, fmt.Errorf("expand config path: %w", err)
+		}
+		if path == "~" {
+			path = home
+		} else {
+			path = filepath.Join(home, path[2:])
+		}
+	}
+	return filepath.Clean(path), explicit, nil
 }
 
 func parseConfig(ctx context.Context, file *os.File, cfg *Config) error {

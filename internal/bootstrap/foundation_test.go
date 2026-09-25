@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/kappke/task-tui/internal/command"
+	"github.com/kappke/task-tui/internal/credentials"
 	"github.com/kappke/task-tui/internal/domain"
 	providerpkg "github.com/kappke/task-tui/internal/provider"
 	"github.com/kappke/task-tui/internal/storage/sqlite"
@@ -78,6 +80,100 @@ func TestRuntimeStartDoesNotStartSyncWorkers(t *testing.T) {
 	}
 	if runtime.cliEngine.Running() || worker.Running() {
 		t.Fatal("runtime startup started a provider sync worker")
+	}
+}
+
+func TestClickUpTokenSourceReadsTheSavedCredentialWithoutEnvironmentSetup(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("TASKTUI_CLICKUP_TOKEN", "")
+	path, err := credentials.DefaultFilePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const token = "stored-clickup-token"
+	if err := credentials.NewFileStore(path).Set(context.Background(), "clickup", token); err != nil {
+		t.Fatalf("save token: %v", err)
+	}
+
+	resolved, err := foundationTokenSource("TASKTUI_CLICKUP_TOKEN")(context.Background())
+	if err != nil {
+		t.Fatalf("resolve stored token: %v", err)
+	}
+	if resolved != token {
+		t.Fatal("ClickUp token source did not use the saved credential")
+	}
+}
+
+func TestClickUpProviderReusesPersistedWorkspaceWhenConfigOmitsIt(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	const workspaceID = "30997523"
+	storedConfiguration := json.RawMessage(`{"base_url":"https://api.clickup.com/api/v2","workspace_id":"30997523"}`)
+	if _, err := store.UpsertProvider(ctx, domain.Provider{
+		ID:            "clickup",
+		Type:          domain.ProviderTypeClickUp,
+		Name:          "ClickUp",
+		Enabled:       true,
+		Configuration: storedConfiguration,
+	}); err != nil {
+		t.Fatalf("insert existing provider: %v", err)
+	}
+
+	cfg := DefaultConfig().ClickUp
+	cfg.Enabled = true
+	resolved, err := clickUpConfigWithPersistedDefaults(ctx, store, cfg)
+	if err != nil {
+		t.Fatalf("resolve persisted provider settings: %v", err)
+	}
+	if resolved.WorkspaceID != workspaceID {
+		t.Fatalf("resolved workspace ID = %q, want persisted ID %q", resolved.WorkspaceID, workspaceID)
+	}
+	configuration, err := json.Marshal(struct {
+		BaseURL     string `json:"base_url"`
+		WorkspaceID string `json:"workspace_id,omitempty"`
+	}{BaseURL: resolved.BaseURL, WorkspaceID: resolved.WorkspaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := upsertFoundationProvider(ctx, store, domain.Provider{
+		ID:            "clickup",
+		Type:          domain.ProviderTypeClickUp,
+		Name:          "ClickUp",
+		Enabled:       true,
+		SyncState:     domain.SyncStatePending,
+		Configuration: configuration,
+	}); err != nil {
+		t.Fatalf("reuse existing provider: %v", err)
+	}
+
+	cfg.WorkspaceID = "different-workspace"
+	explicit, err := clickUpConfigWithPersistedDefaults(ctx, store, cfg)
+	if err != nil {
+		t.Fatalf("resolve explicitly configured workspace: %v", err)
+	}
+	if explicit.WorkspaceID != "different-workspace" {
+		t.Fatalf("explicit workspace was replaced: %q", explicit.WorkspaceID)
+	}
+	explicitConfiguration, err := json.Marshal(struct {
+		BaseURL     string `json:"base_url"`
+		WorkspaceID string `json:"workspace_id,omitempty"`
+	}{BaseURL: explicit.BaseURL, WorkspaceID: explicit.WorkspaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := upsertFoundationProvider(ctx, store, domain.Provider{
+		ID:            "clickup",
+		Type:          domain.ProviderTypeClickUp,
+		Name:          "ClickUp",
+		Enabled:       true,
+		Configuration: explicitConfiguration,
+	}); !errors.Is(err, domain.ErrAlreadyExists) {
+		t.Fatalf("changing workspace under an existing provider ID error = %v, want ErrAlreadyExists", err)
 	}
 }
 

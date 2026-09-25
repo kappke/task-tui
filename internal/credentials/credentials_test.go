@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -89,5 +91,37 @@ func TestSecretRepresentationsAreRedacted(t *testing.T) {
 	}
 	if strings.Contains(string(data), secret) || !strings.Contains(string(data), RedactedValue) {
 		t.Fatal("credential JSON representation was not redacted")
+	}
+}
+
+func TestFileStorePersistsCredentialsWithPrivatePermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasktui", "credentials.json")
+	store := NewFileStore(path)
+	const secret = "clickup-private-token"
+	if err := store.Set(context.Background(), "clickup", secret); err != nil {
+		t.Fatalf("store token: %v", err)
+	}
+
+	credential, err := store.Lookup(context.Background(), "clickup")
+	if err != nil {
+		t.Fatalf("look up token: %v", err)
+	}
+	if credential.Secret.Text() != secret {
+		t.Fatal("stored token did not round trip")
+	}
+
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("credential file permissions = %o, want 600", fileInfo.Mode().Perm())
+	}
+	directoryInfo, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if directoryInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("credential directory permissions = %o, want 700", directoryInfo.Mode().Perm())
 	}
 }

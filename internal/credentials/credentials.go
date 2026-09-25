@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 )
 
 const (
@@ -184,6 +186,131 @@ func (s *EncryptedAdapter) Lookup(ctx context.Context, reference string) (Creden
 		return Credential{}, fmt.Errorf("encrypted credential lookup failed: %w", err)
 	}
 	return credentialFromValue(reference, value, "encrypted store")
+}
+
+// FileStore persists credentials separately from application data. The file
+// and its parent directory are restricted to the current user.
+type FileStore struct {
+	Path string
+	mu   sync.Mutex
+}
+
+// NewFileStore creates a per-user credential store at path.
+func NewFileStore(path string) *FileStore {
+	return &FileStore{Path: path}
+}
+
+// DefaultFilePath returns the application credential file path under the
+// platform's user configuration directory.
+func DefaultFilePath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("determine credential directory: %w", err)
+	}
+	if strings.TrimSpace(dir) == "" {
+		return "", errors.New("determine credential directory: empty path")
+	}
+	return filepath.Join(dir, "tasktui", "credentials.json"), nil
+}
+
+func (s *FileStore) Lookup(ctx context.Context, reference string) (Credential, error) {
+	if err := validateContextAndReference(ctx, reference); err != nil {
+		return Credential{}, err
+	}
+	if s == nil || strings.TrimSpace(s.Path) == "" {
+		return Credential{}, &NotFoundError{Reference: reference, Store: "credential file"}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	values, err := s.read()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Credential{}, &NotFoundError{Reference: reference, Store: "credential file"}
+		}
+		return Credential{}, fmt.Errorf("read credential file: %w", err)
+	}
+	value, ok := values[reference]
+	if !ok {
+		return Credential{}, &NotFoundError{Reference: reference, Store: "credential file"}
+	}
+	return credentialFromValue(reference, value, "credential file")
+}
+
+// Set writes a credential without placing it in the application database or
+// ordinary configuration file.
+func (s *FileStore) Set(ctx context.Context, reference, value string) error {
+	if err := validateContextAndReference(ctx, reference); err != nil {
+		return err
+	}
+	if strings.TrimSpace(value) == "" {
+		return ErrInvalidCredential
+	}
+	if s == nil || strings.TrimSpace(s.Path) == "" {
+		return errors.New("write credential file: path is empty")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	values, err := s.read()
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read credential file: %w", err)
+	}
+	if values == nil {
+		values = make(map[string]string)
+	}
+	values[reference] = value
+	return s.write(values)
+}
+
+func (s *FileStore) read() (map[string]string, error) {
+	data, err := os.ReadFile(s.Path)
+	if err != nil {
+		return nil, err
+	}
+	values := make(map[string]string)
+	if err := json.Unmarshal(data, &values); err != nil {
+		return nil, errors.New("credential file is invalid")
+	}
+	return values, nil
+}
+
+func (s *FileStore) write(values map[string]string) error {
+	directory := filepath.Dir(s.Path)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return fmt.Errorf("create credential directory: %w", err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		return fmt.Errorf("secure credential directory: %w", err)
+	}
+	data, err := json.Marshal(values)
+	if err != nil {
+		return fmt.Errorf("encode credential file: %w", err)
+	}
+	file, err := os.CreateTemp(directory, ".credentials-*")
+	if err != nil {
+		return fmt.Errorf("create credential file: %w", err)
+	}
+	defer os.Remove(file.Name())
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("secure credential file: %w", err)
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write credential file: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("sync credential file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close credential file: %w", err)
+	}
+	if err := os.Rename(file.Name(), s.Path); err != nil {
+		return fmt.Errorf("install credential file: %w", err)
+	}
+	return nil
 }
 
 type EnvironmentOptions struct {
