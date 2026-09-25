@@ -206,6 +206,113 @@ func (m Model) taskRows(aggregate bool) []TaskRow {
 	return m.sortTaskRows(rows)
 }
 
+// simpleListTaskRows projects only a visible slice when list order needs no
+// filtering, sorting, searching, or grouping.
+func (m Model) simpleListTaskRows(offset, limit int) ([]TaskRow, int, bool) {
+	if m.UI.GroupBy != TaskGroupNone || m.UI.SearchActive || m.UI.FilterActive || len(m.UI.SortBy) > 0 || m.UI.SelectedNode.Kind != TreeNodeList {
+		return nil, 0, false
+	}
+	list, ok := m.selectedList()
+	if !ok || (m.UI.ActiveProviderID != "" && m.UI.ActiveProviderID != list.ProviderID) {
+		return nil, 0, false
+	}
+	if limit <= 0 {
+		return nil, 0, false
+	}
+	offset = maxInt(offset, 0)
+	provider := Provider{ID: list.ProviderID, Name: string(list.ProviderID)}
+	for _, candidate := range m.Data.Providers {
+		if candidate.ID == list.ProviderID {
+			provider = candidate
+			break
+		}
+	}
+	providerName := displayProviderName(provider)
+	spaceName := string(list.SpaceID)
+	for _, space := range m.Data.Spaces {
+		if space.ProviderID == list.ProviderID && space.ID == list.SpaceID {
+			if space.Name != "" {
+				spaceName = space.Name
+			}
+			break
+		}
+	}
+	listName := list.Name
+	if listName == "" {
+		listName = string(list.ID)
+	}
+
+	rows := make([]TaskRow, 0, limit)
+	matched := 0
+	var last Task
+	for _, task := range m.Data.Tasks {
+		if task.ProviderID != list.ProviderID || !taskHasList(task, list.ID) {
+			continue
+		}
+		last = task
+		if matched >= offset {
+			rows = append(rows, m.simpleListTaskRow(task, list, listName, spaceName, providerName))
+			if len(rows) == limit {
+				matched++
+				break
+			}
+		}
+		matched++
+	}
+	if len(rows) == 0 && matched > 0 {
+		offset = matched - 1
+		rows = append(rows, m.simpleListTaskRow(last, list, listName, spaceName, providerName))
+	}
+	if len(rows) == 0 || len(m.Data.TaskColumnValues) == 0 {
+		return rows, offset, true
+	}
+
+	indexes := make(map[scopedID]int, len(rows))
+	for index, row := range rows {
+		indexes[scopedID{provider: row.ProviderID, id: string(row.Task.ID)}] = index
+	}
+	for _, values := range m.Data.TaskColumnValues {
+		if index, ok := indexes[scopedID{provider: values.ProviderID, id: string(values.TaskID)}]; ok {
+			rows[index].ColumnValues = values.Values
+		}
+	}
+	return rows, offset, true
+}
+
+func (m Model) simpleListTaskRow(task Task, list List, listName, spaceName, providerName string) TaskRow {
+	listNames := make([]string, 0, maxInt(len(task.ListIDs), 1))
+	appendListName := func(listID ListID) {
+		name := string(listID)
+		for _, candidate := range m.Data.Lists {
+			if candidate.ProviderID == task.ProviderID && candidate.ID == listID {
+				name = candidate.Name
+				break
+			}
+		}
+		listNames = append(listNames, name)
+	}
+	if len(task.ListIDs) == 0 {
+		if task.ListID != "" {
+			appendListName(task.ListID)
+		}
+	} else {
+		for _, listID := range task.ListIDs {
+			appendListName(listID)
+		}
+	}
+	return TaskRow{
+		Task:         task,
+		ProviderID:   task.ProviderID,
+		ProviderName: providerName,
+		Assignee:     task.Assignee,
+		SpaceID:      list.SpaceID,
+		SpaceName:    spaceName,
+		ListID:       list.ID,
+		ListName:     listName,
+		ListNames:    listNames,
+	}
+}
+
 func (m Model) visibleTaskGroups(aggregate bool) []TaskGroup {
 	groups := groupTaskRows(m.taskRows(aggregate), m.UI.GroupBy)
 	if m.UI.GroupBy == TaskGroupNone {

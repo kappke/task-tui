@@ -92,7 +92,7 @@ func (m Model) bodyLines(width, height int) []string {
 	if width < 60 {
 		lines := m.treeLines(width)
 		lines = append(lines, fit("", width))
-		lines = append(lines, m.taskLines(width)...)
+		lines = append(lines, m.taskLines(width, height)...)
 		return lines
 	}
 
@@ -105,7 +105,7 @@ func (m Model) bodyLines(width, height int) []string {
 	}
 	rightWidth := width - leftWidth - 3
 	left := m.treeLines(leftWidth)
-	right := m.taskLines(rightWidth)
+	right := m.taskLines(rightWidth, height)
 	lines := make([]string, 0, maxInt(len(left), len(right)))
 	rowCount := maxInt(len(left), len(right))
 	for index := 0; index < rowCount; index++ {
@@ -163,54 +163,106 @@ func (m Model) treeLines(width int) []string {
 	return lines
 }
 
-func (m Model) taskLines(width int) []string {
+func (m Model) taskLines(width, lineLimit int) []string {
+	if lineLimit <= 0 {
+		return nil
+	}
 	lines := []string{
 		fitAtOffset(m.taskHeading(), width, m.UI.TaskHorizontalOffset),
 		fitAtOffset(m.taskTableHeaderLine(width), width, m.UI.TaskHorizontalOffset),
 	}
+	if len(lines) >= lineLimit {
+		return lines[:lineLimit]
+	}
+	requestedOffset := maxInt(m.UI.TaskOffset, 0)
+	rowLimit := lineLimit - len(lines)
+	if requestedOffset > 0 {
+		rowLimit--
+	}
+	if rows, offset, ok := m.simpleListTaskRows(requestedOffset, rowLimit); ok {
+		if len(rows) == 0 {
+			if m.UI.SearchActive {
+				return append(lines, fit("  (no local search results)", width))
+			}
+			return append(lines, fit("  (no tasks in this view)", width))
+		}
+		if offset > 0 {
+			lines = append(lines, fit("  ...", width))
+		}
+		columns := m.taskTableColumns(width)
+		for index, row := range rows {
+			if len(lines) >= lineLimit {
+				break
+			}
+			lines = append(lines, m.taskRowLineWithColumns(row, offset+index, width, columns))
+		}
+		return lines
+	}
 	groups := m.VisibleTaskGroups()
-	rows := flattenTaskGroups(groups)
-	if len(rows) == 0 && (m.UI.GroupBy == TaskGroupNone || len(groups) == 0) {
+	if m.UI.GroupBy == TaskGroupNone {
+		var rows []TaskRow
+		if len(groups) > 0 {
+			rows = groups[0].Rows
+		}
+		if len(rows) == 0 {
+			if m.UI.SearchActive {
+				return append(lines, fit("  (no local search results)", width))
+			}
+			return append(lines, fit("  (no tasks in this view)", width))
+		}
+		offset := clamp(m.UI.TaskOffset, 0, len(rows)-1)
+		if offset > 0 && len(lines) < lineLimit {
+			lines = append(lines, fit("  ...", width))
+		}
+		columns := m.taskTableColumns(width)
+		for index := offset; index < len(rows) && len(lines) < lineLimit; index++ {
+			lines = append(lines, m.taskRowLineWithColumns(rows[index], index, width, columns))
+		}
+		return lines
+	}
+	if len(groups) == 0 {
 		if m.UI.SearchActive {
 			return append(lines, fit("  (no local search results)", width))
 		}
 		return append(lines, fit("  (no tasks in this view)", width))
 	}
-	offset := 0
-	if m.UI.GroupBy == TaskGroupNone {
-		if len(rows) > 0 {
-			offset = clamp(m.UI.TaskOffset, 0, len(rows)-1)
-		}
-	} else {
-		offset = clamp(m.UI.TaskOffset, 0, maxInt(taskGroupVisualLength(groups)-1, 0))
-	}
-	if offset > 0 {
+	offset := clamp(m.UI.TaskOffset, 0, maxInt(taskGroupVisualLength(groups)-1, 0))
+	if offset > 0 && len(lines) < lineLimit {
 		lines = append(lines, fit("  ...", width))
 	}
-	if m.UI.GroupBy == TaskGroupNone {
-		for index, row := range rows[offset:] {
-			lines = append(lines, m.taskRowLine(row, index+offset, width))
-		}
-		return lines
-	}
-
+	columns := m.taskTableColumns(width)
 	visualIndex := 0
 	rowIndex := 0
 	for _, group := range groups {
-		if visualIndex >= offset {
-			lines = append(lines, fitAtOffset(m.taskGroupLine(group), width, m.UI.TaskHorizontalOffset))
-		}
+		groupIndex := visualIndex
 		visualIndex++
 		if group.Collapsed {
+			if groupIndex >= offset && len(lines) < lineLimit {
+				lines = append(lines, fitAtOffset(m.taskGroupLine(group), width, m.UI.TaskHorizontalOffset))
+			}
 			continue
 		}
-		for _, row := range group.Rows {
-			if visualIndex >= offset {
-				lines = append(lines, m.taskRowLine(row, rowIndex, width))
-			}
-			visualIndex++
+		if visualIndex+len(group.Rows) <= offset {
+			visualIndex += len(group.Rows)
+			rowIndex += len(group.Rows)
+			continue
+		}
+		if groupIndex >= offset && len(lines) < lineLimit {
+			lines = append(lines, fitAtOffset(m.taskGroupLine(group), width, m.UI.TaskHorizontalOffset))
+		}
+		rowStart := 0
+		if offset > visualIndex {
+			rowStart = offset - visualIndex
+		}
+		rowIndex += rowStart
+		for index := rowStart; index < len(group.Rows) && len(lines) < lineLimit; index++ {
+			lines = append(lines, m.taskRowLineWithColumns(group.Rows[index], rowIndex, width, columns))
 			rowIndex++
 		}
+		if len(lines) >= lineLimit {
+			return lines
+		}
+		visualIndex += len(group.Rows)
 	}
 	return lines
 }
@@ -265,12 +317,12 @@ func (m Model) taskGroupSelected(group TaskGroup) bool {
 	return m.UI.FocusedGroup == taskGroupStateKey(m.UI.GroupBy, group.Key)
 }
 
-func (m Model) taskRowLine(row TaskRow, index, width int) string {
+func (m Model) taskRowLineWithColumns(row TaskRow, index, width int, columns []taskTableColumn) string {
 	marker := "  "
 	if index == m.UI.TaskCursor && m.UI.Focus == PanelTasks {
 		marker = "> "
 	}
-	return fitAtOffset(m.taskTableLine(row, marker, width), width, m.UI.TaskHorizontalOffset)
+	return fitAtOffset(m.taskTableLineWithColumns(row, marker, columns), width, m.UI.TaskHorizontalOffset)
 }
 
 func (m Model) detailLines(width int) []string {
@@ -768,7 +820,10 @@ func (m Model) taskTableHeaderLine(width int) string {
 }
 
 func (m Model) taskTableLine(row TaskRow, marker string, width int) string {
-	columns := m.taskTableColumns(width)
+	return m.taskTableLineWithColumns(row, marker, m.taskTableColumns(width))
+}
+
+func (m Model) taskTableLineWithColumns(row TaskRow, marker string, columns []taskTableColumn) string {
 	var line strings.Builder
 	line.WriteString(marker)
 	for index, column := range columns {
@@ -917,12 +972,18 @@ func (m Model) maxPanelLineWidth(panel Panel) int {
 	}
 
 	maxWidth := runeCount(m.taskHeading())
-	groups := m.VisibleTaskGroups()
-	for _, group := range groups {
-		maxWidth = maxInt(maxWidth, runeCount(m.taskGroupLine(group)))
+	rowWidth := runeCount("  ")
+	for index, column := range m.taskTableColumns(0) {
+		if index > 0 {
+			rowWidth += runeCount(taskTableGap)
+		}
+		rowWidth += column.Width
 	}
-	for _, row := range flattenTaskGroups(groups) {
-		maxWidth = maxInt(maxWidth, runeCount(m.taskTableLine(row, "  ", 0)))
+	maxWidth = maxInt(maxWidth, rowWidth)
+	if m.UI.GroupBy != TaskGroupNone {
+		for _, group := range m.VisibleTaskGroups() {
+			maxWidth = maxInt(maxWidth, runeCount(m.taskGroupLine(group)))
+		}
 	}
 	return maxWidth
 }

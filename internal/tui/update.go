@@ -722,6 +722,18 @@ func (m *Model) moveCursor(delta int) {
 			m.moveGroupedCursor(delta)
 			return
 		}
+		if rows, cursor, ok := m.simpleListTaskRows(m.UI.TaskCursor+delta, 1); ok {
+			if len(rows) == 0 {
+				m.Status = Status{Level: StatusWarning, Text: "No tasks in this view"}
+				return
+			}
+			m.UI.TaskCursor = cursor
+			m.UI.SelectedTask = taskRef(rows[0])
+			m.UI.TaskHeaderSelected = false
+			m.UI.TaskHeaderTask = TaskRef{}
+			m.UI.FocusedGroup = ""
+			return
+		}
 		rows := m.VisibleTasks()
 		if len(rows) == 0 {
 			m.Status = Status{Level: StatusWarning, Text: "No tasks in this view"}
@@ -887,6 +899,22 @@ func (m *Model) moveCursorToEdge(last bool) {
 			return
 		}
 		m.selectTaskAt(m.taskGroupRowStart(groups, lastGroup) + len(groups[lastGroup].Rows) - 1)
+		return
+	}
+	offset := 0
+	if last {
+		offset = len(m.Data.Tasks)
+	}
+	if rows, cursor, ok := m.simpleListTaskRows(offset, 1); ok {
+		if len(rows) == 0 {
+			m.Status = Status{Level: StatusWarning, Text: "No tasks in this view"}
+			return
+		}
+		m.UI.TaskCursor = cursor
+		m.UI.SelectedTask = taskRef(rows[0])
+		m.UI.TaskHeaderSelected = false
+		m.UI.TaskHeaderTask = TaskRef{}
+		m.UI.FocusedGroup = ""
 		return
 	}
 	rows := m.VisibleTasks()
@@ -2120,6 +2148,21 @@ func (m Model) selectedTask() (TaskRow, bool) {
 }
 
 func (m *Model) selectTaskAt(cursor int) {
+	if rows, selectedCursor, ok := m.simpleListTaskRows(cursor, 1); ok {
+		if len(rows) == 0 {
+			m.UI.TaskCursor = 0
+			m.UI.SelectedTask = TaskRef{}
+			m.UI.TaskHeaderSelected = false
+			m.UI.TaskHeaderTask = TaskRef{}
+			return
+		}
+		m.UI.TaskCursor = selectedCursor
+		m.UI.SelectedTask = taskRef(rows[0])
+		m.UI.TaskHeaderSelected = false
+		m.UI.TaskHeaderTask = TaskRef{}
+		m.UI.FocusedGroup = ""
+		return
+	}
 	rows := m.VisibleTasks()
 	if len(rows) == 0 {
 		m.UI.TaskCursor = 0

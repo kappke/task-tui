@@ -515,7 +515,7 @@ func (m *CharmModel) charmBody(width, height int) string {
 		body := lipgloss.JoinVertical(
 			lipgloss.Left,
 			m.charmPanel(strings.Join(m.charmTreeLines(maxInt(width-4, 1)), "\n"), width, treeHeight, PanelHierarchy),
-			m.charmPanel(strings.Join(m.charmTaskLines(maxInt(width-4, 1)), "\n"), width, tasksHeight, PanelTasks),
+			m.charmPanel(strings.Join(m.charmTaskLines(maxInt(width-4, 1), maxInt(tasksHeight-2, 1)), "\n"), width, tasksHeight, PanelTasks),
 		)
 		return m.clipBody(body, width, height)
 	}
@@ -531,7 +531,7 @@ func (m *CharmModel) charmBody(width, height int) string {
 	body := lipgloss.JoinHorizontal(
 		lipgloss.Top,
 		m.charmPanel(strings.Join(m.charmTreeLines(maxInt(leftWidth-4, 1)), "\n"), leftWidth, height, PanelHierarchy),
-		m.charmPanel(strings.Join(m.charmTaskLines(maxInt(rightWidth-4, 1)), "\n"), rightWidth, height, PanelTasks),
+		m.charmPanel(strings.Join(m.charmTaskLines(maxInt(rightWidth-4, 1), maxInt(height-2, 1)), "\n"), rightWidth, height, PanelTasks),
 	)
 	return m.clipBody(body, width, height)
 }
@@ -615,49 +615,114 @@ func (m *CharmModel) charmTreeLines(width int) []string {
 	return lines
 }
 
-func (m *CharmModel) charmTaskLines(width int) []string {
+func (m *CharmModel) charmTaskLines(width, lineLimit int) []string {
+	if lineLimit <= 0 {
+		return nil
+	}
 	lines := []string{
 		charmSectionStyle.Render(fitAtOffset(m.core.taskHeading(), width, m.core.UI.TaskHorizontalOffset)),
 		charmTableHeaderStyle.Render(fitAtOffset(m.core.taskTableHeaderLine(width), width, m.core.UI.TaskHorizontalOffset)),
 	}
+	if len(lines) >= lineLimit {
+		return lines[:lineLimit]
+	}
+	requestedOffset := maxInt(m.core.UI.TaskOffset, 0)
+	rowLimit := lineLimit - len(lines)
+	if requestedOffset > 0 {
+		rowLimit--
+	}
+	if rows, offset, ok := m.core.simpleListTaskRows(requestedOffset, rowLimit); ok {
+		if len(rows) == 0 {
+			if m.core.UI.SearchActive {
+				return append(lines, charmMutedStyle.Render(fitAtOffset("(no local search results)", width, m.core.UI.TaskHorizontalOffset)))
+			}
+			return append(lines, charmMutedStyle.Render(fitAtOffset("(no tasks in this view)", width, m.core.UI.TaskHorizontalOffset)))
+		}
+		if offset > 0 {
+			lines = append(lines, charmMutedStyle.Render("  ..."))
+		}
+		columns := m.core.taskTableColumns(width)
+		for index, row := range rows {
+			if len(lines) >= lineLimit {
+				break
+			}
+			selected := offset+index == m.core.UI.TaskCursor && m.core.UI.Focus == PanelTasks
+			marker := "  "
+			if selected {
+				marker = "> "
+			}
+			lines = append(lines, m.charmTaskRowLine(row, marker, width, selected, columns))
+		}
+		return lines
+	}
 	groups := m.core.VisibleTaskGroups()
-	rows := flattenTaskGroups(groups)
-	if len(rows) == 0 && (m.core.UI.GroupBy == TaskGroupNone || len(groups) == 0) {
+	if m.core.UI.GroupBy == TaskGroupNone {
+		var rows []TaskRow
+		if len(groups) > 0 {
+			rows = groups[0].Rows
+		}
+		if len(rows) == 0 {
+			if m.core.UI.SearchActive {
+				return append(lines, charmMutedStyle.Render(fitAtOffset("(no local search results)", width, m.core.UI.TaskHorizontalOffset)))
+			}
+			return append(lines, charmMutedStyle.Render(fitAtOffset("(no tasks in this view)", width, m.core.UI.TaskHorizontalOffset)))
+		}
+		offset := clamp(m.core.UI.TaskOffset, 0, len(rows)-1)
+		if offset > 0 && len(lines) < lineLimit {
+			lines = append(lines, charmMutedStyle.Render("  ..."))
+		}
+		columns := m.core.taskTableColumns(width)
+		for index := offset; index < len(rows) && len(lines) < lineLimit; index++ {
+			selected := index == m.core.UI.TaskCursor && m.core.UI.Focus == PanelTasks
+			marker := "  "
+			if selected {
+				marker = "> "
+			}
+			lines = append(lines, m.charmTaskRowLine(rows[index], marker, width, selected, columns))
+		}
+		return lines
+	}
+	if len(groups) == 0 {
 		if m.core.UI.SearchActive {
 			return append(lines, charmMutedStyle.Render(fitAtOffset("(no local search results)", width, m.core.UI.TaskHorizontalOffset)))
 		}
 		return append(lines, charmMutedStyle.Render(fitAtOffset("(no tasks in this view)", width, m.core.UI.TaskHorizontalOffset)))
 	}
-	offset := 0
-	if m.core.UI.GroupBy == TaskGroupNone {
-		if len(rows) > 0 {
-			offset = clamp(m.core.UI.TaskOffset, 0, len(rows)-1)
-		}
-	} else {
-		offset = clamp(m.core.UI.TaskOffset, 0, maxInt(taskGroupVisualLength(groups)-1, 0))
-	}
-	if offset > 0 {
+	offset := clamp(m.core.UI.TaskOffset, 0, maxInt(taskGroupVisualLength(groups)-1, 0))
+	if offset > 0 && len(lines) < lineLimit {
 		lines = append(lines, charmMutedStyle.Render("  ..."))
 	}
+	columns := m.core.taskTableColumns(width)
 	appendRow := func(row TaskRow, index int) {
 		marker := "  "
 		selected := index == m.core.UI.TaskCursor && m.core.UI.Focus == PanelTasks
 		if selected {
 			marker = "> "
 		}
-		lines = append(lines, m.charmTaskRowLine(row, marker, width, selected))
+		lines = append(lines, m.charmTaskRowLine(row, marker, width, selected, columns))
 	}
-	if m.core.UI.GroupBy == TaskGroupNone {
-		for index, row := range rows[offset:] {
-			appendRow(row, index+offset)
-		}
-		return lines
-	}
-
 	visualIndex := 0
 	rowIndex := 0
 	for _, group := range groups {
-		if visualIndex >= offset {
+		groupIndex := visualIndex
+		visualIndex++
+		if group.Collapsed {
+			if groupIndex >= offset && len(lines) < lineLimit {
+				heading := fitAtOffset(m.core.taskGroupLine(group), width, m.core.UI.TaskHorizontalOffset)
+				if m.core.taskGroupSelected(group) {
+					lines = append(lines, charmSelectedStyle.Render(heading))
+				} else {
+					lines = append(lines, charmMutedStyle.Render(heading))
+				}
+			}
+			continue
+		}
+		if visualIndex+len(group.Rows) <= offset {
+			visualIndex += len(group.Rows)
+			rowIndex += len(group.Rows)
+			continue
+		}
+		if groupIndex >= offset && len(lines) < lineLimit {
 			heading := fitAtOffset(m.core.taskGroupLine(group), width, m.core.UI.TaskHorizontalOffset)
 			if m.core.taskGroupSelected(group) {
 				lines = append(lines, charmSelectedStyle.Render(heading))
@@ -665,24 +730,25 @@ func (m *CharmModel) charmTaskLines(width int) []string {
 				lines = append(lines, charmMutedStyle.Render(heading))
 			}
 		}
-		visualIndex++
-		if group.Collapsed {
-			continue
+		rowStart := 0
+		if offset > visualIndex {
+			rowStart = offset - visualIndex
 		}
-		for _, row := range group.Rows {
-			if visualIndex >= offset {
-				appendRow(row, rowIndex)
-			}
-			visualIndex++
+		rowIndex += rowStart
+		for index := rowStart; index < len(group.Rows) && len(lines) < lineLimit; index++ {
+			appendRow(group.Rows[index], rowIndex)
 			rowIndex++
 		}
+		if len(lines) >= lineLimit {
+			return lines
+		}
+		visualIndex += len(group.Rows)
 	}
 	return lines
 }
 
-func (m *CharmModel) charmTaskRowLine(row TaskRow, marker string, width int, selected bool) string {
-	columns := m.core.taskTableColumns(width)
-	fullLine := m.core.taskTableLine(row, marker, width)
+func (m *CharmModel) charmTaskRowLine(row TaskRow, marker string, width int, selected bool, columns []taskTableColumn) string {
+	fullLine := m.core.taskTableLineWithColumns(row, marker, columns)
 	offset := clamp(m.core.UI.TaskHorizontalOffset, 0, runeCount(fullLine))
 	line := fitAtOffset(fullLine, width, offset)
 	line = colorTaskStatusCell(line, row.Task.Status, offset, marker, columns)

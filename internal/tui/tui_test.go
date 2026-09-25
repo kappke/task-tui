@@ -175,6 +175,18 @@ func TestTaskColumnsAreDiscoveredDisplayedAndConfiguredPerList(t *testing.T) {
 	if len(rows) == 0 || !strings.Contains(model.taskTableLine(rows[0], "  ", 0), "13") {
 		t.Fatalf("task column value was not displayed: %#v", rows)
 	}
+	renderModel := model
+	renderModel.UI.ColumnPreferences = []TaskColumnPreference{
+		{ID: taskColumnStatus, Visible: false},
+		{ID: taskColumnAssignees, Visible: false},
+		{ID: taskColumnPriority, Visible: false},
+		{ID: taskColumnEstimate, Visible: false},
+		{ID: taskColumnTracked, Visible: false},
+		{ID: taskColumnDue, Visible: false},
+	}
+	if lines := strings.Join(renderModel.taskLines(120, 4), "\n"); !strings.Contains(lines, "13") {
+		t.Fatalf("visible-row projection omitted dynamic column values:\n%s", lines)
+	}
 
 	model, _ = model.Update(KeyMsg{Key: ":"})
 	model, _ = typeInput(model, "columns")
@@ -1543,6 +1555,80 @@ func testSnapshot() Snapshot {
 			{ID: "same", ProviderID: "personal", ListID: "today", Title: "Shared personal task", Status: "done", SyncState: SyncStateFailed},
 			{ID: "personal-shared", ProviderID: "personal", ListID: "today", Title: "Shared work task", Status: "open", SyncState: SyncStateLocal},
 		},
+	}
+}
+
+func largeTaskSnapshot(taskCount int) Snapshot {
+	snapshot := Snapshot{
+		Providers: []Provider{{ID: "work", Name: "Work", Type: ProviderTypeLocal, SyncState: SyncStateLocal}},
+		Spaces:    []Space{{ID: "space", ProviderID: "work", Name: "Space", SyncState: SyncStateLocal}},
+		Lists:     []List{{ID: "list", ProviderID: "work", SpaceID: "space", Name: "List", SyncState: SyncStateLocal}},
+		Tasks:     make([]Task, taskCount),
+	}
+	for index := range snapshot.Tasks {
+		snapshot.Tasks[index] = Task{
+			ID:         TaskID(fmt.Sprintf("task-%05d", index)),
+			ProviderID: "work",
+			ListID:     "list",
+			Title:      fmt.Sprintf("Task %05d", index),
+			Status:     "open",
+			Priority:   PriorityNormal,
+		}
+	}
+	return snapshot
+}
+
+func TestLargeTaskListRenderingUsesOnlyTheVisibleRows(t *testing.T) {
+	model := New(largeTaskSnapshot(100))
+	model.UI.Focus = PanelTasks
+	model.UI.TaskOffset = 40
+	model.UI.TaskCursor = 40
+	model.UI.SelectedTask = TaskRef{ProviderID: "work", TaskID: "task-00040"}
+
+	for name, view := range map[string]string{
+		"core":  model.View(),
+		"charm": NewCharmModel(model, CharmOptions{}).View(),
+	} {
+		if !strings.Contains(view, "Task 00040") {
+			t.Errorf("%s view omitted the first visible task:\n%s", name, view)
+		}
+		if strings.Contains(view, "Task 00099") {
+			t.Errorf("%s view rendered tasks beyond the terminal viewport", name)
+		}
+	}
+
+	model.UI.TaskOffset = 1000
+	if view := model.View(); !strings.Contains(view, "Task 00099") {
+		t.Fatalf("core view did not clamp an out-of-range offset to the last task:\n%s", view)
+	}
+}
+
+func BenchmarkLargeTaskListView(b *testing.B) {
+	model := New(largeTaskSnapshot(5000))
+	model.UI.Focus = PanelTasks
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = model.View()
+	}
+}
+
+func BenchmarkLargeTaskListCharmView(b *testing.B) {
+	model := NewCharmModel(New(largeTaskSnapshot(5000)), CharmOptions{})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = model.View()
+	}
+}
+
+func BenchmarkLargeTaskListNavigation(b *testing.B) {
+	model := New(largeTaskSnapshot(5000))
+	model.UI.Focus = PanelTasks
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		model, _ = model.Update(KeyMsg{Key: "j"})
 	}
 }
 
