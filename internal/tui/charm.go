@@ -75,6 +75,9 @@ var (
 				Bold(true).
 				Foreground(lipgloss.Color("#FFFFFF")).
 				Background(charmAccent)
+	charmInactiveSelectedStyle = lipgloss.NewStyle().
+					Bold(true).
+					Foreground(charmAccent)
 	charmMutedStyle        = lipgloss.NewStyle().Foreground(charmMuted)
 	charmAccentStyle       = lipgloss.NewStyle().Foreground(charmAccent)
 	charmGoodStyle         = lipgloss.NewStyle().Foreground(charmGood)
@@ -520,13 +523,7 @@ func (m *CharmModel) charmBody(width, height int) string {
 		return m.clipBody(body, width, height)
 	}
 
-	leftWidth := width * 32 / 100
-	if leftWidth < 26 {
-		leftWidth = 26
-	}
-	if leftWidth > width-30 {
-		leftWidth = width - 30
-	}
+	leftWidth := hierarchyPanelWidth(width, 12, 30)
 	rightWidth := maxInt(width-leftWidth-2, 1)
 	body := lipgloss.JoinHorizontal(
 		lipgloss.Top,
@@ -585,29 +582,20 @@ func (m *CharmModel) charmTreeLines(width int) []string {
 		lines = append(lines, charmMutedStyle.Render("  ..."))
 	}
 	for _, node := range nodes[offset:] {
+		selected := node.Ref == m.core.UI.SelectedNode
 		marker := "  "
-		if node.Ref == m.core.UI.SelectedNode && m.core.UI.Focus == PanelHierarchy {
+		if selected {
 			marker = "> "
 		}
-		expansion := "   "
-		if node.Ref.Kind == TreeNodeProvider || node.Ref.Kind == TreeNodeSpace {
-			if node.Expanded {
-				expansion = "[-]"
-			} else {
-				expansion = "[+]"
-			}
-		}
-		kind := "L"
-		switch node.Ref.Kind {
-		case TreeNodeProvider:
-			kind = "P"
-		case TreeNodeSpace:
-			kind = "S"
-		}
+		kind, expansion := treeDisplayParts(node, width < 15)
 		line := fmt.Sprintf("%s%s%s %s %s", marker, strings.Repeat("  ", node.Depth), kind, expansion, safeText(node.Name))
 		line = fitAtOffset(line, width, m.core.UI.TreeHorizontalOffset)
-		if node.Ref == m.core.UI.SelectedNode && m.core.UI.Focus == PanelHierarchy {
-			lines = append(lines, charmSelectedStyle.Render(line))
+		if selected {
+			if m.core.UI.Focus == PanelHierarchy {
+				lines = append(lines, charmSelectedStyle.Render(line))
+			} else {
+				lines = append(lines, charmInactiveSelectedStyle.Render(line))
+			}
 		} else {
 			lines = append(lines, line)
 		}
@@ -646,7 +634,7 @@ func (m *CharmModel) charmTaskLines(width, lineLimit int) []string {
 			if len(lines) >= lineLimit {
 				break
 			}
-			selected := offset+index == m.core.UI.TaskCursor && m.core.UI.Focus == PanelTasks
+			selected := offset+index == m.core.UI.TaskCursor
 			marker := "  "
 			if selected {
 				marker = "> "
@@ -673,7 +661,7 @@ func (m *CharmModel) charmTaskLines(width, lineLimit int) []string {
 		}
 		columns := m.core.taskTableColumns(width)
 		for index := offset; index < len(rows) && len(lines) < lineLimit; index++ {
-			selected := index == m.core.UI.TaskCursor && m.core.UI.Focus == PanelTasks
+			selected := index == m.core.UI.TaskCursor
 			marker := "  "
 			if selected {
 				marker = "> "
@@ -695,7 +683,7 @@ func (m *CharmModel) charmTaskLines(width, lineLimit int) []string {
 	columns := m.core.taskTableColumns(width)
 	appendRow := func(row TaskRow, index int) {
 		marker := "  "
-		selected := index == m.core.UI.TaskCursor && m.core.UI.Focus == PanelTasks
+		selected := index == m.core.UI.TaskCursor
 		if selected {
 			marker = "> "
 		}
@@ -753,7 +741,10 @@ func (m *CharmModel) charmTaskRowLine(row TaskRow, marker string, width int, sel
 	line := fitAtOffset(fullLine, width, offset)
 	line = colorTaskStatusCell(line, row.Task.Status, offset, marker, columns)
 	if selected {
-		return charmSelectedTaskStyle.Render(line)
+		if m.core.UI.Focus == PanelTasks {
+			return charmSelectedTaskStyle.Render(line)
+		}
+		return charmInactiveSelectedStyle.Render(line)
 	}
 	return line
 }

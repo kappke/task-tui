@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestDefaultKeyMap(t *testing.T) {
@@ -1641,6 +1642,52 @@ func TestCharmModelUsesBubbleTeaMessagesAndRendersPanels(t *testing.T) {
 	if model.CoreModel().UI.Focus != PanelTasks {
 		t.Fatalf("focus = %q, want tasks", model.CoreModel().UI.Focus)
 	}
+	selectedCoreLine := false
+	for _, line := range model.CoreModel().treeLines(80) {
+		if strings.Contains(line, "Backend") && strings.Contains(line, ">") {
+			selectedCoreLine = true
+			break
+		}
+	}
+	if !selectedCoreLine {
+		t.Fatal("core renderer removed the selected list highlight when focus moved to tasks")
+	}
+	selectedCharmLine := false
+	for _, line := range model.charmTreeLines(80) {
+		if strings.Contains(line, "Backend") && strings.Contains(line, ">") {
+			selectedCharmLine = true
+			break
+		}
+	}
+	if !selectedCharmLine {
+		t.Fatal("Charm renderer removed the selected list highlight when focus moved to tasks")
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	model = updated.(*CharmModel)
+	if model.CoreModel().UI.Focus != PanelHierarchy {
+		t.Fatalf("focus = %q, want hierarchy", model.CoreModel().UI.Focus)
+	}
+	selectedCoreTask := false
+	for _, line := range model.CoreModel().taskLines(80, 20) {
+		if strings.Contains(line, "Fix auth") && strings.Contains(line, ">") {
+			selectedCoreTask = true
+			break
+		}
+	}
+	if !selectedCoreTask {
+		t.Fatal("core renderer removed the selected task highlight when focus moved to hierarchy")
+	}
+	selectedCharmTask := false
+	for _, line := range model.charmTaskLines(80, 20) {
+		if strings.Contains(line, "Fix auth") && strings.Contains(line, ">") {
+			selectedCharmTask = true
+			break
+		}
+	}
+	if !selectedCharmTask {
+		t.Fatal("Charm renderer removed the selected task highlight when focus moved to hierarchy")
+	}
 
 	view := model.View()
 	for _, value := range []string{"TASK MANAGER", "SPACES / LISTS", "TASKS", "LIST Backend", "Work"} {
@@ -1650,6 +1697,15 @@ func TestCharmModelUsesBubbleTeaMessagesAndRendersPanels(t *testing.T) {
 	}
 	if strings.Contains(view, "Personal") {
 		t.Fatalf("Charm view contains inactive provider:\n%s", view)
+	}
+}
+
+func TestInactiveSelectionUsesForegroundOnly(t *testing.T) {
+	if _, ok := charmInactiveSelectedStyle.GetBackground().(lipgloss.NoColor); !ok {
+		t.Fatal("inactive selection should not set a background color")
+	}
+	if _, ok := charmInactiveSelectedStyle.GetForeground().(lipgloss.NoColor); ok {
+		t.Fatal("inactive selection should set a foreground color")
 	}
 }
 
@@ -1778,6 +1834,41 @@ func TestCharmPanelsScrollWithSelection(t *testing.T) {
 	}
 	if view := model.View(); !strings.Contains(view, "Task 06") {
 		t.Fatalf("scrolled tasks do not show the selected task:\n%s", view)
+	}
+}
+
+func TestHierarchyPanelNarrowsAndKeepsHorizontalScrolling(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		width            int
+		minimumWidth     int
+		minimumTaskWidth int
+		wantWidth        int
+	}{
+		{name: "core layout minimum", width: 72, minimumWidth: 10, minimumTaskWidth: 24, wantWidth: 10},
+		{name: "Charm layout minimum", width: 72, minimumWidth: 12, minimumTaskWidth: 30, wantWidth: 12},
+		{name: "typical terminal", width: 100, minimumWidth: 12, minimumTaskWidth: 30, wantWidth: 18},
+		{name: "wide terminal", width: 230, minimumWidth: 12, minimumTaskWidth: 30, wantWidth: 59},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := hierarchyPanelWidth(test.width, test.minimumWidth, test.minimumTaskWidth); got != test.wantWidth {
+				t.Fatalf("hierarchy panel width = %d, want %d", got, test.wantWidth)
+			}
+		})
+	}
+
+	model := NewCharmModel(New(scrollableSnapshot()), CharmOptions{})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 16})
+	model = updated.(*CharmModel)
+	for index := 0; index < 8; index++ {
+		updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+		model = updated.(*CharmModel)
+	}
+	if model.CoreModel().UI.TreeHorizontalOffset == 0 {
+		t.Fatal("narrow hierarchy panel did not scroll horizontally")
+	}
+	if view := model.View(); !strings.Contains(view, "hierarchy") {
+		t.Fatalf("horizontally scrolled hierarchy does not show long list names:\n%s", view)
 	}
 }
 

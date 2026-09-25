@@ -7,6 +7,8 @@ import (
 	"unicode/utf8"
 )
 
+const hierarchyPanelWidthReduction = 14
+
 // View renders the current model without changing it or performing I/O.
 func (m Model) View() string {
 	width := m.UI.Width
@@ -89,20 +91,14 @@ func (m Model) bodyLines(width, height int) []string {
 	if m.UI.Mode == ModeColumnConfig {
 		return m.visibleColumnConfigLines(width, height)
 	}
-	if width < 60 {
+	if width < 72 {
 		lines := m.treeLines(width)
 		lines = append(lines, fit("", width))
 		lines = append(lines, m.taskLines(width, height)...)
 		return lines
 	}
 
-	leftWidth := width * 32 / 100
-	if leftWidth < 24 {
-		leftWidth = 24
-	}
-	if leftWidth > width-24 {
-		leftWidth = width - 24
-	}
+	leftWidth := hierarchyPanelWidth(width, 10, 24)
 	rightWidth := width - leftWidth - 3
 	left := m.treeLines(leftWidth)
 	right := m.taskLines(rightWidth, height)
@@ -125,6 +121,17 @@ func (m Model) bodyLines(width, height int) []string {
 	return lines
 }
 
+func hierarchyPanelWidth(width, minimumWidth, minimumTaskWidth int) int {
+	leftWidth := width*32/100 - hierarchyPanelWidthReduction
+	if leftWidth < minimumWidth {
+		leftWidth = minimumWidth
+	}
+	if leftWidth > width-minimumTaskWidth {
+		leftWidth = width - minimumTaskWidth
+	}
+	return leftWidth
+}
+
 func (m Model) treeLines(width int) []string {
 	nodes := m.TreeNodes()
 	lines := []string{fitAtOffset("SPACES / LISTS", width, m.UI.TreeHorizontalOffset)}
@@ -136,7 +143,7 @@ func (m Model) treeLines(width int) []string {
 		lines = append(lines, fit("  ...", width))
 	}
 	for _, node := range nodes[offset:] {
-		selected := node.Ref == m.UI.SelectedNode && m.UI.Focus == PanelHierarchy
+		selected := node.Ref == m.UI.SelectedNode
 		marker := "  "
 		if selected {
 			marker = "> "
@@ -319,7 +326,7 @@ func (m Model) taskGroupSelected(group TaskGroup) bool {
 
 func (m Model) taskRowLineWithColumns(row TaskRow, index, width int, columns []taskTableColumn) string {
 	marker := "  "
-	if index == m.UI.TaskCursor && m.UI.Focus == PanelTasks {
+	if index == m.UI.TaskCursor {
 		marker = "> "
 	}
 	return fitAtOffset(m.taskTableLineWithColumns(row, marker, columns), width, m.UI.TaskHorizontalOffset)
@@ -944,13 +951,7 @@ func (m Model) horizontalPanelWidth(panel Panel) int {
 		return maxInt(width-4, 1)
 	}
 
-	leftWidth := width * 32 / 100
-	if leftWidth < 26 {
-		leftWidth = 26
-	}
-	if leftWidth > width-30 {
-		leftWidth = width - 30
-	}
+	leftWidth := hierarchyPanelWidth(width, 12, 30)
 	if panel == PanelHierarchy {
 		return maxInt(leftWidth-4, 1)
 	}
@@ -960,8 +961,9 @@ func (m Model) horizontalPanelWidth(panel Panel) int {
 func (m Model) maxPanelLineWidth(panel Panel) int {
 	if panel == PanelHierarchy {
 		maxWidth := runeCount("SPACES / LISTS")
+		compact := m.horizontalPanelWidth(PanelHierarchy) < 15
 		for _, node := range m.TreeNodes() {
-			kind, expansion := treeDisplayParts(node)
+			kind, expansion := treeDisplayParts(node, compact)
 			name := safeText(node.Name)
 			charmLine := fmt.Sprintf("  %s%s %s %s", strings.Repeat("  ", node.Depth), kind, expansion, name)
 			plainLine := fmt.Sprintf("  %s %s %s [%s]", strings.Repeat("  ", node.Depth), kind, expansion, name)
@@ -988,7 +990,7 @@ func (m Model) maxPanelLineWidth(panel Panel) int {
 	return maxWidth
 }
 
-func treeDisplayParts(node TreeNode) (kind, expansion string) {
+func treeDisplayParts(node TreeNode, compact bool) (kind, expansion string) {
 	kind = "L"
 	switch node.Ref.Kind {
 	case TreeNodeProvider:
@@ -996,13 +998,21 @@ func treeDisplayParts(node TreeNode) (kind, expansion string) {
 	case TreeNodeSpace:
 		kind = "S"
 	}
-	expansion = "   "
 	if node.Ref.Kind == TreeNodeProvider || node.Ref.Kind == TreeNodeSpace {
+		expansion = "[+]"
 		if node.Expanded {
 			expansion = "[-]"
-		} else {
-			expansion = "[+]"
 		}
+		if compact {
+			expansion = "+"
+			if node.Expanded {
+				expansion = "-"
+			}
+		}
+	} else if compact {
+		expansion = ""
+	} else {
+		expansion = "   "
 	}
 	return kind, expansion
 }
