@@ -39,9 +39,10 @@ const (
 type EntityType string
 
 const (
-	EntityTypeSpace EntityType = "space"
-	EntityTypeList  EntityType = "list"
-	EntityTypeTask  EntityType = "task"
+	EntityTypeProvider EntityType = "provider"
+	EntityTypeSpace    EntityType = "space"
+	EntityTypeList     EntityType = "list"
+	EntityTypeTask     EntityType = "task"
 )
 
 // Short entity constant names are aliases for the type-prefixed names.
@@ -131,7 +132,7 @@ func (v EntityType) String() string { return string(v) }
 
 func (v EntityType) IsValid() bool {
 	switch v {
-	case EntityTypeSpace, EntityTypeList, EntityTypeTask:
+	case EntityTypeProvider, EntityTypeSpace, EntityTypeList, EntityTypeTask:
 		return true
 	default:
 		return false

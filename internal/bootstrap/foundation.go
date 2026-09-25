@@ -77,9 +77,28 @@ func (s *foundationDataStore) Snapshot(ctx context.Context) (View, error) {
 
 func (s *foundationDataStore) snapshotWithTaskScope(ctx context.Context, providers []domain.Provider, providerID, listID string) (View, error) {
 	spaces := make([]domain.Space, 0)
+	workspaces := make([]domain.Workspace, 0)
 	lists := make([]domain.List, 0)
 	tasks := make([]domain.Task, 0)
 	for _, provider := range providers {
+		providerMetadata, err := s.store.ListMetadata(ctx, provider.ID, domain.EntityTypeProvider, provider.ID.String())
+		if err != nil {
+			return View{}, fmt.Errorf("list provider metadata for %s: %w", provider.ID, err)
+		}
+		for _, metadata := range providerMetadata {
+			if metadata.Key != domain.MetadataKeyProviderWorkspaces {
+				continue
+			}
+			var stored []domain.Workspace
+			if err := json.Unmarshal([]byte(metadata.Value), &stored); err != nil {
+				return View{}, fmt.Errorf("decode provider workspaces for %s: %w", provider.ID, err)
+			}
+			for _, workspace := range stored {
+				if workspace.ProviderID == provider.ID && workspace.ID != "" && strings.TrimSpace(workspace.Name) != "" {
+					workspaces = append(workspaces, workspace)
+				}
+			}
+		}
 		providerSpaces, err := s.store.ListSpaces(ctx, provider.ID)
 		if err != nil {
 			return View{}, fmt.Errorf("list spaces for provider %s: %w", provider.ID, err)
@@ -101,7 +120,38 @@ func (s *foundationDataStore) snapshotWithTaskScope(ctx context.Context, provide
 		}
 		tasks = append(tasks, providerTasks...)
 	}
+	for _, provider := range providers {
+		spaceIDs := make([]string, 0)
+		for _, space := range spaces {
+			if space.ProviderID == provider.ID {
+				spaceIDs = append(spaceIDs, space.ID.String())
+			}
+		}
+		metadataBySpace, err := s.store.ListMetadataForEntities(ctx, provider.ID, domain.EntityTypeSpace, spaceIDs)
+		if err != nil {
+			return View{}, fmt.Errorf("list workspace metadata for spaces in %s: %w", provider.ID, err)
+		}
+		for index := range spaces {
+			if spaces[index].ProviderID != provider.ID {
+				continue
+			}
+			for _, metadata := range metadataBySpace[spaces[index].ID.String()] {
+				if metadata.Key == domain.MetadataKeySpaceWorkspaceID {
+					spaces[index].WorkspaceID = domain.WorkspaceID(metadata.Value)
+					break
+				}
+			}
+		}
+	}
 	view := viewFromDomain(providers, spaces, lists, tasks)
+	for _, workspace := range workspaces {
+		view.Workspaces = append(view.Workspaces, Workspace{
+			ID:         WorkspaceID(workspace.ID),
+			ProviderID: ProviderID(workspace.ProviderID),
+			RemoteID:   cloneString(workspace.RemoteID),
+			Name:       workspace.Name,
+		})
+	}
 	options, err := s.editorOptions(ctx, spaces, lists)
 	if err != nil {
 		return View{}, err
@@ -304,7 +354,7 @@ func (s *foundationDataStore) LoadUIState(ctx context.Context) (UIState, error) 
 func (s *foundationDataStore) normalizeUIState(ctx context.Context, state UIState) (UIState, error) {
 	original := state
 	persist := func() error {
-		if original.ProviderID == state.ProviderID && original.SpaceID == state.SpaceID && original.ListID == state.ListID {
+		if original.ProviderID == state.ProviderID && original.WorkspaceID == state.WorkspaceID && original.SpaceID == state.SpaceID && original.ListID == state.ListID {
 			return nil
 		}
 		return s.SaveUIState(ctx, state)
@@ -314,7 +364,7 @@ func (s *foundationDataStore) normalizeUIState(ctx context.Context, state UIStat
 	}
 	if _, err := s.store.GetProvider(ctx, domain.ProviderID(state.ProviderID)); err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
-			state.ProviderID, state.SpaceID, state.ListID = "", "", ""
+			state.ProviderID, state.WorkspaceID, state.SpaceID, state.ListID = "", "", "", ""
 			return state, persist()
 		}
 		return UIState{}, fmt.Errorf("resolve UI provider %s: %w", state.ProviderID, err)
@@ -420,6 +470,7 @@ func viewFromDomain(
 		view.Spaces = append(view.Spaces, Space{
 			ID:              SpaceID(space.ID),
 			ProviderID:      ProviderID(space.ProviderID),
+			WorkspaceID:     WorkspaceID(space.WorkspaceID),
 			RemoteID:        cloneString(space.RemoteID),
 			Name:            space.Name,
 			SyncState:       SyncState(space.SyncState),
@@ -692,6 +743,22 @@ func (p *cachedProvider) pullSpaces(ctx context.Context) ([]domain.Space, map[st
 		return nil, nil, err
 	}
 	p.logger.Info("ClickUp spaces fetched", "provider_id", p.ID(), "spaces", len(remoteSpaces))
+	if workspaceProvider, ok := p.Provider.(providerpkg.WorkspaceMetadataProvider); ok {
+		workspaces := workspaceProvider.Workspaces()
+		value, err := json.Marshal(workspaces)
+		if err != nil {
+			return nil, nil, fmt.Errorf("encode provider workspaces: %w", err)
+		}
+		if err := p.store.UpsertMetadata(ctx, domain.ProviderMetadata{
+			EntityType: domain.EntityTypeProvider,
+			EntityID:   p.ID().String(),
+			ProviderID: p.ID(),
+			Key:        domain.MetadataKeyProviderWorkspaces,
+			Value:      string(value),
+		}); err != nil {
+			return nil, nil, fmt.Errorf("store provider workspaces: %w", err)
+		}
+	}
 	spaces := make([]domain.Space, 0, len(remoteSpaces))
 	seen := make(map[string]struct{}, len(remoteSpaces))
 	for _, space := range remoteSpaces {
@@ -711,6 +778,17 @@ func (p *cachedProvider) pullSpaces(ctx context.Context) ([]domain.Space, map[st
 				if err := p.store.UpsertMetadata(ctx, item); err != nil {
 					return nil, nil, fmt.Errorf("store status metadata for space %s: %w", stored.ID, err)
 				}
+			}
+		}
+		if space.WorkspaceID != "" {
+			if err := p.store.UpsertMetadata(ctx, domain.ProviderMetadata{
+				EntityType: domain.EntityTypeSpace,
+				EntityID:   stored.ID.String(),
+				ProviderID: p.ID(),
+				Key:        domain.MetadataKeySpaceWorkspaceID,
+				Value:      string(space.WorkspaceID),
+			}); err != nil {
+				return nil, nil, fmt.Errorf("store workspace for space %s: %w", stored.ID, err)
 			}
 		}
 	}
@@ -2038,6 +2116,7 @@ func (u *foundationUIController) State() UIState {
 	}
 	ref := model.UI.SelectedNode
 	state.ProviderID = string(ref.ProviderID)
+	state.WorkspaceID = string(ref.WorkspaceID)
 	state.SpaceID = string(ref.SpaceID)
 	state.ListID = string(ref.ListID)
 	if u.activeList != nil {
@@ -2477,7 +2556,10 @@ func foundationPanel(value string) foundationtui.Panel {
 }
 
 func foundationNodeRef(state UIState) foundationtui.TreeNodeRef {
-	ref := foundationtui.TreeNodeRef{ProviderID: foundationtui.ProviderID(state.ProviderID)}
+	ref := foundationtui.TreeNodeRef{
+		ProviderID:  foundationtui.ProviderID(state.ProviderID),
+		WorkspaceID: foundationtui.WorkspaceID(state.WorkspaceID),
+	}
 	switch {
 	case state.ListID != "":
 		ref.Kind = foundationtui.TreeNodeList
@@ -2486,8 +2568,11 @@ func foundationNodeRef(state UIState) foundationtui.TreeNodeRef {
 	case state.SpaceID != "":
 		ref.Kind = foundationtui.TreeNodeSpace
 		ref.SpaceID = foundationtui.SpaceID(state.SpaceID)
+	case state.WorkspaceID != "":
+		ref.Kind = foundationtui.TreeNodeWorkspace
 	case state.ProviderID != "":
-		ref.Kind = foundationtui.TreeNodeProvider
+		ref.Kind = foundationtui.TreeNodeWorkspace
+		ref.WorkspaceID = foundationtui.WorkspaceID(state.ProviderID)
 	}
 	return ref
 }
@@ -2612,11 +2697,21 @@ func foundationSnapshot(view View) foundationtui.Snapshot {
 			UpdatedAt:     value.UpdatedAt,
 		})
 	}
+	workspaces := make([]domain.Workspace, 0, len(view.Workspaces))
+	for _, value := range view.Workspaces {
+		workspaces = append(workspaces, domain.Workspace{
+			ID:         domain.WorkspaceID(value.ID),
+			ProviderID: domain.ProviderID(value.ProviderID),
+			RemoteID:   cloneString(value.RemoteID),
+			Name:       value.Name,
+		})
+	}
 	spaces := make([]domain.Space, 0, len(view.Spaces))
 	for _, value := range view.Spaces {
 		spaces = append(spaces, domain.Space{
 			ID:              domain.SpaceID(value.ID),
 			ProviderID:      domain.ProviderID(value.ProviderID),
+			WorkspaceID:     domain.WorkspaceID(value.WorkspaceID),
 			RemoteID:        cloneString(value.RemoteID),
 			Name:            value.Name,
 			SyncState:       domain.SyncState(value.SyncState),
@@ -2669,10 +2764,11 @@ func foundationSnapshot(view View) foundationtui.Snapshot {
 		})
 	}
 	snapshot := foundationtui.SnapshotFromDomain(foundationtui.DomainSnapshot{
-		Providers: providers,
-		Spaces:    spaces,
-		Lists:     lists,
-		Tasks:     tasks,
+		Providers:  providers,
+		Workspaces: workspaces,
+		Spaces:     spaces,
+		Lists:      lists,
+		Tasks:      tasks,
 	})
 	for _, option := range view.EditorOptions {
 		snapshot.EditorOptions = append(snapshot.EditorOptions, foundationtui.TaskEditorOptions{
@@ -2771,6 +2867,7 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal, lo
 			}),
 			ParentResolver:      foundationParentResolver(store),
 			RemoteListResolver:  foundationRemoteListResolver(store),
+			WorkspaceResolver:   foundationWorkspaceResolver(store, cfg.ClickUp.WorkspaceID),
 			RemoteSpaceResolver: foundationRemoteSpaceResolver(store),
 			LocalListResolver:   foundationLocalListResolver(store, clickupProviderID),
 			RemoteTaskResolver:  foundationRemoteTaskResolver(store),
@@ -2920,6 +3017,32 @@ func foundationRemoteListResolver(store *sqlite.Store) func(context.Context, dom
 			return "", clickuppkg.ErrRemoteIDMissing
 		}
 		return strings.TrimSpace(*list.RemoteID), nil
+	}
+}
+
+func foundationWorkspaceResolver(store *sqlite.Store, fallback string) func(context.Context, domain.ProviderID, domain.ListID) (string, error) {
+	return func(ctx context.Context, providerID domain.ProviderID, listID domain.ListID) (string, error) {
+		if store == nil {
+			return "", errors.New("resolve ClickUp workspace: store unavailable")
+		}
+		if ctx == nil {
+			return "", errors.New("resolve ClickUp workspace: nil context")
+		}
+		list, err := store.GetList(ctx, listID)
+		if err != nil {
+			return "", err
+		}
+		if list.ProviderID != providerID {
+			return "", fmt.Errorf("%w: list %s belongs to %s, provider is %s", domain.ErrProviderMismatch, listID, list.ProviderID, providerID)
+		}
+		metadata, err := store.GetMetadata(ctx, providerID, domain.EntityTypeSpace, list.SpaceID.String(), domain.MetadataKeySpaceWorkspaceID)
+		if err == nil {
+			return strings.TrimSpace(metadata.Value), nil
+		}
+		if !errors.Is(err, domain.ErrNotFound) {
+			return "", err
+		}
+		return strings.TrimSpace(fallback), nil
 	}
 }
 

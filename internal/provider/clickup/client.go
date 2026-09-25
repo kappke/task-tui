@@ -258,7 +258,10 @@ func (c *Client) GetSpaces(ctx context.Context, teamIDs ...string) ([]wireSpace,
 	if err != nil {
 		return nil, err
 	}
+	return c.getSpacesForTeams(ctx, teams)
+}
 
+func (c *Client) getSpacesForTeams(ctx context.Context, teams []wireTeam) ([]wireSpace, error) {
 	spaces := make([]wireSpace, 0)
 	seen := make(map[string]struct{})
 	for _, team := range teams {
@@ -278,6 +281,21 @@ func (c *Client) GetSpaces(ctx context.Context, teamIDs ...string) ([]wireSpace,
 		}
 	}
 	return spaces, nil
+}
+
+// GetAllWorkspaceSpaces returns every available workspace and its spaces.
+// Unlike GetSpaces, this intentionally ignores the configured task-move
+// workspace so the TUI can let users browse all workspaces for the account.
+func (c *Client) GetAllWorkspaceSpaces(ctx context.Context) ([]wireTeam, []wireSpace, error) {
+	teams, err := c.GetTeams(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	spaces, err := c.getSpacesForTeams(ctx, teams)
+	if err != nil {
+		return nil, nil, err
+	}
+	return teams, spaces, nil
 }
 
 func (c *Client) Spaces(ctx context.Context, teamIDs ...string) ([]wireSpace, error) {
@@ -528,13 +546,19 @@ func (c *Client) UpdateTask(ctx context.Context, taskID string, payload any) (wi
 // MoveTask changes a task's home List through ClickUp's v3 endpoint. The v2
 // Update Task endpoint does not accept a list ID.
 func (c *Client) MoveTask(ctx context.Context, taskID string, listID string) error {
-	if strings.TrimSpace(c.teamID) == "" {
+	return c.MoveTaskInWorkspace(ctx, c.teamID, taskID, listID)
+}
+
+// MoveTaskInWorkspace changes a task's home list within the destination
+// workspace using ClickUp's v3 endpoint.
+func (c *Client) MoveTaskInWorkspace(ctx context.Context, workspaceID, taskID, listID string) error {
+	if strings.TrimSpace(workspaceID) == "" {
 		return errors.New("ClickUp workspace ID is required to move a task")
 	}
 	if strings.TrimSpace(taskID) == "" || strings.TrimSpace(listID) == "" {
 		return errors.New("ClickUp task and list IDs are required to move a task")
 	}
-	path := "/workspaces/" + url.PathEscape(c.teamID) + "/tasks/" + url.PathEscape(taskID) + "/home_list/" + url.PathEscape(listID)
+	path := "/workspaces/" + url.PathEscape(strings.TrimSpace(workspaceID)) + "/tasks/" + url.PathEscape(taskID) + "/home_list/" + url.PathEscape(listID)
 	return c.doJSONVersion(ctx, http.MethodPut, path, struct{}{}, nil, "v3")
 }
 

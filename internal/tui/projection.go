@@ -15,73 +15,106 @@ const SearchResultLimit = 100
 // TreeNodes returns the visible hierarchy in stable snapshot order.
 func (m Model) TreeNodes() []TreeNode {
 	providers := m.viewProviders()
-	nodes := make([]TreeNode, 0, len(providers)+len(m.Data.Spaces)+len(m.Data.Lists))
+	nodes := make([]TreeNode, 0, len(providers)+len(m.Data.Workspaces)+len(m.Data.Spaces)+len(m.Data.Lists))
 	for _, provider := range providers {
-		providerRef := TreeNodeRef{
-			Kind:       TreeNodeProvider,
-			ProviderID: provider.ID,
-		}
-		providerExpanded := m.isExpanded(providerRef)
-		nodes = append(nodes, TreeNode{
-			Ref:          providerRef,
-			Name:         displayProviderName(provider),
-			ProviderID:   provider.ID,
-			ProviderName: displayProviderName(provider),
-			SyncState:    stateOr(provider.SyncState, SyncStateUnknown),
-			SyncError:    provider.SyncError,
-			Depth:        0,
-			Expanded:     providerExpanded,
-		})
-		if !providerExpanded {
-			continue
-		}
-
-		for _, space := range m.Data.Spaces {
-			if space.ProviderID != provider.ID {
-				continue
+		workspaces := m.workspacesForProvider(provider)
+		for _, workspace := range workspaces {
+			workspaceRef := TreeNodeRef{
+				Kind:        TreeNodeWorkspace,
+				ProviderID:  provider.ID,
+				WorkspaceID: workspace.ID,
 			}
-			spaceRef := TreeNodeRef{
-				Kind:       TreeNodeSpace,
-				ProviderID: provider.ID,
-				SpaceID:    space.ID,
-			}
-			spaceExpanded := m.isExpanded(spaceRef)
+			workspaceExpanded := m.isExpanded(workspaceRef)
 			nodes = append(nodes, TreeNode{
-				Ref:          spaceRef,
-				Name:         space.Name,
+				Ref:          workspaceRef,
+				Name:         workspace.Name,
 				ProviderID:   provider.ID,
 				ProviderName: displayProviderName(provider),
-				SyncState:    stateOr(space.SyncState, provider.SyncState),
-				Depth:        1,
-				Expanded:     spaceExpanded,
+				SyncState:    stateOr(provider.SyncState, SyncStateUnknown),
+				SyncError:    provider.SyncError,
+				Depth:        0,
+				Expanded:     workspaceExpanded,
 			})
-			if !spaceExpanded {
+			if !workspaceExpanded {
 				continue
 			}
 
-			for _, list := range m.Data.Lists {
-				if list.ProviderID != provider.ID || list.SpaceID != space.ID {
+			for _, space := range m.Data.Spaces {
+				if !m.spaceInWorkspace(space, workspace, len(workspaces)) {
 					continue
 				}
-				listRef := TreeNodeRef{
-					Kind:       TreeNodeList,
-					ProviderID: provider.ID,
-					SpaceID:    space.ID,
-					ListID:     list.ID,
+				spaceRef := TreeNodeRef{
+					Kind:        TreeNodeSpace,
+					ProviderID:  provider.ID,
+					WorkspaceID: workspace.ID,
+					SpaceID:     space.ID,
 				}
+				spaceExpanded := m.isExpanded(spaceRef)
 				nodes = append(nodes, TreeNode{
-					Ref:          listRef,
-					Name:         list.Name,
+					Ref:          spaceRef,
+					Name:         space.Name,
 					ProviderID:   provider.ID,
 					ProviderName: displayProviderName(provider),
-					SyncState:    stateOr(list.SyncState, provider.SyncState),
-					Depth:        2,
-					Expanded:     false,
+					SyncState:    stateOr(space.SyncState, provider.SyncState),
+					Depth:        1,
+					Expanded:     spaceExpanded,
 				})
+				if !spaceExpanded {
+					continue
+				}
+
+				for _, list := range m.Data.Lists {
+					if list.ProviderID != provider.ID || list.SpaceID != space.ID {
+						continue
+					}
+					listRef := TreeNodeRef{
+						Kind:        TreeNodeList,
+						ProviderID:  provider.ID,
+						WorkspaceID: workspace.ID,
+						SpaceID:     space.ID,
+						ListID:      list.ID,
+					}
+					nodes = append(nodes, TreeNode{
+						Ref:          listRef,
+						Name:         list.Name,
+						ProviderID:   provider.ID,
+						ProviderName: displayProviderName(provider),
+						SyncState:    stateOr(list.SyncState, provider.SyncState),
+						Depth:        2,
+						Expanded:     false,
+					})
+				}
 			}
 		}
 	}
 	return nodes
+}
+
+func (m Model) workspacesForProvider(provider Provider) []Workspace {
+	workspaces := make([]Workspace, 0)
+	for _, workspace := range m.Data.Workspaces {
+		if workspace.ProviderID == provider.ID {
+			workspaces = append(workspaces, workspace)
+		}
+	}
+	if len(workspaces) == 0 {
+		workspaces = append(workspaces, Workspace{
+			ID:         WorkspaceID(provider.ID),
+			ProviderID: provider.ID,
+			Name:       displayProviderName(provider),
+		})
+	}
+	return workspaces
+}
+
+func (m Model) spaceInWorkspace(space Space, workspace Workspace, workspaceCount int) bool {
+	if space.ProviderID != workspace.ProviderID {
+		return false
+	}
+	if space.WorkspaceID != "" {
+		return space.WorkspaceID == workspace.ID
+	}
+	return workspaceCount == 1
 }
 
 // Nodes is a concise alias for TreeNodes.
@@ -554,8 +587,23 @@ func taskTitle(row TaskRow) string {
 func (m Model) inSelectedScope(task Task, lists map[scopedID]List) bool {
 	ref := m.UI.SelectedNode
 	switch ref.Kind {
-	case TreeNodeProvider:
-		return task.ProviderID == ref.ProviderID
+	case TreeNodeWorkspace:
+		workspace, ok := m.workspaceByID(ref.ProviderID, ref.WorkspaceID)
+		if !ok {
+			return false
+		}
+		workspaceCount := len(m.workspacesForProvider(Provider{ID: ref.ProviderID, Name: string(ref.ProviderID)}))
+		for _, listID := range task.Memberships() {
+			list, ok := lists[scopedID{provider: task.ProviderID, id: string(listID)}]
+			if !ok {
+				continue
+			}
+			space, ok := m.spaceByID(task.ProviderID, list.SpaceID)
+			if ok && m.spaceInWorkspace(space, workspace, workspaceCount) {
+				return true
+			}
+		}
+		return false
 	case TreeNodeSpace:
 		if task.ProviderID != ref.ProviderID {
 			return false
@@ -572,6 +620,24 @@ func (m Model) inSelectedScope(task Task, lists map[scopedID]List) bool {
 	default:
 		return true
 	}
+}
+
+func (m Model) workspaceByID(providerID ProviderID, workspaceID WorkspaceID) (Workspace, bool) {
+	for _, workspace := range m.workspacesForProvider(Provider{ID: providerID, Name: string(providerID)}) {
+		if workspace.ID == workspaceID {
+			return workspace, true
+		}
+	}
+	return Workspace{}, false
+}
+
+func (m Model) spaceByID(providerID ProviderID, spaceID SpaceID) (Space, bool) {
+	for _, space := range m.Data.Spaces {
+		if space.ProviderID == providerID && space.ID == spaceID {
+			return space, true
+		}
+	}
+	return Space{}, false
 }
 
 func (m Model) matchesRow(row TaskRow) bool {

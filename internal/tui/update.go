@@ -202,21 +202,25 @@ func (m *Model) initializeSelection() {
 	m.ensureActiveProvider()
 	m.UI.ExpandedNodes = cloneExpanded(m.UI.ExpandedNodes)
 	for _, provider := range m.viewProviders() {
-		providerRef := TreeNodeRef{Kind: TreeNodeProvider, ProviderID: provider.ID}
-		if _, ok := m.UI.ExpandedNodes[providerRef]; !ok {
-			m.UI.ExpandedNodes[providerRef] = true
-		}
-		for _, space := range m.Data.Spaces {
-			if space.ProviderID != provider.ID {
-				continue
+		workspaces := m.workspacesForProvider(provider)
+		for _, workspace := range workspaces {
+			workspaceRef := TreeNodeRef{Kind: TreeNodeWorkspace, ProviderID: provider.ID, WorkspaceID: workspace.ID}
+			if _, ok := m.UI.ExpandedNodes[workspaceRef]; !ok {
+				m.UI.ExpandedNodes[workspaceRef] = true
 			}
-			spaceRef := TreeNodeRef{
-				Kind:       TreeNodeSpace,
-				ProviderID: provider.ID,
-				SpaceID:    space.ID,
-			}
-			if _, ok := m.UI.ExpandedNodes[spaceRef]; !ok {
-				m.UI.ExpandedNodes[spaceRef] = true
+			for _, space := range m.Data.Spaces {
+				if !m.spaceInWorkspace(space, workspace, len(workspaces)) {
+					continue
+				}
+				spaceRef := TreeNodeRef{
+					Kind:        TreeNodeSpace,
+					ProviderID:  provider.ID,
+					WorkspaceID: workspace.ID,
+					SpaceID:     space.ID,
+				}
+				if _, ok := m.UI.ExpandedNodes[spaceRef]; !ok {
+					m.UI.ExpandedNodes[spaceRef] = true
+				}
 			}
 		}
 	}
@@ -266,22 +270,11 @@ func firstListIndex(nodes []TreeNode) int {
 func (m *Model) applySnapshot(data Snapshot) Model {
 	oldNode := m.UI.SelectedNode
 	oldTask := m.UI.SelectedTask
-	hadLists := len(m.Data.Lists) > 0
 	m.Data = cloneSnapshot(data)
 	m.ensureActiveProvider()
 	m.UI.ExpandedNodes = cloneExpanded(m.UI.ExpandedNodes)
 	m.initializeExpansion()
 	m.reconcileSelection(oldNode, oldTask)
-	if !hadLists && len(m.Data.Lists) > 0 && oldNode.Kind == TreeNodeProvider {
-		for index, node := range m.TreeNodes() {
-			if node.Ref.Kind == TreeNodeList && node.Ref.ProviderID == oldNode.ProviderID {
-				m.UI.TreeCursor = index
-				m.UI.SelectedNode = node.Ref
-				m.selectTaskAt(0)
-				break
-			}
-		}
-	}
 	m.Status = Status{
 		Level: StatusInfo,
 		Text:  fmt.Sprintf("Loaded cached data: %d providers, %d tasks", len(m.Data.Providers), len(m.Data.Tasks)),
@@ -291,17 +284,20 @@ func (m *Model) applySnapshot(data Snapshot) Model {
 
 func (m *Model) initializeExpansion() {
 	for _, provider := range m.viewProviders() {
-		providerRef := TreeNodeRef{Kind: TreeNodeProvider, ProviderID: provider.ID}
-		if _, ok := m.UI.ExpandedNodes[providerRef]; !ok {
-			m.UI.ExpandedNodes[providerRef] = true
-		}
-		for _, space := range m.Data.Spaces {
-			if space.ProviderID != provider.ID {
-				continue
+		workspaces := m.workspacesForProvider(provider)
+		for _, workspace := range workspaces {
+			workspaceRef := TreeNodeRef{Kind: TreeNodeWorkspace, ProviderID: provider.ID, WorkspaceID: workspace.ID}
+			if _, ok := m.UI.ExpandedNodes[workspaceRef]; !ok {
+				m.UI.ExpandedNodes[workspaceRef] = true
 			}
-			spaceRef := TreeNodeRef{Kind: TreeNodeSpace, ProviderID: provider.ID, SpaceID: space.ID}
-			if _, ok := m.UI.ExpandedNodes[spaceRef]; !ok {
-				m.UI.ExpandedNodes[spaceRef] = true
+			for _, space := range m.Data.Spaces {
+				if !m.spaceInWorkspace(space, workspace, len(workspaces)) {
+					continue
+				}
+				spaceRef := TreeNodeRef{Kind: TreeNodeSpace, ProviderID: provider.ID, WorkspaceID: workspace.ID, SpaceID: space.ID}
+				if _, ok := m.UI.ExpandedNodes[spaceRef]; !ok {
+					m.UI.ExpandedNodes[spaceRef] = true
+				}
 			}
 		}
 	}
@@ -641,6 +637,9 @@ func (m Model) updateBrowse(key KeyMsg, action Action) (Model, Cmd) {
 	case ActionCollapseAll:
 		m.setAllExpanded(false)
 	case ActionToggleGroup:
+		if m.UI.Focus == PanelHierarchy {
+			return m, m.selectCurrent()
+		}
 		m.toggleTaskGroup()
 	case ActionQuit:
 		m.UI.Quitting = true
@@ -967,7 +966,7 @@ func (m *Model) refreshFocusedPane() Cmd {
 	ref := m.UI.SelectedNode
 	if m.UI.Focus == PanelHierarchy {
 		if ref.ProviderID == "" {
-			m.Status = Status{Level: StatusWarning, Text: "Select a provider before refreshing lists"}
+			m.Status = Status{Level: StatusWarning, Text: "Select a workspace before refreshing lists"}
 			return nil
 		}
 		m.Status = Status{Level: StatusInfo, Text: "List refresh requested; cached data remains available"}
@@ -1176,7 +1175,11 @@ func (m *Model) selectCurrent() Cmd {
 	if !expanded {
 		return nil
 	}
-	return m.emit(AppCommand{Kind: CommandFetchLists, ProviderID: node.Ref.ProviderID, SpaceID: node.Ref.SpaceID})
+	spaceID := node.Ref.SpaceID
+	if node.Ref.Kind == TreeNodeWorkspace {
+		spaceID = ""
+	}
+	return m.emit(AppCommand{Kind: CommandFetchLists, ProviderID: node.Ref.ProviderID, SpaceID: spaceID})
 }
 
 func (m *Model) setAllExpanded(expanded bool) {
@@ -1197,25 +1200,27 @@ func (m *Model) setAllHierarchyExpanded(expanded bool) {
 	oldNode := m.UI.SelectedNode
 	m.UI.ExpandedNodes = cloneExpanded(m.UI.ExpandedNodes)
 	for _, provider := range providers {
-		providerRef := TreeNodeRef{Kind: TreeNodeProvider, ProviderID: provider.ID}
-		m.UI.ExpandedNodes[providerRef] = expanded
-		for _, space := range m.Data.Spaces {
-			if space.ProviderID != provider.ID {
-				continue
+		workspaces := m.workspacesForProvider(provider)
+		for _, workspace := range workspaces {
+			workspaceRef := TreeNodeRef{Kind: TreeNodeWorkspace, ProviderID: provider.ID, WorkspaceID: workspace.ID}
+			m.UI.ExpandedNodes[workspaceRef] = expanded
+			for _, space := range m.Data.Spaces {
+				if !m.spaceInWorkspace(space, workspace, len(workspaces)) {
+					continue
+				}
+				spaceRef := TreeNodeRef{Kind: TreeNodeSpace, ProviderID: provider.ID, WorkspaceID: workspace.ID, SpaceID: space.ID}
+				m.UI.ExpandedNodes[spaceRef] = expanded
 			}
-			spaceRef := TreeNodeRef{
-				Kind:       TreeNodeSpace,
-				ProviderID: provider.ID,
-				SpaceID:    space.ID,
-			}
-			m.UI.ExpandedNodes[spaceRef] = expanded
 		}
 	}
 
 	nodes := m.TreeNodes()
 	selectedIndex := findNode(nodes, oldNode)
 	if selectedIndex < 0 {
-		ancestor := TreeNodeRef{Kind: TreeNodeProvider, ProviderID: oldNode.ProviderID}
+		ancestor := TreeNodeRef{Kind: TreeNodeWorkspace, ProviderID: oldNode.ProviderID, WorkspaceID: oldNode.WorkspaceID}
+		if ancestor.WorkspaceID == "" {
+			ancestor.WorkspaceID = WorkspaceID(oldNode.ProviderID)
+		}
 		selectedIndex = findNode(nodes, ancestor)
 	}
 	if selectedIndex < 0 {
@@ -2156,9 +2161,14 @@ func (m Model) selectedSpace() (Space, bool) {
 			return space, true
 		}
 	}
-	if ref.Kind == TreeNodeProvider {
+	if ref.Kind == TreeNodeWorkspace {
+		workspace, ok := m.workspaceByID(ref.ProviderID, ref.WorkspaceID)
+		if !ok {
+			return Space{}, false
+		}
+		workspaces := m.workspacesForProvider(Provider{ID: ref.ProviderID, Name: string(ref.ProviderID)})
 		for _, space := range m.Data.Spaces {
-			if space.ProviderID == ref.ProviderID {
+			if m.spaceInWorkspace(space, workspace, len(workspaces)) {
 				return space, true
 			}
 		}
@@ -2371,7 +2381,7 @@ func findNode(nodes []TreeNode, wanted TreeNodeRef) int {
 		return -1
 	}
 	for index, node := range nodes {
-		if node.Ref == wanted {
+		if node.Ref == wanted || (wanted.WorkspaceID == "" && node.Ref.Kind == wanted.Kind && node.Ref.ProviderID == wanted.ProviderID && node.Ref.SpaceID == wanted.SpaceID && node.Ref.ListID == wanted.ListID) {
 			return index
 		}
 	}

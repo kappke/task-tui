@@ -46,6 +46,7 @@ type ProviderConfig struct {
 	ParentIDs           map[string]domain.TaskID
 	RemoteTaskResolver  any
 	RemoteListResolver  any
+	WorkspaceResolver   any
 	LocalListResolver   any
 	RemoteSpaceResolver any
 }
@@ -63,6 +64,7 @@ type Provider struct {
 	id                  domain.ProviderID
 	remoteTaskResolver  any
 	remoteListResolver  any
+	workspaceResolver   any
 	localListResolver   any
 	remoteSpaceResolver any
 	spaceStatuses       map[string][]wireStatus
@@ -70,6 +72,8 @@ type Provider struct {
 	columnMetadataMu    sync.RWMutex
 	listTaskColumns     map[string]listTaskColumns
 	taskColumnValues    map[string]domain.TaskColumnValues
+	workspaceMu         sync.RWMutex
+	workspaces          []domain.Workspace
 }
 
 type listTaskColumns struct {
@@ -205,6 +209,7 @@ func newProvider(config ProviderConfig) *Provider {
 		id:                  config.ProviderID,
 		remoteTaskResolver:  config.RemoteTaskResolver,
 		remoteListResolver:  config.RemoteListResolver,
+		workspaceResolver:   config.WorkspaceResolver,
 		localListResolver:   config.LocalListResolver,
 		remoteSpaceResolver: config.RemoteSpaceResolver,
 		spaceStatuses:       make(map[string][]wireStatus),
@@ -264,14 +269,43 @@ func (p *Provider) FetchSpaces(ctx context.Context) ([]domain.Space, error) {
 	if err := p.ensureReady(); err != nil {
 		return nil, err
 	}
-	spaces, err := p.client.GetSpaces(ctx)
+	teams, spaces, err := p.client.GetAllWorkspaceSpaces(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("fetch ClickUp spaces: %w", err)
 	}
+	workspaces := make([]domain.Workspace, 0, len(teams))
+	for _, team := range teams {
+		remoteID := team.ID.String()
+		if remoteID == "" {
+			continue
+		}
+		name := strings.TrimSpace(team.Name)
+		if name == "" {
+			name = remoteID
+		}
+		workspaces = append(workspaces, domain.Workspace{
+			ID:         domain.WorkspaceID(remoteID),
+			ProviderID: p.id,
+			RemoteID:   &remoteID,
+			Name:       name,
+		})
+	}
+	p.workspaceMu.Lock()
+	p.workspaces = workspaces
+	p.workspaceMu.Unlock()
 	for _, space := range spaces {
 		p.spaceStatuses[space.ID.String()] = append([]wireStatus(nil), space.Statuses...)
 	}
 	return p.mapper.MapSpaces(spaces), nil
+}
+
+func (p *Provider) Workspaces() []domain.Workspace {
+	if p == nil {
+		return nil
+	}
+	p.workspaceMu.RLock()
+	defer p.workspaceMu.RUnlock()
+	return append([]domain.Workspace(nil), p.workspaces...)
 }
 
 func (p *Provider) FetchLists(ctx context.Context, spaceID domain.SpaceID) ([]domain.List, error) {
@@ -728,7 +762,11 @@ func (p *Provider) UpdateTask(ctx context.Context, task domain.Task) (domain.Tas
 		return domain.Task{}, fmt.Errorf("update ClickUp task %s: %w", remoteID, err)
 	}
 	if current.List.ID.String() != "" && current.List.ID.String() != remoteListID {
-		if err := p.client.MoveTask(ctx, remoteID, remoteListID); err != nil {
+		workspaceID, err := p.resolveListWorkspaceID(ctx, domainListID(task))
+		if err != nil {
+			return domain.Task{}, fmt.Errorf("resolve ClickUp workspace for list %s: %w", domainListID(task), err)
+		}
+		if err := p.client.MoveTaskInWorkspace(ctx, workspaceID, remoteID, remoteListID); err != nil {
 			return domain.Task{}, fmt.Errorf("move ClickUp task %s to list %s: %w", remoteID, remoteListID, err)
 		}
 	}
@@ -739,6 +777,39 @@ func (p *Provider) UpdateTask(ctx context.Context, task domain.Task) (domain.Tas
 	result.ListIDs = task.Memberships()
 	result.ID = task.ID
 	return result, nil
+}
+
+func (p *Provider) resolveListWorkspaceID(ctx context.Context, listID domain.ListID) (string, error) {
+	resolver := p.workspaceResolver
+	if resolver == nil {
+		return strings.TrimSpace(p.client.teamID), nil
+	}
+	var workspaceID string
+	var err error
+	switch resolver := resolver.(type) {
+	case func(context.Context, domain.ProviderID, domain.ListID) (string, error):
+		workspaceID, err = resolver(ctx, p.id, listID)
+	case func(domain.ProviderID, domain.ListID) (string, error):
+		workspaceID, err = resolver(p.id, listID)
+	case func(context.Context, domain.ListID) (string, error):
+		workspaceID, err = resolver(ctx, listID)
+	case func(domain.ListID) (string, error):
+		workspaceID, err = resolver(listID)
+	case func(context.Context, string) (string, error):
+		workspaceID, err = resolver(ctx, string(listID))
+	case func(string) (string, error):
+		workspaceID, err = resolver(string(listID))
+	case func(domain.ListID) string:
+		workspaceID = resolver(listID)
+	case func(string) string:
+		workspaceID = resolver(string(listID))
+	default:
+		return "", fmt.Errorf("unsupported ClickUp workspace resolver %T", p.workspaceResolver)
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(workspaceID), nil
 }
 
 func (p *Provider) syncTaskListMemberships(ctx context.Context, remoteTaskID string, current wireTask, task domain.Task, homeRemoteListID string) error {

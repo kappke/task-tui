@@ -9,6 +9,9 @@ import (
 // type. Two accounts of the same provider type therefore have different IDs.
 type ProviderID string
 
+// WorkspaceID identifies a provider workspace. It is scoped by ProviderID.
+type WorkspaceID string
+
 // SpaceID identifies a space in the local domain model.
 type SpaceID string
 
@@ -35,6 +38,18 @@ func (id ProviderID) IsValid() bool { return id.Validate() == nil }
 
 // ValidateProviderID validates a provider instance identifier.
 func ValidateProviderID(id ProviderID) error { return id.Validate() }
+
+func (id WorkspaceID) IsZero() bool { return id == "" }
+
+func (id WorkspaceID) String() string { return string(id) }
+
+func (id WorkspaceID) Validate() error { return validateID("workspace", string(id)) }
+
+// IsValid reports whether the workspace ID is non-zero and well formed.
+func (id WorkspaceID) IsValid() bool { return id.Validate() == nil }
+
+// ValidateWorkspaceID validates a provider-scoped workspace identifier.
+func ValidateWorkspaceID(id WorkspaceID) error { return id.Validate() }
 
 func (id SpaceID) IsZero() bool { return id == "" }
 

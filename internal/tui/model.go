@@ -19,6 +19,7 @@ import (
 // local to this package.
 type (
 	ProviderID   = domain.ProviderID
+	WorkspaceID  = domain.WorkspaceID
 	SpaceID      = domain.SpaceID
 	ListID       = domain.ListID
 	TaskID       = domain.TaskID
@@ -26,6 +27,7 @@ type (
 	Priority     = domain.Priority
 	SyncState    = domain.SyncState
 	Provider     = domain.Provider
+	Workspace    = domain.Workspace
 	Space        = domain.Space
 	List         = domain.List
 	Task         = domain.Task
@@ -56,6 +58,7 @@ const (
 // The TUI treats it as input state and never performs persistence itself.
 type Snapshot struct {
 	Providers        []Provider
+	Workspaces       []Workspace
 	Spaces           []Space
 	Lists            []List
 	Tasks            []Task
@@ -103,22 +106,24 @@ type TaskEditorOptions struct {
 // "data" rather than a snapshot.
 type Data = Snapshot
 
-// TreeNodeKind identifies one level in Provider -> Space -> List.
+// TreeNodeKind identifies a workspace, space, or list in the active provider's
+// hierarchy projection. Providers without workspaces use a provider-named root.
 type TreeNodeKind string
 
 const (
-	TreeNodeProvider TreeNodeKind = "provider"
-	TreeNodeSpace    TreeNodeKind = "space"
-	TreeNodeList     TreeNodeKind = "list"
+	TreeNodeWorkspace TreeNodeKind = "workspace"
+	TreeNodeSpace     TreeNodeKind = "space"
+	TreeNodeList      TreeNodeKind = "list"
 )
 
 // TreeNodeRef is a stable UI selection key. IDs are scoped by ProviderID so
 // equal IDs from different providers cannot alias in the interface.
 type TreeNodeRef struct {
-	Kind       TreeNodeKind
-	ProviderID ProviderID
-	SpaceID    SpaceID
-	ListID     ListID
+	Kind        TreeNodeKind
+	ProviderID  ProviderID
+	WorkspaceID WorkspaceID
+	SpaceID     SpaceID
+	ListID      ListID
 }
 
 // TreeNode is a presentation projection of a hierarchy entity.
@@ -383,6 +388,7 @@ func (m Model) SnapshotData() Snapshot {
 func cloneSnapshot(in Snapshot) Snapshot {
 	out := in
 	out.Providers = append([]Provider(nil), in.Providers...)
+	out.Workspaces = append([]Workspace(nil), in.Workspaces...)
 	out.Spaces = append([]Space(nil), in.Spaces...)
 	out.Lists = append([]List(nil), in.Lists...)
 	out.Tasks = append([]Task(nil), in.Tasks...)
@@ -400,6 +406,9 @@ func cloneSnapshot(in Snapshot) Snapshot {
 		out.Providers[i].Configuration = cloneRawMessage(in.Providers[i].Configuration)
 		out.Providers[i].SyncCursor = cloneString(in.Providers[i].SyncCursor)
 		out.Providers[i].LastSyncAt = cloneTime(in.Providers[i].LastSyncAt)
+	}
+	for i := range out.Workspaces {
+		out.Workspaces[i].RemoteID = cloneString(in.Workspaces[i].RemoteID)
 	}
 	for i := range out.Spaces {
 		out.Spaces[i].RemoteID = cloneString(in.Spaces[i].RemoteID)

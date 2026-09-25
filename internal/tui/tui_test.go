@@ -866,7 +866,7 @@ func TestCommandPaletteFilterCompletionUsesColumnValues(t *testing.T) {
 
 func TestRefreshUsesSelectedTaskListWhenHierarchySelectionIsProvider(t *testing.T) {
 	model := New(testSnapshot())
-	model.UI.SelectedNode = TreeNodeRef{Kind: TreeNodeProvider, ProviderID: "work"}
+	model.UI.SelectedNode = TreeNodeRef{Kind: TreeNodeWorkspace, ProviderID: "work", WorkspaceID: "work"}
 	model.UI.Focus = PanelTasks
 
 	model, command := model.Update(KeyMsg{Key: "r"})
@@ -1105,8 +1105,8 @@ func TestEmptyHierarchyCommandFlowEmitsProviderScopedCreationCommands(t *testing
 		Spaces:    model.Data.Spaces,
 		Lists:     []List{{ID: "today", ProviderID: "local", SpaceID: "personal", Name: "Today"}},
 	}))
-	if model.UI.SelectedNode.Kind != TreeNodeList || model.UI.SelectedNode.ListID != "today" {
-		t.Fatalf("selection after first list reload = %#v, want today list", model.UI.SelectedNode)
+	if model.UI.SelectedNode.Kind != TreeNodeWorkspace || model.UI.SelectedNode.ProviderID != "local" {
+		t.Fatalf("selection after first list reload = %#v, want the local workspace", model.UI.SelectedNode)
 	}
 }
 
@@ -1347,28 +1347,104 @@ func TestExpandAndCollapseAllHierarchyNodes(t *testing.T) {
 
 	nodes := model.TreeNodes()
 	if len(nodes) != 1 {
-		t.Fatalf("collapsed hierarchy nodes = %d, want one provider", len(nodes))
+		t.Fatalf("collapsed hierarchy nodes = %d, want one workspace", len(nodes))
 	}
 	for _, node := range nodes {
-		if node.Ref.Kind != TreeNodeProvider || node.Expanded {
-			t.Fatalf("collapsed hierarchy node = %#v, want collapsed provider", node)
+		if node.Ref.Kind != TreeNodeWorkspace || node.Expanded {
+			t.Fatalf("collapsed hierarchy node = %#v, want collapsed workspace", node)
 		}
 	}
-	if model.UI.SelectedNode.Kind != TreeNodeProvider || model.UI.SelectedNode.ProviderID != "work" {
-		t.Fatalf("selection after collapse all = %#v, want work provider", model.UI.SelectedNode)
+	if model.UI.SelectedNode.Kind != TreeNodeWorkspace || model.UI.SelectedNode.ProviderID != "work" {
+		t.Fatalf("selection after collapse all = %#v, want work workspace", model.UI.SelectedNode)
 	}
 
 	model, _ = model.Update(KeyMsg{Key: "+"})
 	nodes = model.TreeNodes()
 	if len(nodes) != 3 {
-		t.Fatalf("expanded hierarchy nodes = %d, want provider, space, and list", len(nodes))
+		t.Fatalf("expanded hierarchy nodes = %d, want workspace, space, and list", len(nodes))
 	}
 	for _, node := range nodes {
-		if node.Ref.Kind != TreeNodeProvider && node.Ref.Kind != TreeNodeSpace {
+		if node.Ref.Kind != TreeNodeWorkspace && node.Ref.Kind != TreeNodeSpace {
 			continue
 		}
 		if !node.Expanded {
 			t.Fatalf("expanded hierarchy node = %#v, want expanded", node)
+		}
+	}
+}
+
+func TestWorkspaceAndSpaceNodesOrganizeAndCollapseTheirLists(t *testing.T) {
+	snapshot := Snapshot{
+		Providers: []Provider{{ID: "clickup-work", Name: "ClickUp Work", Type: ProviderTypeClickUp}},
+		Workspaces: []Workspace{
+			{ID: "team-work", ProviderID: "clickup-work", Name: "Work"},
+			{ID: "team-personal", ProviderID: "clickup-work", Name: "Personal"},
+		},
+		Spaces: []Space{
+			{ID: "engineering", ProviderID: "clickup-work", WorkspaceID: "team-work", Name: "Engineering"},
+			{ID: "home", ProviderID: "clickup-work", WorkspaceID: "team-personal", Name: "Home"},
+		},
+		Lists: []List{
+			{ID: "backend", ProviderID: "clickup-work", SpaceID: "engineering", Name: "Backend"},
+			{ID: "today", ProviderID: "clickup-work", SpaceID: "home", Name: "Today"},
+		},
+		Tasks: []Task{
+			{ID: "work-task", ProviderID: "clickup-work", ListID: "backend", Title: "Work task", Status: "open"},
+			{ID: "personal-task", ProviderID: "clickup-work", ListID: "today", Title: "Personal task", Status: "open"},
+		},
+	}
+	model := New(snapshot)
+	nodes := model.TreeNodes()
+	want := []struct {
+		kind  TreeNodeKind
+		name  string
+		depth int
+	}{
+		{TreeNodeWorkspace, "Work", 0},
+		{TreeNodeSpace, "Engineering", 1},
+		{TreeNodeList, "Backend", 2},
+		{TreeNodeWorkspace, "Personal", 0},
+		{TreeNodeSpace, "Home", 1},
+		{TreeNodeList, "Today", 2},
+	}
+	if len(nodes) != len(want) {
+		t.Fatalf("tree nodes = %#v, want %d nodes", nodes, len(want))
+	}
+	for index, expected := range want {
+		if nodes[index].Ref.Kind != expected.kind || nodes[index].Name != expected.name || nodes[index].Depth != expected.depth {
+			t.Fatalf("tree node %d = %#v, want %s %q at depth %d", index, nodes[index], expected.kind, expected.name, expected.depth)
+		}
+	}
+
+	workspaceRef := TreeNodeRef{Kind: TreeNodeWorkspace, ProviderID: "clickup-work", WorkspaceID: "team-work"}
+	model.UI.SelectedNode = workspaceRef
+	rows := model.VisibleTasks()
+	if len(rows) != 1 || rows[0].Task.ID != "work-task" {
+		t.Fatalf("workspace-scoped tasks = %#v, want only Work task", rows)
+	}
+	model.UI.TreeCursor = findNode(nodes, workspaceRef)
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+	nodes = model.TreeNodes()
+	if len(nodes) != 4 || nodes[0].Name != "Work" || nodes[0].Expanded {
+		t.Fatalf("collapsed workspace subtree = %#v, want only its root", nodes)
+	}
+
+	model, command := model.Update(KeyMsg{Key: "space"})
+	if message := commandMessage(t, command); message.Kind != CommandFetchLists || message.ProviderID != "clickup-work" {
+		t.Fatalf("opening workspace with space = %#v, want workspace list fetch", message)
+	}
+	nodes = model.TreeNodes()
+	spaceRef := TreeNodeRef{Kind: TreeNodeSpace, ProviderID: "clickup-work", WorkspaceID: "team-work", SpaceID: "engineering"}
+	model.UI.SelectedNode = spaceRef
+	model.UI.TreeCursor = findNode(nodes, spaceRef)
+	model, _ = model.Update(KeyMsg{Key: "space"})
+	nodes = model.TreeNodes()
+	if len(nodes) != 5 {
+		t.Fatalf("collapsed space subtree nodes = %d, want 5", len(nodes))
+	}
+	for _, node := range nodes {
+		if node.Ref.Kind == TreeNodeList && node.Ref.ListID == "backend" {
+			t.Fatal("collapsed space still displays its list")
 		}
 	}
 }
@@ -1812,7 +1888,7 @@ func TestCharmModelUsesBubbleTeaMessagesAndRendersPanels(t *testing.T) {
 	}
 
 	view := model.View()
-	for _, value := range []string{"TASK MANAGER", "SPACES / LISTS", "TASKS", "LIST Backend", "Work"} {
+	for _, value := range []string{"TASK MANAGER", "WORKSPACES", "TASKS", "LIST Backend", "Work"} {
 		if !strings.Contains(view, value) {
 			t.Fatalf("Charm view does not contain %q:\n%s", value, view)
 		}

@@ -92,6 +92,39 @@ func TestClientConfiguredTeamAvoidsTeamDiscovery(t *testing.T) {
 	}
 }
 
+func TestClientFetchesAllWorkspaceGroupsEvenWhenOneIsConfigured(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/team":
+			_, _ = io.WriteString(w, `{"teams":[{"id":"team-1","name":"Work"},{"id":"team-2","name":"Personal"}]}`)
+		case "/team/team-1/space":
+			_, _ = io.WriteString(w, `{"spaces":[{"id":"space-1","name":"Engineering"}]}`)
+		case "/team/team-2/space":
+			_, _ = io.WriteString(w, `{"spaces":[{"id":"space-2","name":"Home"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(ClientConfig{
+		BaseURL:     server.URL,
+		HTTPClient:  server.Client(),
+		TokenSource: "test-token",
+		TeamID:      "team-1",
+	})
+	teams, spaces, err := client.GetAllWorkspaceSpaces(context.Background())
+	if err != nil {
+		t.Fatalf("GetAllWorkspaceSpaces() error = %v", err)
+	}
+	if len(teams) != 2 || len(spaces) != 2 {
+		t.Fatalf("got %d workspaces and %d spaces, want 2 each", len(teams), len(spaces))
+	}
+	if spaces[0].TeamID != "team-1" || spaces[0].TeamName != "Work" || spaces[1].TeamID != "team-2" || spaces[1].TeamName != "Personal" {
+		t.Fatalf("spaces lack their workspace grouping: %#v", spaces)
+	}
+}
+
 func TestClientResolvesTokenLazily(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

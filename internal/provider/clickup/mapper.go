@@ -83,11 +83,12 @@ func NewMapperForProvider(providerID domain.ProviderID) *Mapper {
 func (m Mapper) MapSpace(input wireSpace) domain.Space {
 	remoteID := input.ID.String()
 	return domain.Space{
-		ID:         domain.SpaceID(newLocalID("space")),
-		ProviderID: m.ProviderID,
-		RemoteID:   stringPointer(remoteID),
-		Name:       input.Name,
-		SyncState:  domain.SyncStateSynced,
+		ID:          domain.SpaceID(newLocalID("space")),
+		ProviderID:  m.ProviderID,
+		WorkspaceID: domain.WorkspaceID(input.TeamID),
+		RemoteID:    stringPointer(remoteID),
+		Name:        input.Name,
+		SyncState:   domain.SyncStateSynced,
 	}
 }
 

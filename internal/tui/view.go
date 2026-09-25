@@ -135,7 +135,7 @@ func hierarchyPanelWidth(width, minimumWidth, minimumTaskWidth int) int {
 
 func (m Model) treeLines(width int) []string {
 	nodes := m.TreeNodes()
-	lines := []string{fitAtOffset("SPACES / LISTS", width, m.UI.TreeHorizontalOffset)}
+	lines := []string{fitAtOffset("WORKSPACES", width, m.UI.TreeHorizontalOffset)}
 	if len(nodes) == 0 {
 		return append(lines, fit("  (no cached hierarchy)", width))
 	}
@@ -150,7 +150,7 @@ func (m Model) treeLines(width int) []string {
 			marker = "> "
 		}
 		expansion := "   "
-		if node.Ref.Kind == TreeNodeProvider || node.Ref.Kind == TreeNodeSpace {
+		if node.Ref.Kind == TreeNodeWorkspace || node.Ref.Kind == TreeNodeSpace {
 			if node.Expanded {
 				expansion = "[-]"
 			} else {
@@ -159,8 +159,8 @@ func (m Model) treeLines(width int) []string {
 		}
 		kind := "L"
 		switch node.Ref.Kind {
-		case TreeNodeProvider:
-			kind = "P"
+		case TreeNodeWorkspace:
+			kind = "W"
 		case TreeNodeSpace:
 			kind = "S"
 		}
@@ -622,7 +622,7 @@ func (m Model) footerLine() string {
 	if m.UI.Mode == ModeColumnConfig {
 		return "j/k select column | space show/hide | +/- or h/l resize | enter/esc close"
 	}
-	return "j/k or up/down move | tab switch panel | h/l or left/right scroll | enter open/toggle group | space collapse/expand group | +/- expand/collapse all | g/G first/last | n new | e edit | x complete | d delete | / search | f filter | o sort | c columns | : group/filter/sort/commands | r refresh | q quit"
+	return "j/k or up/down move | tab switch panel | h/l or left/right scroll | enter/space open/toggle group | +/- expand/collapse all | g/G first/last | n new | e edit | x complete | d delete | / search | f filter | o sort | c columns | : group/filter/sort/commands | r refresh | q quit"
 }
 
 func (m Model) overallSync() SyncState {
@@ -1069,7 +1069,7 @@ func (m Model) horizontalPanelWidth(panel Panel) int {
 
 func (m Model) maxPanelLineWidth(panel Panel) int {
 	if panel == PanelHierarchy {
-		maxWidth := runeCount("SPACES / LISTS")
+		maxWidth := runeCount("WORKSPACES")
 		compact := m.horizontalPanelWidth(PanelHierarchy) < 15
 		for _, node := range m.TreeNodes() {
 			kind, expansion := treeDisplayParts(node, compact)
@@ -1095,12 +1095,12 @@ func (m Model) maxPanelLineWidth(panel Panel) int {
 func treeDisplayParts(node TreeNode, compact bool) (kind, expansion string) {
 	kind = "L"
 	switch node.Ref.Kind {
-	case TreeNodeProvider:
-		kind = "P"
+	case TreeNodeWorkspace:
+		kind = "W"
 	case TreeNodeSpace:
 		kind = "S"
 	}
-	if node.Ref.Kind == TreeNodeProvider || node.Ref.Kind == TreeNodeSpace {
+	if node.Ref.Kind == TreeNodeWorkspace || node.Ref.Kind == TreeNodeSpace {
 		expansion = "[+]"
 		if node.Expanded {
 			expansion = "[-]"

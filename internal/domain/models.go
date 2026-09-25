@@ -23,18 +23,40 @@ type Provider struct {
 	UpdatedAt     time.Time       `json:"updated_at"`
 }
 
-// Space is the top-level hierarchy entity owned by one provider instance.
+// Workspace is a provider-owned grouping used to organize provider spaces.
+// Its ID is scoped by ProviderID and it is not itself a task hierarchy entity.
+type Workspace struct {
+	ID         WorkspaceID `json:"id"`
+	ProviderID ProviderID  `json:"provider_id"`
+	RemoteID   *string     `json:"remote_id,omitempty"`
+	Name       string      `json:"name"`
+}
+
+// Validate checks workspace identity and its owning provider.
+func (w Workspace) Validate() error {
+	if err := w.ID.Validate(); err != nil {
+		return err
+	}
+	if err := w.ProviderID.Validate(); err != nil {
+		return err
+	}
+	return validateRemoteID(w.RemoteID)
+}
+
+// Space is a provider-owned hierarchy container for lists. A workspace may
+// organize spaces without becoming a persisted parent entity.
 type Space struct {
-	ID              SpaceID    `json:"id"`
-	ProviderID      ProviderID `json:"provider_id"`
-	RemoteID        *string    `json:"remote_id,omitempty"`
-	Name            string     `json:"name"`
-	SyncState       SyncState  `json:"sync_state"`
-	RemoteUpdatedAt *time.Time `json:"remote_updated_at,omitempty"`
-	IsDeleted       bool       `json:"is_deleted,omitempty"`
-	DeletedAt       *time.Time `json:"deleted_at,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID              SpaceID     `json:"id"`
+	ProviderID      ProviderID  `json:"provider_id"`
+	WorkspaceID     WorkspaceID `json:"workspace_id,omitempty"`
+	RemoteID        *string     `json:"remote_id,omitempty"`
+	Name            string      `json:"name"`
+	SyncState       SyncState   `json:"sync_state"`
+	RemoteUpdatedAt *time.Time  `json:"remote_updated_at,omitempty"`
+	IsDeleted       bool        `json:"is_deleted,omitempty"`
+	DeletedAt       *time.Time  `json:"deleted_at,omitempty"`
+	CreatedAt       time.Time   `json:"created_at"`
+	UpdatedAt       time.Time   `json:"updated_at"`
 }
 
 // List is a list within a space. Its provider must match both its space and
@@ -223,6 +245,11 @@ func (s Space) Validate() error {
 	}
 	if err := s.ProviderID.Validate(); err != nil {
 		return err
+	}
+	if !s.WorkspaceID.IsZero() {
+		if err := s.WorkspaceID.Validate(); err != nil {
+			return err
+		}
 	}
 	if err := validateRemoteID(s.RemoteID); err != nil {
 		return err

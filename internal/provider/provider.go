@@ -88,3 +88,10 @@ type TaskColumnMetadataProvider interface {
 	ListTaskColumns(domain.List) []domain.ProviderMetadata
 	TaskColumnValues(domain.Task) []domain.ProviderMetadata
 }
+
+// WorkspaceMetadataProvider exposes the workspace groups discovered with a
+// provider's hierarchy. Workspaces remain provider-owned and are cached as
+// provider metadata rather than becoming another task hierarchy entity.
+type WorkspaceMetadataProvider interface {
+	Workspaces() []domain.Workspace
+}

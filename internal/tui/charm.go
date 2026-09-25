@@ -572,7 +572,7 @@ func clipLines(content string, height int) string {
 }
 
 func (m *CharmModel) charmTreeLines(width int) []string {
-	lines := []string{charmSectionStyle.Render(fitAtOffset("SPACES / LISTS", width, m.core.UI.TreeHorizontalOffset))}
+	lines := []string{charmSectionStyle.Render(fitAtOffset("WORKSPACES", width, m.core.UI.TreeHorizontalOffset))}
 	nodes := m.core.TreeNodes()
 	if len(nodes) == 0 {
 		return append(lines, charmMutedStyle.Render(fitAtOffset("(no cached hierarchy)", width, m.core.UI.TreeHorizontalOffset)))
@@ -952,8 +952,7 @@ func newCharmHelpKeyMap() charmHelpKeyMap {
 		bind([]string{"j", "k", "up", "down"}, "j/k", "move"),
 		bind([]string{"tab", "shift+tab"}, "tab", "panel"),
 		bind([]string{"h", "l", "left", "right"}, "h/l", "scroll"),
-		bind([]string{"enter"}, "enter", "open/toggle"),
-		bind([]string{"space"}, "space", "group"),
+		bind([]string{"enter", "space"}, "enter/space", "open/toggle group"),
 		bind([]string{"+", "="}, "+", "expand all"),
 		bind([]string{"-"}, "-", "collapse all"),
 		bind([]string{"n", "e", "x", "d"}, "n/e/x/d", "task"),

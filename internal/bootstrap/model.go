@@ -21,6 +21,9 @@ type OperationID string
 // ProviderType identifies the adapter used by a provider instance.
 type ProviderType string
 
+// WorkspaceID identifies a provider workspace within one provider instance.
+type WorkspaceID string
+
 const (
 	ProviderTypeLocal   ProviderType = "local"
 	ProviderTypeClickUp ProviderType = "clickup"
@@ -81,10 +84,19 @@ type ProviderRecord struct {
 	UpdatedAt     time.Time
 }
 
+// Workspace is a provider-specific grouping used to organize top-level spaces.
+type Workspace struct {
+	ID         WorkspaceID
+	ProviderID ProviderID
+	RemoteID   *string
+	Name       string
+}
+
 // Space is the normalized application representation of a provider space.
 type Space struct {
 	ID              SpaceID
 	ProviderID      ProviderID
+	WorkspaceID     WorkspaceID
 	RemoteID        *string
 	Name            string
 	SyncState       SyncState
@@ -158,6 +170,7 @@ type SyncOperation struct {
 // UIState is presentation state persisted independently from domain entities.
 type UIState struct {
 	ProviderID      string          `json:"provider_id,omitempty"`
+	WorkspaceID     string          `json:"workspace_id,omitempty"`
 	SpaceID         string          `json:"space_id,omitempty"`
 	ListID          string          `json:"list_id,omitempty"`
 	Panel           string          `json:"panel,omitempty"`
@@ -192,6 +205,7 @@ type TaskColumnPreference struct {
 // snapshot so rendering does not perform I/O or synchronize providers.
 type View struct {
 	Providers        []ProviderRecord
+	Workspaces       []Workspace
 	Spaces           []Space
 	Lists            []List
 	Tasks            []Task

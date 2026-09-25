@@ -587,6 +587,53 @@ func TestCachedProviderFetchesOnlyTheRequestedHierarchyScope(t *testing.T) {
 	}
 }
 
+func TestCachedProviderPersistsWorkspaceGroupsForTheLocalSnapshot(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	providerID := domain.ProviderID("clickup-work")
+	if _, err := store.UpsertProvider(ctx, domain.Provider{ID: providerID, Type: domain.ProviderTypeClickUp, Name: "Work", Enabled: true}); err != nil {
+		t.Fatalf("insert provider: %v", err)
+	}
+	remoteSpaceID := "remote-space"
+	fake := &foundationWorkspaceTestProvider{
+		foundationTestProvider: &foundationTestProvider{
+			id: providerID,
+			spaces: []domain.Space{{
+				ID:          "local-space",
+				ProviderID:  providerID,
+				WorkspaceID: "team-work",
+				RemoteID:    &remoteSpaceID,
+				Name:        "Engineering",
+				SyncState:   domain.SyncStateSynced,
+			}},
+		},
+		workspaces: []domain.Workspace{{ID: "team-work", ProviderID: providerID, Name: "Work"}},
+	}
+	if err := newCachedProvider(fake, store).FetchListsIntoCache(ctx, ""); err != nil {
+		t.Fatalf("fetch workspace hierarchy: %v", err)
+	}
+
+	view, err := newFoundationDataStore(store).Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("load cached workspace hierarchy: %v", err)
+	}
+	if len(view.Workspaces) != 1 || view.Workspaces[0].ID != "team-work" || view.Workspaces[0].Name != "Work" {
+		t.Fatalf("cached workspaces = %#v", view.Workspaces)
+	}
+	if len(view.Spaces) != 1 || view.Spaces[0].WorkspaceID != "team-work" {
+		t.Fatalf("cached spaces = %#v, want workspace association", view.Spaces)
+	}
+	snapshot := foundationSnapshot(view)
+	if len(snapshot.Workspaces) != 1 || snapshot.Spaces[0].WorkspaceID != "team-work" {
+		t.Fatalf("presentation workspace data = %#v / %#v", snapshot.Workspaces, snapshot.Spaces)
+	}
+}
+
 func TestCachedProviderPersistsDynamicListColumnsAndTaskValues(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlite.Open(":memory:")
@@ -1047,6 +1094,15 @@ type foundationTestProvider struct {
 	taskDetailFetches []domain.TaskID
 	listColumns       map[domain.ListID][]domain.TaskColumn
 	taskColumnValues  map[domain.TaskID]domain.TaskColumnValues
+}
+
+type foundationWorkspaceTestProvider struct {
+	*foundationTestProvider
+	workspaces []domain.Workspace
+}
+
+func (p *foundationWorkspaceTestProvider) Workspaces() []domain.Workspace {
+	return append([]domain.Workspace(nil), p.workspaces...)
 }
 
 type foundationNoopHandler struct{}

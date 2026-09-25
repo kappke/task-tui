@@ -37,6 +37,38 @@ func TestProviderRejectsMismatchedTaskProviderBeforeHTTP(t *testing.T) {
 	}
 }
 
+func TestProviderFetchesSpacesGroupedByWorkspace(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/team":
+			_, _ = io.WriteString(w, `{"teams":[{"id":"team-1","name":"Work"},{"id":"team-2","name":"Personal"}]}`)
+		case "/team/team-1/space":
+			_, _ = io.WriteString(w, `{"spaces":[{"id":"space-1","name":"Engineering"}]}`)
+		case "/team/team-2/space":
+			_, _ = io.WriteString(w, `{"spaces":[{"id":"space-2","name":"Home"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewWithConfig(ProviderConfig{
+		ProviderID: "clickup-work",
+		Client:     NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token", TeamID: "team-1"}),
+	})
+	spaces, err := provider.FetchSpaces(context.Background())
+	if err != nil {
+		t.Fatalf("FetchSpaces() error = %v", err)
+	}
+	if len(spaces) != 2 || spaces[0].WorkspaceID != "team-1" || spaces[1].WorkspaceID != "team-2" {
+		t.Fatalf("spaces = %#v, want one space from each workspace", spaces)
+	}
+	workspaces := provider.Workspaces()
+	if len(workspaces) != 2 || workspaces[0].Name != "Work" || workspaces[1].Name != "Personal" {
+		t.Fatalf("workspaces = %#v, want Work and Personal", workspaces)
+	}
+}
+
 func TestProviderUsesRemoteIDsForTaskOperations(t *testing.T) {
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -437,7 +469,13 @@ func TestProviderUpdatePayloadClearsDescriptionAndResolvesParent(t *testing.T) {
 		TokenSource: "token",
 	}), ProviderConfig{
 		ProviderID: "clickup-work",
-		TeamID:     "workspace",
+		TeamID:     "configured-workspace",
+		WorkspaceResolver: func(listID domain.ListID) (string, error) {
+			if listID != "local-list" {
+				t.Errorf("workspace resolver list ID = %q, want local-list", listID)
+			}
+			return "workspace", nil
+		},
 		RemoteTaskResolver: func(domain.TaskID) (string, error) {
 			return "remote-parent", nil
 		},
