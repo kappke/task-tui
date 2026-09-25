@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,7 +37,7 @@ func TestClientFetchesSpacesAndDeduplicatesLists(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(ClientConfig{
+	client := newTestClient(ClientConfig{
 		BaseURL:     server.URL,
 		HTTPClient:  server.Client(),
 		TokenSource: func(context.Context) (string, error) { return "test-token", nil },
@@ -78,7 +79,7 @@ func TestClientConfiguredTeamAvoidsTeamDiscovery(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(ClientConfig{
+	client := newTestClient(ClientConfig{
 		BaseURL:     server.URL,
 		HTTPClient:  server.Client(),
 		TokenSource: "token",
@@ -89,6 +90,63 @@ func TestClientConfiguredTeamAvoidsTeamDiscovery(t *testing.T) {
 	}
 	if got := teamRequests.Load(); got != 0 {
 		t.Fatalf("team discovery requests = %d, want 0", got)
+	}
+}
+
+func TestClientPacesRequests(t *testing.T) {
+	var mu sync.Mutex
+	var requestTimes []time.Time
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requestTimes = append(requestTimes, time.Now())
+		mu.Unlock()
+		_, _ = io.WriteString(w, `{"id":"task-1"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"})
+	if client.requestPacer.interval != time.Second {
+		t.Fatalf("default request interval = %s, want %s", client.requestPacer.interval, time.Second)
+	}
+	client.requestPacer.interval = 25 * time.Millisecond
+	for i := 0; i < 2; i++ {
+		if _, err := client.GetTask(context.Background(), "task-1"); err != nil {
+			t.Fatalf("GetTask() error = %v", err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requestTimes) != 2 {
+		t.Fatalf("request count = %d, want 2", len(requestTimes))
+	}
+	if gap := requestTimes[1].Sub(requestTimes[0]); gap < client.requestPacer.interval {
+		t.Fatalf("request gap = %s, want at least %s", gap, client.requestPacer.interval)
+	}
+}
+
+func TestClientRequestPacingHonorsCancellation(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = io.WriteString(w, `{"id":"task-1"}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"})
+	client.requestPacer.interval = time.Second
+	if _, err := client.GetTask(context.Background(), "task-1"); err != nil {
+		t.Fatalf("first GetTask() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, err := client.GetTask(ctx, "task-1")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second GetTask() error = %v, want context deadline exceeded", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("HTTP requests = %d, want 1", got)
 	}
 }
 
@@ -107,7 +165,7 @@ func TestClientFetchesAllWorkspaceGroupsEvenWhenOneIsConfigured(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(ClientConfig{
+	client := newTestClient(ClientConfig{
 		BaseURL:     server.URL,
 		HTTPClient:  server.Client(),
 		TokenSource: "test-token",
@@ -135,7 +193,7 @@ func TestClientResolvesTokenLazily(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(ClientConfig{
+	client := newTestClient(ClientConfig{
 		BaseURL:    server.URL,
 		HTTPClient: server.Client(),
 		TokenSource: func(context.Context) (string, error) {
@@ -178,7 +236,7 @@ func TestClientPaginatesIncludingClosedAndMultiListTasks(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(ClientConfig{
+	client := newTestClient(ClientConfig{
 		BaseURL:     server.URL,
 		HTTPClient:  server.Client(),
 		TokenSource: "token",
@@ -223,7 +281,7 @@ func TestClientCRUDUsesAuthorizationAndRemotePaths(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(ClientConfig{
+	client := newTestClient(ClientConfig{
 		BaseURL:     server.URL,
 		HTTPClient:  server.Client(),
 		TokenSource: func() (string, error) { return "secret-token", nil },
@@ -259,7 +317,7 @@ func TestClientReturnsTypedErrorsAndClosesBodies(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "secret-token"})
+	client := newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "secret-token"})
 	_, err := client.GetTask(context.Background(), "task-1")
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized {
@@ -273,7 +331,7 @@ func TestClientReturnsTypedErrorsAndClosesBodies(t *testing.T) {
 		_, _ = io.WriteString(w, `{malformed`)
 	}))
 	defer malformed.Close()
-	client = NewClient(ClientConfig{BaseURL: malformed.URL, HTTPClient: malformed.Client(), TokenSource: "token"})
+	client = newTestClient(ClientConfig{BaseURL: malformed.URL, HTTPClient: malformed.Client(), TokenSource: "token"})
 	_, err = client.GetTask(context.Background(), "task-1")
 	var responseErr *ResponseError
 	if !errors.As(err, &responseErr) {
@@ -298,7 +356,7 @@ func TestClientErrorsExposeRetryabilityClassification(t *testing.T) {
 				_, _ = io.WriteString(w, `{"message":"failure"}`)
 			}))
 			defer server.Close()
-			client := NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"})
+			client := newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"})
 			_, err := client.GetTask(context.Background(), "task")
 			var apiErr *APIError
 			if !errors.As(err, &apiErr) || apiErr.Permanent() != test.permanent {
@@ -309,7 +367,7 @@ func TestClientErrorsExposeRetryabilityClassification(t *testing.T) {
 }
 
 func TestMissingTokenIsPermanent(t *testing.T) {
-	client := NewClient(ClientConfig{BaseURL: "https://clickup.test", HTTPClient: &http.Client{}, TokenSource: ""})
+	client := newTestClient(ClientConfig{BaseURL: "https://clickup.test", HTTPClient: &http.Client{}, TokenSource: ""})
 	_, err := client.GetTask(context.Background(), "task")
 	var requestErr *RequestError
 	if !errors.As(err, &requestErr) || !requestErr.Permanent() {
@@ -335,7 +393,7 @@ func TestClientRateLimitParsesSecondsAndDate(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"})
+			client := newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"})
 			_, err := client.GetTask(context.Background(), "task-1")
 			var rateErr *RateLimitError
 			if !errors.As(err, &rateErr) || rateErr.StatusCode != http.StatusTooManyRequests {
@@ -358,7 +416,7 @@ func TestClientHonorsTimeoutAndCancellation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(ClientConfig{
+	client := newTestClient(ClientConfig{
 		BaseURL:     server.URL,
 		HTTPClient:  server.Client(),
 		TokenSource: "token",
@@ -385,7 +443,7 @@ func TestClientDoesNotRetryAPIErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"})
+	client := newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"})
 	_, err := client.GetTask(context.Background(), "task-1")
 	if err == nil {
 		t.Fatal("GetTask() error = nil")
@@ -397,7 +455,7 @@ func TestClientDoesNotRetryAPIErrors(t *testing.T) {
 
 func TestClientBoundsAndClosesResponseBody(t *testing.T) {
 	body := &trackingBody{Reader: strings.NewReader(`{"id":"this response is too large"}`)}
-	client := NewClient(ClientConfig{
+	client := newTestClient(ClientConfig{
 		BaseURL: serverURLForRoundTrip,
 		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{
@@ -422,7 +480,7 @@ func TestClientBoundsAndClosesResponseBody(t *testing.T) {
 
 func TestClientWrapsTransportErrors(t *testing.T) {
 	wantErr := errors.New("transport unavailable")
-	client := NewClient(ClientConfig{
+	client := newTestClient(ClientConfig{
 		BaseURL: "https://clickup.test",
 		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return nil, wantErr
@@ -453,4 +511,10 @@ type trackingBody struct {
 func (b *trackingBody) Close() error {
 	b.closed = true
 	return nil
+}
+
+func newTestClient(config ClientConfig) *Client {
+	client := NewClient(config)
+	client.requestPacer.interval = 0
+	return client
 }

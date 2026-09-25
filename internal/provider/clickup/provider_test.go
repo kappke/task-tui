@@ -21,7 +21,7 @@ func TestProviderRejectsMismatchedTaskProviderBeforeHTTP(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"})
+	client := newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"})
 	provider := New(client, domain.ProviderID("clickup-work"))
 	remoteID := "remote-task"
 	localTask := domain.Task{ProviderID: domain.ProviderID("local"), RemoteID: &remoteID}
@@ -54,7 +54,7 @@ func TestProviderFetchesSpacesGroupedByWorkspace(t *testing.T) {
 
 	provider := NewWithConfig(ProviderConfig{
 		ProviderID: "clickup-work",
-		Client:     NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token", TeamID: "team-1"}),
+		Client:     newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token", TeamID: "team-1"}),
 	})
 	spaces, err := provider.FetchSpaces(context.Background())
 	if err != nil {
@@ -86,7 +86,7 @@ func TestProviderUsesRemoteIDsForTaskOperations(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"})
+	client := newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"})
 	clickupProvider := New(client, domain.ProviderID("clickup-work"))
 	remoteID := "remote-task"
 	task := domain.Task{
@@ -127,7 +127,7 @@ func TestProviderCreatesTaskInRemoteListAndMapsProviderID(t *testing.T) {
 	}))
 	defer server.Close()
 
-	clickupProvider := New(NewClient(ClientConfig{
+	clickupProvider := New(newTestClient(ClientConfig{
 		BaseURL:     server.URL,
 		HTTPClient:  server.Client(),
 		TokenSource: "token",
@@ -166,7 +166,7 @@ func TestProviderCreatesTaskAndAddsItsAdditionalListMemberships(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	provider := New(NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
+	provider := New(newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
 		ProviderID: "clickup-work",
 		RemoteListResolver: func(listID domain.ListID) (string, error) {
 			if listID == "primary" {
@@ -207,7 +207,7 @@ func TestProviderRollsBackTaskWhenAdditionalListCreateFails(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	provider := New(NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
+	provider := New(newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
 		ProviderID: "clickup-work",
 		RemoteListResolver: func(listID domain.ListID) (string, error) {
 			if listID == "primary" {
@@ -246,7 +246,7 @@ func TestProviderResolvesLocalSpaceIDBeforeFetchingLists(t *testing.T) {
 		_, _ = io.WriteString(w, `{"folders":[]}`)
 	}))
 	defer server.Close()
-	provider := New(NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
+	provider := New(newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
 		ProviderID:          "clickup-work",
 		RemoteSpaceResolver: func(domain.SpaceID) (string, error) { return "remote-space", nil },
 	})
@@ -280,7 +280,7 @@ func TestProviderMapsPerListTaskColumnsAndCustomValues(t *testing.T) {
 	defer server.Close()
 
 	var localListID domain.ListID
-	provider := New(NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
+	provider := New(newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
 		ProviderID:          "clickup-work",
 		RemoteSpaceResolver: func(domain.SpaceID) (string, error) { return "remote-space", nil },
 		RemoteListResolver:  func(domain.ListID) (string, error) { return "remote-list", nil },
@@ -332,7 +332,7 @@ func TestProviderFetchTaskUsesRemoteTaskCallAndLocalListIdentity(t *testing.T) {
 	}))
 	defer server.Close()
 
-	provider := New(NewClient(ClientConfig{
+	provider := New(newTestClient(ClientConfig{
 		BaseURL:     server.URL,
 		HTTPClient:  server.Client(),
 		TokenSource: "token",
@@ -364,7 +364,7 @@ func TestProviderFetchTaskMapsRemoteNotFound(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer server.Close()
-	provider := New(NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
+	provider := New(newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
 		ProviderID:         "clickup-work",
 		RemoteTaskResolver: func(domain.TaskID) (string, error) { return "remote-missing", nil },
 	})
@@ -393,7 +393,7 @@ func TestProviderFetchTasksKeepsHomeListAndEveryMembership(t *testing.T) {
 		http.Error(w, "unexpected page", http.StatusBadRequest)
 	}))
 	defer server.Close()
-	provider := New(NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
+	provider := New(newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
 		ProviderID:         "clickup-work",
 		RemoteListResolver: func(domain.ListID) (string, error) { return "remote-request-list", nil },
 		LocalListResolver: func(remoteID string) (domain.ListID, error) {
@@ -463,7 +463,7 @@ func TestProviderUpdatePayloadClearsDescriptionAndResolvesParent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	provider := New(NewClient(ClientConfig{
+	provider := New(newTestClient(ClientConfig{
 		BaseURL:     server.URL,
 		HTTPClient:  server.Client(),
 		TokenSource: "token",
@@ -514,7 +514,7 @@ func TestProviderUpdatePayloadClearsParentWithNull(t *testing.T) {
 		_, _ = io.WriteString(w, `{"id":"remote-task","name":"updated","status":{"status":"open"},"list":{"id":"remote-list"}}`)
 	}))
 	defer server.Close()
-	provider := New(NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
+	provider := New(newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
 		ProviderID:         "clickup-work",
 		RemoteListResolver: func(domain.ListID) (string, error) { return "remote-list", nil },
 	})
@@ -544,7 +544,7 @@ func TestProviderUpdateSynchronizesTaskListMemberships(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	provider := New(NewClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
+	provider := New(newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
 		ProviderID: "clickup-work",
 		RemoteListResolver: func(listID domain.ListID) (string, error) {
 			switch listID {

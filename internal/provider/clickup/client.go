@@ -11,20 +11,56 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	DefaultBaseURL  = "https://api.clickup.com/api/v2"
-	defaultTimeout  = 15 * time.Second
-	defaultBodySize = 4 << 20
-	defaultMaxPages = 1000
+	DefaultBaseURL         = "https://api.clickup.com/api/v2"
+	defaultTimeout         = 15 * time.Second
+	defaultBodySize        = 4 << 20
+	defaultMaxPages        = 1000
+	defaultRequestInterval = time.Second
 )
 
 // HTTPDoer is the part of http.Client used by Client. It keeps transport
 // behavior injectable without requiring a custom HTTP implementation.
 type HTTPDoer interface {
 	Do(*http.Request) (*http.Response, error)
+}
+
+type requestPacer struct {
+	mu       sync.Mutex
+	interval time.Duration
+	next     time.Time
+}
+
+func (p *requestPacer) wait(ctx context.Context) error {
+	if p == nil || p.interval <= 0 {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	scheduled := time.Now()
+	if p.next.After(scheduled) {
+		scheduled = p.next
+	}
+	p.next = scheduled.Add(p.interval)
+	p.mu.Unlock()
+
+	if delay := time.Until(scheduled); delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return ctx.Err()
 }
 
 // ClientConfig configures the ClickUp transport. TokenSource is intentionally
@@ -84,6 +120,7 @@ type Client struct {
 	maxPages       int
 	teamID         string
 	responseLogger func(method, endpoint string, statusCode int, body []byte)
+	requestPacer   *requestPacer
 }
 
 func (c *Client) String() string {
@@ -202,6 +239,7 @@ func newClient(config ClientConfig) *Client {
 		maxPages:       config.MaxPages,
 		teamID:         strings.TrimSpace(config.TeamID),
 		responseLogger: config.ResponseLogger,
+		requestPacer:   &requestPacer{interval: defaultRequestInterval},
 	}
 }
 
@@ -724,6 +762,10 @@ func (c *Client) doJSONEndpoint(ctx context.Context, method string, endpoint str
 	request.Header.Set("Accept", "application/json")
 	if input != nil {
 		request.Header.Set("Content-Type", "application/json")
+	}
+
+	if err := c.requestPacer.wait(requestContext); err != nil {
+		return &RequestError{Method: method, URL: endpoint, Err: err}
 	}
 
 	response, err := c.httpClient.Do(request)
