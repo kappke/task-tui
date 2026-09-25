@@ -117,6 +117,12 @@ func TestClientStartsAndStopsTaskTimeEntries(t *testing.T) {
 			}
 			requests++
 			_, _ = io.WriteString(w, `{"data":{"id":"entry-1","task":{"id":"remote-task","name":"Task"},"start":"1595289395842","duration":-53}}`)
+		case "/team/workspace-1/time_entries":
+			if r.URL.Query().Get("start_date") == "" || r.URL.Query().Get("end_date") == "" || r.URL.Query().Get("include_location_names") != "true" {
+				t.Errorf("history query = %v", r.URL.Query())
+			}
+			requests++
+			_, _ = io.WriteString(w, `{"data":[{"id":"entry-1","task":{"id":"remote-task","name":"Task"},"start":"1595289395842","end":"1595289452790","duration":"56948"}]}`)
 		case "/team/workspace-1/time_entries/stop":
 			if r.Method != http.MethodPost || r.Header.Get("Content-Type") != "application/json" {
 				t.Errorf("stop request = %s %s content-type=%q", r.Method, r.URL.Path, r.Header.Get("Content-Type"))
@@ -135,22 +141,26 @@ func TestClientStartsAndStopsTaskTimeEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartTimeEntry() error = %v", err)
 	}
-	if started.Task.ID.String() != "remote-task" || started.Duration != -53 {
+	if started.Task.ID.String() != "remote-task" || started.Duration.String() != "-53" {
 		t.Fatalf("started entry = %#v", started)
 	}
 	running, active, err := client.GetRunningTimeEntry(context.Background(), "workspace-1")
 	if err != nil || !active || running.Task.ID.String() != "remote-task" {
 		t.Fatalf("GetRunningTimeEntry() = %#v, active=%v, error=%v", running, active, err)
 	}
+	entries, err := client.GetTimeEntries(context.Background(), "workspace-1", time.Unix(1, 0), time.Unix(2, 0))
+	if err != nil || len(entries) != 1 || entries[0].Task.ID.String() != "remote-task" || entries[0].Duration.String() != "56948" {
+		t.Fatalf("GetTimeEntries() = %#v, error=%v", entries, err)
+	}
 	stopped, err := client.StopTimeEntry(context.Background(), "workspace-1")
 	if err != nil {
 		t.Fatalf("StopTimeEntry() error = %v", err)
 	}
-	if stopped.Task.ID.String() != "remote-task" || stopped.Duration != 56948 {
+	if stopped.Task.ID.String() != "remote-task" || stopped.Duration.String() != "56948" {
 		t.Fatalf("stopped entry = %#v", stopped)
 	}
-	if requests != 3 {
-		t.Fatalf("request count = %d, want 3", requests)
+	if requests != 4 {
+		t.Fatalf("request count = %d, want 4", requests)
 	}
 }
 

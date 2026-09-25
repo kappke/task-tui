@@ -15,25 +15,26 @@ import (
 type Kind string
 
 const (
-	KindQuit               Kind = "quit"
-	KindRefresh            Kind = "refresh"
-	KindFetchLists         Kind = "fetch_lists"
-	KindFetchTasks         Kind = "fetch_tasks"
-	KindFetchTask          Kind = "fetch_task"
-	KindSearch             Kind = "search"
-	KindCreateSpace        Kind = "create_space"
-	KindCreateList         Kind = "create_list"
-	KindCreateTask         Kind = "create_task"
-	KindUpdateTask         Kind = "update_task"
-	KindCompleteTask       Kind = "complete_task"
-	KindDeleteTask         Kind = "delete_task"
-	KindMoveTask           Kind = "move_task"
-	KindAddTaskToList      Kind = "add_task_to_list"
-	KindRemoveTaskFromList Kind = "remove_task_from_list"
-	KindTransferTask       Kind = "transfer_task"
-	KindStartTaskTracking  Kind = "start_task_tracking"
-	KindStopTaskTracking   Kind = "stop_task_tracking"
-	KindPollTaskTracking   Kind = "poll_task_tracking"
+	KindQuit                Kind = "quit"
+	KindRefresh             Kind = "refresh"
+	KindFetchLists          Kind = "fetch_lists"
+	KindFetchTasks          Kind = "fetch_tasks"
+	KindFetchTask           Kind = "fetch_task"
+	KindSearch              Kind = "search"
+	KindCreateSpace         Kind = "create_space"
+	KindCreateList          Kind = "create_list"
+	KindCreateTask          Kind = "create_task"
+	KindUpdateTask          Kind = "update_task"
+	KindCompleteTask        Kind = "complete_task"
+	KindDeleteTask          Kind = "delete_task"
+	KindMoveTask            Kind = "move_task"
+	KindAddTaskToList       Kind = "add_task_to_list"
+	KindRemoveTaskFromList  Kind = "remove_task_from_list"
+	KindTransferTask        Kind = "transfer_task"
+	KindStartTaskTracking   Kind = "start_task_tracking"
+	KindStopTaskTracking    Kind = "stop_task_tracking"
+	KindPollTaskTracking    Kind = "poll_task_tracking"
+	KindLoadTrackingHistory Kind = "load_tracking_history"
 )
 
 // Command is a normalized request from the UI to the application layer.
@@ -142,6 +143,8 @@ func (c Command) Validate() error {
 	case KindStopTaskTracking:
 		return nil
 	case KindPollTaskTracking:
+		return nil
+	case KindLoadTrackingHistory:
 		return nil
 	default:
 		return fmt.Errorf("%w: unknown kind %q", ErrInvalid, c.Kind)

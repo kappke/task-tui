@@ -280,6 +280,9 @@ func (m *Model) applySnapshot(data Snapshot) Model {
 	oldTask := m.UI.SelectedTask
 	m.Data = cloneSnapshot(data)
 	m.UI.ClockNow = time.Now().UTC()
+	if m.UI.Mode == ModeTrackingHistory {
+		m.UI.TrackingHistoryCursor = clamp(m.UI.TrackingHistoryCursor, 0, maxInt(len(m.Data.TrackedTimeEntries)-1, 0))
+	}
 	m.ensureActiveProvider()
 	m.UI.ExpandedNodes = cloneExpanded(m.UI.ExpandedNodes)
 	m.initializeExpansion()
@@ -588,6 +591,9 @@ func (m Model) updateKey(key KeyMsg) (Model, Cmd) {
 	if m.UI.Mode == ModeColumnConfig {
 		return m.updateColumnConfig(keyName)
 	}
+	if m.UI.Mode == ModeTrackingHistory {
+		return m.updateTrackingHistory(keyName)
+	}
 	if m.UI.Mode == ModeDetail {
 		return m.updateDetail(key)
 	}
@@ -617,6 +623,31 @@ func (m Model) updateDetail(key KeyMsg) (Model, Cmd) {
 		m.UI.Quitting = true
 		m.Status = Status{Level: StatusInfo, Text: "Quit requested"}
 		return m, m.emit(AppCommand{Kind: CommandQuit})
+	}
+	return m, nil
+}
+
+func (m Model) updateTrackingHistory(key string) (Model, Cmd) {
+	entries := m.sortedTrackedTimeEntries()
+	switch key {
+	case "j", "down":
+		if len(entries) > 0 {
+			m.UI.TrackingHistoryCursor = clamp(m.UI.TrackingHistoryCursor+1, 0, len(entries)-1)
+		}
+	case "k", "up":
+		if len(entries) > 0 {
+			m.UI.TrackingHistoryCursor = clamp(m.UI.TrackingHistoryCursor-1, 0, len(entries)-1)
+		}
+	case "g":
+		m.UI.TrackingHistoryCursor = 0
+	case "G":
+		m.UI.TrackingHistoryCursor = maxInt(len(entries)-1, 0)
+	case "r":
+		m.Status = Status{Level: StatusInfo, Text: "Refreshing tracked time history..."}
+		return m, m.emit(AppCommand{Kind: CommandLoadTrackingHistory})
+	case "esc", "escape", "q":
+		m.UI.Mode = ModeBrowse
+		m.Status = Status{Level: StatusInfo, Text: "Tracked time history closed"}
 	}
 	return m, nil
 }
@@ -696,6 +727,11 @@ func (m Model) updateBrowse(key KeyMsg, action Action) (Model, Cmd) {
 		}
 		m.Status = Status{Level: StatusInfo, Text: "Stopping task tracking..."}
 		return m, m.emit(AppCommand{Kind: CommandStopTracking})
+	case ActionShowTrackingHistory:
+		m.UI.Mode = ModeTrackingHistory
+		m.UI.TrackingHistoryCursor = 0
+		m.Status = Status{Level: StatusInfo, Text: "Loading tracked time history..."}
+		return m, m.emit(AppCommand{Kind: CommandLoadTrackingHistory})
 	case ActionDelete:
 		command, ok := m.taskCommand(CommandDeleteTask)
 		if !ok {

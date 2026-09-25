@@ -100,7 +100,7 @@ func (s *Store) UpdateTaskWithQueue(ctx context.Context, task domain.Task, opera
 
 // UpdateTaskAndDeleteAppState commits a task update and its completed tracking
 // state together so a local timer cannot be counted twice after a crash.
-func (s *Store) UpdateTaskAndDeleteAppState(ctx context.Context, task domain.Task, key string) (domain.Task, error) {
+func (s *Store) UpdateTaskAndDeleteAppState(ctx context.Context, task domain.Task, key string, entry *domain.TrackedTimeEntry) (domain.Task, error) {
 	if strings.TrimSpace(key) == "" {
 		return domain.Task{}, errors.New("sqlite: app state key is empty")
 	}
@@ -123,6 +123,11 @@ func (s *Store) UpdateTaskAndDeleteAppState(ctx context.Context, task domain.Tas
 	}
 	if err := replaceTaskMemberships(ctx, tx, record); err != nil {
 		return domain.Task{}, fmt.Errorf("sqlite: update tracked task %q memberships: %w", task.ID, err)
+	}
+	if entry != nil {
+		if err := upsertTrackedTimeEntry(ctx, tx, entry); err != nil {
+			return domain.Task{}, fmt.Errorf("sqlite: save tracked time entry for task %q: %w", task.ID, err)
+		}
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM app_state WHERE key = ?", key); err != nil {
 		return domain.Task{}, fmt.Errorf("sqlite: clear app state %q: %w", key, err)

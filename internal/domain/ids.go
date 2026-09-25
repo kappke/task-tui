@@ -27,6 +27,9 @@ type OperationID string
 // ConflictID identifies a synchronization conflict.
 type ConflictID string
 
+// TimeEntryID identifies a locally stored tracked-time entry.
+type TimeEntryID string
+
 func (id ProviderID) IsZero() bool { return id == "" }
 
 func (id ProviderID) String() string { return string(id) }
@@ -110,6 +113,12 @@ func (id ConflictID) IsValid() bool { return id.Validate() == nil }
 
 // ValidateConflictID validates a synchronization conflict identifier.
 func ValidateConflictID(id ConflictID) error { return id.Validate() }
+
+func (id TimeEntryID) IsZero() bool { return id == "" }
+
+func (id TimeEntryID) String() string { return string(id) }
+
+func (id TimeEntryID) Validate() error { return validateID("time entry", string(id)) }
 
 func validateID(kind, value string) error {
 	if value == "" || strings.TrimSpace(value) != value {

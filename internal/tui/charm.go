@@ -86,6 +86,9 @@ var (
 	charmGoodStyle         = lipgloss.NewStyle().Foreground(charmGood)
 	charmWarnStyle         = lipgloss.NewStyle().Foreground(charmWarn)
 	charmErrorStyle        = lipgloss.NewStyle().Foreground(charmError)
+	charmHistoryDayStyle   = lipgloss.NewStyle().Bold(true).Foreground(charmAccent)
+	charmHistoryTimeStyle  = lipgloss.NewStyle().Foreground(charmWarn)
+	charmHistoryTotalStyle = lipgloss.NewStyle().Bold(true).Foreground(charmGood)
 	charmTableHeaderStyle  = lipgloss.NewStyle().Bold(true).Foreground(charmMuted)
 	charmSelectedTaskStyle = lipgloss.NewStyle().
 				Bold(true).
@@ -551,6 +554,9 @@ func charmKeyMessage(msg tea.KeyMsg) KeyMsg {
 }
 
 func (m *CharmModel) charmBody(width, height int) string {
+	if m.core.UI.Mode == ModeTrackingHistory {
+		return m.clipBody(strings.Join(m.charmTrackingHistoryLines(width, height), "\n"), width, height)
+	}
 	if m.core.UI.Mode == ModeDetail || m.core.UI.Mode == ModeColumnConfig {
 		lines := m.core.visibleModeLines(width, height)
 		return m.clipBody(strings.Join(lines, "\n"), width, height)
@@ -580,6 +586,74 @@ func (m *CharmModel) charmBody(width, height int) string {
 		m.charmPanel(strings.Join(m.charmTaskLines(maxInt(rightWidth-4, 1), maxInt(height-2, 1)), "\n"), rightWidth, height, PanelTasks),
 	)
 	return m.clipBody(body, width, height)
+}
+
+func (m *CharmModel) charmTrackingHistoryLines(width, height int) []string {
+	entries := m.core.sortedTrackedTimeEntries()
+	lines := []string{
+		charmSectionStyle.Render(fit("TRACKED TASK TIME | last 30 days", width)),
+		charmMutedStyle.Render(fit("start–end   duration   task   provider", width)),
+	}
+	if len(entries) == 0 {
+		lines = append(lines, charmMutedStyle.Render(fit("(no tracked task entries in the last 30 days)", width)))
+		return lines
+	}
+	selectedLine := 2
+	lastDay := ""
+	for index, entry := range entries {
+		day := entry.StartedAt.In(time.Local).Format(time.DateOnly)
+		if day != lastDay {
+			lines = append(lines, charmHistoryDayStyle.Render(fit(day, width)))
+			lastDay = day
+		}
+		if index == m.core.UI.TrackingHistoryCursor {
+			selectedLine = len(lines)
+		}
+		lines = append(lines, m.charmTrackingHistoryEntry(entry, index == m.core.UI.TrackingHistoryCursor, width))
+	}
+	if len(lines) <= height {
+		return lines
+	}
+	start := clamp(selectedLine-height/2, 0, len(lines)-height)
+	return lines[start : start+height]
+}
+
+func (m *CharmModel) charmTrackingHistoryEntry(entry TrackedTimeEntry, selected bool, width int) string {
+	providerName := string(entry.ProviderID)
+	for _, provider := range m.core.Data.Providers {
+		if provider.ID == entry.ProviderID {
+			providerName = displayProviderName(provider)
+			break
+		}
+	}
+	timeRange := entry.StartedAt.In(time.Local).Format("15:04") + "–" + entry.EndedAt.In(time.Local).Format("15:04")
+	duration := formatHistoryDuration(entry.Duration)
+	provider := "[" + safeText(providerName) + "]"
+	timeWidth := runeCount(timeRange)
+	durationWidth := runeCount(duration)
+	providerWidth := minInt(runeCount(provider), maxInt(width/4, 0))
+	const gap = "  "
+	fixedWidth := 2 + timeWidth + runeCount(gap) + durationWidth + runeCount(gap) + providerWidth
+	if fixedWidth > width {
+		providerWidth = maxInt(providerWidth-(fixedWidth-width), 0)
+		fixedWidth = 2 + timeWidth + runeCount(gap) + durationWidth + runeCount(gap) + providerWidth
+	}
+	taskWidth := maxInt(width-fixedWidth, 0)
+	marker := "  "
+	if selected {
+		marker = "> "
+	}
+	timeCell := fit(timeRange, timeWidth)
+	durationCell := fit(duration, durationWidth)
+	taskCell := fit(safeText(entry.TaskTitle), taskWidth)
+	providerCell := fit(provider, providerWidth)
+	if selected {
+		return charmSelectedTaskStyle.Render(marker + timeCell + gap + durationCell + gap + taskCell + providerCell)
+	}
+	return charmMutedStyle.Render(marker) +
+		charmHistoryTimeStyle.Render(timeCell) + gap +
+		charmHistoryTotalStyle.Render(durationCell) + gap +
+		taskCell + charmMutedStyle.Render(providerCell)
 }
 
 func (m *CharmModel) clipBody(content string, width, height int) string {
@@ -893,6 +967,9 @@ func (m *CharmModel) charmModeLine(width int) string {
 	if m.core.UI.Mode == ModeColumnConfig {
 		return fit("COLUMNS: j/k select | space show/hide | +/- or h/l resize | [/] reorder | f fixate", width)
 	}
+	if m.core.UI.Mode == ModeTrackingHistory {
+		return fit("TRACKED TASK TIME | sorted newest first", width)
+	}
 	if m.core.UI.Mode == ModeConfirm {
 		return charmWarnStyle.Render(fit("CONFIRM: "+safeText(m.core.UI.ConfirmPrompt)+"  [y/enter] yes  [n/esc] no", width))
 	}
@@ -992,6 +1069,8 @@ func (m *CharmModel) charmFooter(width int) string {
 		helpKeys = newCharmDetailHelpKeyMap()
 	} else if m.core.UI.Mode == ModeColumnConfig {
 		helpKeys = newCharmColumnHelpKeyMap()
+	} else if m.core.UI.Mode == ModeTrackingHistory {
+		helpKeys = newCharmTrackingHistoryHelpKeyMap()
 	}
 	return fit(helpModel.View(helpKeys), width)
 }
@@ -1014,6 +1093,7 @@ func newCharmHelpKeyMap() charmHelpKeyMap {
 		bind([]string{"-"}, "-", "collapse all"),
 		bind([]string{"n", "e", "x", "d"}, "n/e/x/d", "task"),
 		bind([]string{"t", "T"}, "t/T", "track/stop"),
+		bind([]string{"a"}, "a", "tracked time"),
 		bind([]string{"/"}, "/", "search"),
 		bind([]string{"f"}, "f", "filter"),
 		bind([]string{"o"}, "o", "sort"),
@@ -1057,6 +1137,19 @@ func newCharmColumnHelpKeyMap() charmHelpKeyMap {
 		bind([]string{"[", "]"}, "[/]", "reorder"),
 		bind([]string{"+", "=", "-", "h", "l", "left", "right"}, "+/-", "resize"),
 		bind([]string{"enter", "esc"}, "enter", "close"),
+	}
+	return charmHelpKeyMap{short: short, full: [][]key.Binding{short}}
+}
+
+func newCharmTrackingHistoryHelpKeyMap() charmHelpKeyMap {
+	bind := func(keys []string, helpKey, description string) key.Binding {
+		return key.NewBinding(key.WithKeys(keys...), key.WithHelp(helpKey, description))
+	}
+	short := []key.Binding{
+		bind([]string{"j", "k", "up", "down"}, "j/k", "navigate"),
+		bind([]string{"g", "G"}, "g/G", "first/last"),
+		bind([]string{"r"}, "r", "refresh"),
+		bind([]string{"esc"}, "esc", "close"),
 	}
 	return charmHelpKeyMap{short: short, full: [][]key.Binding{short}}
 }

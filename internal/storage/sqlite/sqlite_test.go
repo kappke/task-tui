@@ -122,7 +122,7 @@ func TestOpenRunsInitialMigrationAndConfiguresSQLite(t *testing.T) {
 
 	for _, table := range []string{
 		"providers", "spaces", "lists", "tasks", "provider_metadata", "sync_operations",
-		"sync_bases", "conflicts", "app_state", "task_list_memberships", "schema_migrations",
+		"sync_bases", "conflicts", "app_state", "task_list_memberships", "tracked_time_entries", "schema_migrations",
 	} {
 		var exists int
 		if err := store.SQLDB().QueryRow(
@@ -138,8 +138,8 @@ func TestOpenRunsInitialMigrationAndConfiguresSQLite(t *testing.T) {
 	if err := store.SQLDB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatalf("migration count: %v", err)
 	}
-	if migrationCount != 8 {
-		t.Fatalf("migration count = %d, want 8", migrationCount)
+	if migrationCount != 9 {
+		t.Fatalf("migration count = %d, want 9", migrationCount)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("close: %v", err)
@@ -153,8 +153,8 @@ func TestOpenRunsInitialMigrationAndConfiguresSQLite(t *testing.T) {
 	if err := reopened.SQLDB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatalf("reopen migration count: %v", err)
 	}
-	if migrationCount != 8 {
-		t.Fatalf("reopen migration count = %d, want 8", migrationCount)
+	if migrationCount != 9 {
+		t.Fatalf("reopen migration count = %d, want 9", migrationCount)
 	}
 }
 

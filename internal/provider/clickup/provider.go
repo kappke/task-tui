@@ -17,6 +17,8 @@ import (
 
 const ProviderType = "clickup"
 
+const maxTimeEntryMillis = int64(1<<63-1) / int64(time.Millisecond)
+
 const (
 	Type              = ProviderType
 	DefaultProviderID = domain.ProviderID(ProviderType)
@@ -248,6 +250,7 @@ var _ provider.Provider = (*Provider)(nil)
 
 var _ provider.Authenticator = (*Provider)(nil)
 var _ provider.TaskTimeTracker = (*Provider)(nil)
+var _ provider.TaskTimeEntryLister = (*Provider)(nil)
 
 // Authenticate resolves the configured token without performing eager
 // authentication during construction. API requests authenticate themselves
@@ -891,7 +894,17 @@ func (p *Provider) StartTaskTimeTracking(ctx context.Context, workspaceID, remot
 	if err != nil {
 		return provider.TimeTrackingEntry{}, fmt.Errorf("parse ClickUp time entry start: %w", err)
 	}
-	return provider.TimeTrackingEntry{TaskID: entry.Task.ID.String(), TaskTitle: entry.Task.Name, StartedAt: startedAt, Duration: time.Duration(max(entry.Duration, 0)) * time.Millisecond}, nil
+	duration, err := parseTimeEntryDuration(entry.Duration.String())
+	if err != nil {
+		return provider.TimeTrackingEntry{}, fmt.Errorf("parse ClickUp time entry duration: %w", err)
+	}
+	return provider.TimeTrackingEntry{
+		TaskID:        entry.Task.ID.String(),
+		TaskTitle:     entry.Task.Name,
+		RemoteEntryID: entry.ID.String(),
+		StartedAt:     startedAt,
+		Duration:      max(duration, 0),
+	}, nil
 }
 
 // StopTaskTimeTracking stops the authenticated user's running timer.
@@ -907,7 +920,22 @@ func (p *Provider) StopTaskTimeTracking(ctx context.Context, workspaceID string)
 	if err != nil {
 		return provider.TimeTrackingEntry{}, fmt.Errorf("parse ClickUp time entry start: %w", err)
 	}
-	return provider.TimeTrackingEntry{TaskID: entry.Task.ID.String(), TaskTitle: entry.Task.Name, StartedAt: startedAt, Duration: time.Duration(max(entry.Duration, 0)) * time.Millisecond}, nil
+	endedAt, err := parseTimeEntryStart(entry.End.String())
+	if err != nil {
+		return provider.TimeTrackingEntry{}, fmt.Errorf("parse ClickUp time entry end: %w", err)
+	}
+	duration, err := parseTimeEntryDuration(entry.Duration.String())
+	if err != nil {
+		return provider.TimeTrackingEntry{}, fmt.Errorf("parse ClickUp time entry duration: %w", err)
+	}
+	return provider.TimeTrackingEntry{
+		TaskID:        entry.Task.ID.String(),
+		TaskTitle:     entry.Task.Name,
+		RemoteEntryID: entry.ID.String(),
+		StartedAt:     startedAt,
+		EndedAt:       endedAt,
+		Duration:      max(duration, 0),
+	}, nil
 }
 
 // GetRunningTaskTimeTracking returns the timer currently running in a workspace.
@@ -930,12 +958,61 @@ func (p *Provider) GetRunningTaskTimeTracking(ctx context.Context, workspaceID s
 	}, true, nil
 }
 
+// ListTaskTimeEntries returns completed ClickUp time entries in a date range.
+func (p *Provider) ListTaskTimeEntries(ctx context.Context, workspaceID string, start, end time.Time) ([]provider.TimeTrackingEntry, error) {
+	if err := p.ensureReady(); err != nil {
+		return nil, err
+	}
+	entries, err := p.client.GetTimeEntries(ctx, workspaceID, start, end)
+	if err != nil {
+		return nil, fmt.Errorf("list ClickUp time entries: %w", err)
+	}
+	result := make([]provider.TimeTrackingEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Task.ID.String() == "" {
+			continue
+		}
+		startedAt, err := parseTimeEntryStart(entry.Start.String())
+		if err != nil {
+			return nil, fmt.Errorf("parse ClickUp time entry start: %w", err)
+		}
+		endedAt, err := parseTimeEntryStart(entry.End.String())
+		if err != nil {
+			continue
+		}
+		duration, err := parseTimeEntryDuration(entry.Duration.String())
+		if err != nil {
+			return nil, fmt.Errorf("parse ClickUp time entry duration: %w", err)
+		}
+		if duration < 0 {
+			continue
+		}
+		result = append(result, provider.TimeTrackingEntry{
+			TaskID:        entry.Task.ID.String(),
+			TaskTitle:     entry.Task.Name,
+			RemoteEntryID: entry.ID.String(),
+			StartedAt:     startedAt,
+			EndedAt:       endedAt,
+			Duration:      duration,
+		})
+	}
+	return result, nil
+}
+
 func parseTimeEntryStart(value string) (time.Time, error) {
 	millis, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
 	if err != nil || millis <= 0 {
 		return time.Time{}, fmt.Errorf("invalid ClickUp timestamp %q", value)
 	}
 	return time.UnixMilli(millis).UTC(), nil
+}
+
+func parseTimeEntryDuration(value string) (time.Duration, error) {
+	millis, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || millis > maxTimeEntryMillis || millis < -maxTimeEntryMillis {
+		return 0, fmt.Errorf("invalid ClickUp duration %q", value)
+	}
+	return time.Duration(millis) * time.Millisecond, nil
 }
 
 // GetSpaces, GetLists, GetTasks, and GetTask are small aliases for callers

@@ -100,10 +100,12 @@ type WorkspaceMetadataProvider interface {
 // TimeTrackingEntry describes the task and duration returned by a provider's
 // native timer. TaskID is provider-scoped and therefore contains the remote ID.
 type TimeTrackingEntry struct {
-	TaskID    string
-	TaskTitle string
-	StartedAt time.Time
-	Duration  time.Duration
+	TaskID        string
+	TaskTitle     string
+	RemoteEntryID string
+	StartedAt     time.Time
+	EndedAt       time.Time
+	Duration      time.Duration
 }
 
 // TaskTimeTracker is an optional provider capability for native task timers.
@@ -111,4 +113,9 @@ type TaskTimeTracker interface {
 	StartTaskTimeTracking(ctx context.Context, workspaceID, remoteTaskID string) (TimeTrackingEntry, error)
 	StopTaskTimeTracking(ctx context.Context, workspaceID string) (TimeTrackingEntry, error)
 	GetRunningTaskTimeTracking(ctx context.Context, workspaceID string) (TimeTrackingEntry, bool, error)
+}
+
+// TaskTimeEntryLister loads completed time entries recorded for a workspace.
+type TaskTimeEntryLister interface {
+	ListTaskTimeEntries(ctx context.Context, workspaceID string, start, end time.Time) ([]TimeTrackingEntry, error)
 }

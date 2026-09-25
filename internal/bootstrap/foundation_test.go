@@ -289,6 +289,13 @@ func TestFoundationHandlerStartsAndStopsLocalTaskTracking(t *testing.T) {
 	if updated.TimeTracked == nil || *updated.TimeTracked < baseTracked+2*time.Second || *updated.TimeTracked > baseTracked+3*time.Second {
 		t.Fatalf("tracked duration = %v, want about %s", updated.TimeTracked, baseTracked+2300*time.Millisecond)
 	}
+	history, err := store.ListTrackedTimeEntries(ctx, now.Add(-time.Hour), time.Now().UTC().Add(time.Second), 10)
+	if err != nil || len(history) != 1 {
+		t.Fatalf("tracked time history = %#v, error=%v, want one interval", history, err)
+	}
+	if history[0].TaskID == nil || *history[0].TaskID != "task" || history[0].TaskTitle != "Write tests" || history[0].Duration < 2*time.Second {
+		t.Fatalf("tracked time entry = %#v", history[0])
+	}
 	session, err = loadActiveTrackingSession(ctx, store)
 	if err != nil || session != nil {
 		t.Fatalf("active session after stop = %#v, error=%v", session, err)
@@ -384,11 +391,38 @@ func TestFoundationHandlerPollsAndReconcilesExternalClickUpTracking(t *testing.T
 	if err != nil || session != nil {
 		t.Fatalf("active session after external stop = %#v, error=%v", session, err)
 	}
+	tracker.history = []providerpkg.TimeTrackingEntry{{
+		TaskID:        "remote-b",
+		TaskTitle:     "Task B",
+		RemoteEntryID: "entry-b",
+		StartedAt:     now.Add(-5 * time.Minute),
+		EndedAt:       now.Add(-4 * time.Minute),
+		Duration:      time.Minute,
+	}}
+	event, err = handler.Handle(ctx, command.Command{Kind: command.KindLoadTrackingHistory})
+	if err != nil || event.Kind != command.EventChanged {
+		t.Fatalf("load tracking history: event=%#v error=%v", event, err)
+	}
+	history, err := store.ListTrackedTimeEntries(ctx, now.Add(-time.Hour), now.Add(time.Second), 10)
+	if err != nil || len(history) != 1 {
+		t.Fatalf("cached remote history = %#v, error=%v", history, err)
+	}
+	if history[0].TaskID == nil || *history[0].TaskID != "task-b" || history[0].RemoteEntryID == nil || *history[0].RemoteEntryID != "entry-b" {
+		t.Fatalf("cached remote time entry = %#v", history[0])
+	}
+	if _, err := handler.Handle(ctx, command.Command{Kind: command.KindLoadTrackingHistory}); err != nil {
+		t.Fatalf("reload tracking history: %v", err)
+	}
+	history, err = store.ListTrackedTimeEntries(ctx, now.Add(-time.Hour), now.Add(time.Second), 10)
+	if err != nil || len(history) != 1 {
+		t.Fatalf("reloaded remote history = %#v, error=%v; remote entry should be idempotent", history, err)
+	}
 }
 
 type fakeTaskTimeTracker struct {
 	running bool
 	entry   providerpkg.TimeTrackingEntry
+	history []providerpkg.TimeTrackingEntry
 }
 
 func (f *fakeTaskTimeTracker) StartTaskTimeTracking(_ context.Context, _, remoteTaskID string) (providerpkg.TimeTrackingEntry, error) {
@@ -405,6 +439,10 @@ func (f *fakeTaskTimeTracker) StopTaskTimeTracking(context.Context, string) (pro
 
 func (f *fakeTaskTimeTracker) GetRunningTaskTimeTracking(context.Context, string) (providerpkg.TimeTrackingEntry, bool, error) {
 	return f.entry, f.running, nil
+}
+
+func (f *fakeTaskTimeTracker) ListTaskTimeEntries(context.Context, string, time.Time, time.Time) ([]providerpkg.TimeTrackingEntry, error) {
+	return append([]providerpkg.TimeTrackingEntry(nil), f.history...), nil
 }
 
 func TestCurrentSQLiteRunnerUpgradesLegacyBootstrapDatabase(t *testing.T) {

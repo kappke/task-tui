@@ -57,15 +57,26 @@ const (
 // Snapshot is the cached, normalized data supplied by the application layer.
 // The TUI treats it as input state and never performs persistence itself.
 type Snapshot struct {
-	Providers        []Provider
-	Workspaces       []Workspace
-	Spaces           []Space
-	Lists            []List
-	Tasks            []Task
-	ActiveTracking   *ActiveTracking
-	EditorOptions    []TaskEditorOptions
-	TaskColumns      []ListTaskColumn
-	TaskColumnValues []TaskColumnValueSet
+	Providers          []Provider
+	Workspaces         []Workspace
+	Spaces             []Space
+	Lists              []List
+	Tasks              []Task
+	ActiveTracking     *ActiveTracking
+	TrackedTimeEntries []TrackedTimeEntry
+	EditorOptions      []TaskEditorOptions
+	TaskColumns        []ListTaskColumn
+	TaskColumnValues   []TaskColumnValueSet
+}
+
+// TrackedTimeEntry is one completed task timer interval.
+type TrackedTimeEntry struct {
+	ProviderID ProviderID
+	TaskID     TaskID
+	TaskTitle  string
+	StartedAt  time.Time
+	EndedAt    time.Time
+	Duration   time.Duration
 }
 
 // ActiveTracking identifies the task whose timer is currently running.
@@ -233,18 +244,19 @@ const (
 type Mode string
 
 const (
-	ModeBrowse       Mode = "browse"
-	ModeDetail       Mode = "detail"
-	ModeColumnConfig Mode = "column_config"
-	ModeSearch       Mode = "search"
-	ModeFilter       Mode = "filter"
-	ModeSort         Mode = "sort"
-	ModeCommand      Mode = "command"
-	ModeCreateSpace  Mode = "create_space"
-	ModeCreateList   Mode = "create_list"
-	ModeCreateTask   Mode = "create_task"
-	ModeEditTask     Mode = "edit_task"
-	ModeConfirm      Mode = "confirm"
+	ModeBrowse          Mode = "browse"
+	ModeDetail          Mode = "detail"
+	ModeColumnConfig    Mode = "column_config"
+	ModeSearch          Mode = "search"
+	ModeFilter          Mode = "filter"
+	ModeSort            Mode = "sort"
+	ModeCommand         Mode = "command"
+	ModeCreateSpace     Mode = "create_space"
+	ModeCreateList      Mode = "create_list"
+	ModeCreateTask      Mode = "create_task"
+	ModeEditTask        Mode = "edit_task"
+	ModeConfirm         Mode = "confirm"
+	ModeTrackingHistory Mode = "tracking_history"
 )
 
 // EditField identifies the editable fields shown by the task detail editor.
@@ -271,6 +283,7 @@ type UIState struct {
 	TreeHorizontalOffset    int
 	TaskHorizontalOffset    int
 	DetailOffset            int
+	TrackingHistoryCursor   int
 	SelectedNode            TreeNodeRef
 	SelectedTask            TaskRef
 	ExpandedNodes           map[TreeNodeRef]bool
@@ -404,6 +417,7 @@ func cloneSnapshot(in Snapshot) Snapshot {
 	out.Spaces = append([]Space(nil), in.Spaces...)
 	out.Lists = append([]List(nil), in.Lists...)
 	out.Tasks = append([]Task(nil), in.Tasks...)
+	out.TrackedTimeEntries = append([]TrackedTimeEntry(nil), in.TrackedTimeEntries...)
 	if in.ActiveTracking != nil {
 		tracking := *in.ActiveTracking
 		out.ActiveTracking = &tracking

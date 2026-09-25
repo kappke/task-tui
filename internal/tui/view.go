@@ -100,6 +100,9 @@ func (m Model) bodyLines(width, height int) []string {
 	if m.UI.Mode == ModeDetail {
 		return m.visibleDetailLines(width, height)
 	}
+	if m.UI.Mode == ModeTrackingHistory {
+		return m.visibleTrackingHistoryLines(width, height)
+	}
 	if m.UI.Mode == ModeColumnConfig {
 		return m.visibleColumnConfigLines(width, height)
 	}
@@ -441,7 +444,81 @@ func (m Model) visibleModeLines(width, height int) []string {
 	if m.UI.Mode == ModeDetail {
 		return m.visibleDetailLines(width, height)
 	}
+	if m.UI.Mode == ModeTrackingHistory {
+		return m.visibleTrackingHistoryLines(width, height)
+	}
 	return m.visibleColumnConfigLines(width, height)
+}
+
+func (m Model) sortedTrackedTimeEntries() []TrackedTimeEntry {
+	entries := append([]TrackedTimeEntry(nil), m.Data.TrackedTimeEntries...)
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].StartedAt.Equal(entries[j].StartedAt) {
+			if entries[i].ProviderID == entries[j].ProviderID {
+				return entries[i].TaskID < entries[j].TaskID
+			}
+			return entries[i].ProviderID < entries[j].ProviderID
+		}
+		return entries[i].StartedAt.After(entries[j].StartedAt)
+	})
+	return entries
+}
+
+func (m Model) trackingHistoryLines(width int) []string {
+	entries := m.sortedTrackedTimeEntries()
+	lines := []string{
+		fit("TRACKED TASK TIME | last 30 days", width),
+		fit("j/k navigate | g/G first/last | r refresh | esc close", width),
+	}
+	if len(entries) == 0 {
+		return append(lines, fit("(no tracked task entries in the last 30 days)", width))
+	}
+	lastDay := ""
+	for index, entry := range entries {
+		day := entry.StartedAt.In(time.Local).Format(time.DateOnly)
+		if day != lastDay {
+			lines = append(lines, fit(day, width))
+			lastDay = day
+		}
+		marker := "  "
+		if index == m.UI.TrackingHistoryCursor {
+			marker = "> "
+		}
+		providerName := string(entry.ProviderID)
+		for _, provider := range m.Data.Providers {
+			if provider.ID == entry.ProviderID {
+				providerName = displayProviderName(provider)
+				break
+			}
+		}
+		interval := entry.StartedAt.In(time.Local).Format("15:04") + "–" + entry.EndedAt.In(time.Local).Format("15:04")
+		line := fmt.Sprintf("%s%s  %s  %s  [%s]", marker, interval, formatHistoryDuration(entry.Duration), safeText(entry.TaskTitle), safeText(providerName))
+		lines = append(lines, fit(line, width))
+	}
+	return lines
+}
+
+func (m Model) visibleTrackingHistoryLines(width, height int) []string {
+	lines := m.trackingHistoryLines(width)
+	height = maxInt(height, 1)
+	if len(lines) <= height {
+		return lines
+	}
+	selectedLine := 2
+	lastDay := ""
+	for index, entry := range m.sortedTrackedTimeEntries() {
+		day := entry.StartedAt.In(time.Local).Format(time.DateOnly)
+		if day != lastDay {
+			selectedLine++
+			lastDay = day
+		}
+		if index == m.UI.TrackingHistoryCursor {
+			break
+		}
+		selectedLine++
+	}
+	start := clamp(selectedLine-height/2, 0, len(lines)-height)
+	return lines[start : start+height]
 }
 
 func (m Model) columnConfigLines(width int) []string {
@@ -554,6 +631,9 @@ func (m Model) modeLine(width int) string {
 	if m.UI.Mode == ModeColumnConfig {
 		return fit("COLUMNS: j/k select | space show/hide | +/- resize | [/] reorder | f fixate", width)
 	}
+	if m.UI.Mode == ModeTrackingHistory {
+		return fit("TRACKED TASK TIME | sorted newest first", width)
+	}
 	var prefix, suffix string
 	switch m.UI.Mode {
 	case ModeSearch:
@@ -633,7 +713,10 @@ func (m Model) footerLine() string {
 	if m.UI.Mode == ModeColumnConfig {
 		return "j/k select column | space show/hide | +/- or h/l resize | enter/esc close"
 	}
-	return "j/k move | tab panel | h/l scroll | enter open | +/- expand | g/G first/last | n new | e edit | x complete | d delete | t track/switch | T stop | / search | f filter | o sort | c columns | : commands | r refresh | q quit"
+	if m.UI.Mode == ModeTrackingHistory {
+		return "j/k navigate | g/G first/last | r refresh history | esc close"
+	}
+	return "j/k move | tab panel | h/l scroll | enter open | +/- expand | g/G first/last | n new | e edit | x complete | d delete | t track/switch | T stop | a tracked time | / search | f filter | o sort | c columns | : commands | r refresh | q quit"
 }
 
 func (m Model) trackingLine() string {
@@ -1074,6 +1157,31 @@ func formatClockDuration(value time.Duration) string {
 	minutes := (seconds % 3600) / 60
 	seconds %= 60
 	return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
+}
+
+func formatHistoryDuration(value time.Duration) string {
+	if value <= 0 {
+		return "0m"
+	}
+	minutes := int64(value / time.Minute)
+	if minutes == 0 {
+		return "<1m"
+	}
+	days := minutes / (24 * 60)
+	minutes %= 24 * 60
+	hours := minutes / 60
+	minutes %= 60
+	parts := make([]string, 0, 3)
+	if days > 0 {
+		parts = append(parts, fmt.Sprintf("%dd", days))
+	}
+	if hours > 0 {
+		parts = append(parts, fmt.Sprintf("%dh", hours))
+	}
+	if minutes > 0 {
+		parts = append(parts, fmt.Sprintf("%dm", minutes))
+	}
+	return strings.Join(parts, " ")
 }
 
 func formatTaskDueDate(value *time.Time) string {

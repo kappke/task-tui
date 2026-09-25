@@ -3,6 +3,7 @@ package domain
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -102,6 +103,21 @@ type Task struct {
 	DeletedAt       *time.Time     `json:"deleted_at,omitempty"`
 	CreatedAt       time.Time      `json:"created_at"`
 	UpdatedAt       time.Time      `json:"updated_at"`
+}
+
+// TrackedTimeEntry is one completed interval of time recorded against a task.
+// TaskID is nil when the provider's task has not been cached locally; in that
+// case RemoteTaskID and TaskTitle retain enough identity for history display.
+type TrackedTimeEntry struct {
+	ID            TimeEntryID
+	ProviderID    ProviderID
+	TaskID        *TaskID
+	RemoteTaskID  string
+	RemoteEntryID *string
+	TaskTitle     string
+	StartedAt     time.Time
+	EndedAt       time.Time
+	Duration      time.Duration
 }
 
 // ProviderMetadata stores provider-specific values without adding provider
@@ -315,6 +331,37 @@ func (t Task) Validate() error {
 		return err
 	}
 	return t.SyncState.Validate()
+}
+
+// Validate checks provider ownership, task identity, and interval bounds.
+func (e TrackedTimeEntry) Validate() error {
+	if err := e.ID.Validate(); err != nil {
+		return err
+	}
+	if err := e.ProviderID.Validate(); err != nil {
+		return err
+	}
+	if e.TaskID != nil {
+		if err := e.TaskID.Validate(); err != nil {
+			return err
+		}
+	}
+	if e.TaskID == nil && strings.TrimSpace(e.RemoteTaskID) == "" {
+		return fmt.Errorf("%w: time entry requires a local or remote task ID", ErrInvalidParent)
+	}
+	if err := validateRemoteID(e.RemoteEntryID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(e.TaskTitle) == "" {
+		return fmt.Errorf("%w: time entry task title is empty", ErrInvalidID)
+	}
+	if e.StartedAt.IsZero() || e.EndedAt.IsZero() || e.EndedAt.Before(e.StartedAt) {
+		return fmt.Errorf("%w: time entry interval is invalid", ErrInvalidID)
+	}
+	if e.Duration < 0 {
+		return fmt.Errorf("%w: time entry duration is negative", ErrInvalidID)
+	}
+	return nil
 }
 
 // Validate checks metadata ownership and its dynamic key/value identity.

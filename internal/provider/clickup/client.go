@@ -685,6 +685,29 @@ func (c *Client) StopTimeEntry(ctx context.Context, workspaceID string) (timeEnt
 	return response.Data, nil
 }
 
+// GetTimeEntries loads time entries that started inside the requested interval.
+func (c *Client) GetTimeEntries(ctx context.Context, workspaceID string, start, end time.Time) ([]timeEntry, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" || start.IsZero() || end.IsZero() || !end.After(start) {
+		return nil, errors.New("ClickUp workspace and a valid time-entry date range are required")
+	}
+	query := url.Values{}
+	query.Set("start_date", strconv.FormatInt(start.UnixMilli(), 10))
+	query.Set("end_date", strconv.FormatInt(end.UnixMilli(), 10))
+	query.Set("include_location_names", "true")
+	path := "/team/" + url.PathEscape(workspaceID) + "/time_entries?" + query.Encode()
+	var response timeEntriesResponse
+	if err := c.doJSONContentType(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return nil, err
+	}
+	for index, entry := range response.Data {
+		if entry.ID.String() == "" || entry.Start.String() == "" {
+			return nil, c.malformedResponse(http.MethodGet, path, fmt.Sprintf("time entry %d is missing identity or start time", index))
+		}
+	}
+	return response.Data, nil
+}
+
 func (c *Client) endpoint(path string) (string, error) {
 	if c.baseErr != nil {
 		return "", c.baseErr

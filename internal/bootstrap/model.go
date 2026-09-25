@@ -204,16 +204,27 @@ type TaskColumnPreference struct {
 // View is the local snapshot supplied to the TUI. It is intentionally a
 // snapshot so rendering does not perform I/O or synchronize providers.
 type View struct {
-	Providers        []ProviderRecord
-	Workspaces       []Workspace
-	Spaces           []Space
-	Lists            []List
-	Tasks            []Task
-	ActiveTracking   *ActiveTracking
-	EditorOptions    []TaskEditorOptions
-	TaskColumns      []TaskColumn
-	TaskColumnValues []TaskColumnValueSet
-	SyncErrors       map[ProviderID]string
+	Providers          []ProviderRecord
+	Workspaces         []Workspace
+	Spaces             []Space
+	Lists              []List
+	Tasks              []Task
+	ActiveTracking     *ActiveTracking
+	TrackedTimeEntries []TrackedTimeEntry
+	EditorOptions      []TaskEditorOptions
+	TaskColumns        []TaskColumn
+	TaskColumnValues   []TaskColumnValueSet
+	SyncErrors         map[ProviderID]string
+}
+
+// TrackedTimeEntry is a completed task timer interval ready for TUI display.
+type TrackedTimeEntry struct {
+	ProviderID ProviderID
+	TaskID     TaskID
+	TaskTitle  string
+	StartedAt  time.Time
+	EndedAt    time.Time
+	Duration   time.Duration
 }
 
 // ActiveTracking is the locally persisted single running task session.

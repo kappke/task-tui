@@ -124,11 +124,16 @@ type timeEntryResponse struct {
 	Data timeEntry `json:"data"`
 }
 
+type timeEntriesResponse struct {
+	Data []timeEntry `json:"data"`
+}
+
 type timeEntry struct {
 	ID       wireString  `json:"id"`
 	Task     wireTaskRef `json:"task"`
 	Start    wireString  `json:"start"`
-	Duration int64       `json:"duration"`
+	End      wireString  `json:"end"`
+	Duration wireString  `json:"duration"`
 }
 
 type wireTaskRef struct {

@@ -1745,6 +1745,42 @@ func TestTaskTrackingCommandsAndLiveDuration(t *testing.T) {
 	}
 }
 
+func TestTrackedTimeHistoryGroupsDaysAndOrdersEntriesNewestFirst(t *testing.T) {
+	today := time.Date(2026, time.September, 25, 0, 0, 0, 0, time.Local)
+	snapshot := testSnapshot()
+	snapshot.TrackedTimeEntries = []TrackedTimeEntry{
+		{ProviderID: "work", TaskID: "early", TaskTitle: "Earlier today", StartedAt: today.Add(9 * time.Hour), EndedAt: today.Add(9*time.Hour + 12*time.Minute), Duration: 12 * time.Minute},
+		{ProviderID: "work", TaskID: "yesterday", TaskTitle: "Yesterday task", StartedAt: today.AddDate(0, 0, -1).Add(15 * time.Hour), EndedAt: today.AddDate(0, 0, -1).Add(15*time.Hour + time.Minute), Duration: time.Minute},
+		{ProviderID: "work", TaskID: "late", TaskTitle: "Later today", StartedAt: today.Add(14 * time.Hour), EndedAt: today.Add(14*time.Hour + 45*time.Minute), Duration: 45 * time.Minute},
+	}
+	model := New(snapshot)
+	model, command := model.Update(KeyMsg{Key: "a"})
+	if message := commandMessage(t, command); message.Kind != CommandLoadTrackingHistory {
+		t.Fatalf("history command = %#v", message)
+	}
+	if model.UI.Mode != ModeTrackingHistory {
+		t.Fatalf("mode = %q, want tracked-time history", model.UI.Mode)
+	}
+	view := model.View()
+	late := strings.Index(view, "Later today")
+	early := strings.Index(view, "Earlier today")
+	yesterday := strings.Index(view, "Yesterday task")
+	if late < 0 || early < 0 || yesterday < 0 || !(late < early && early < yesterday) {
+		t.Fatalf("history entries are not newest-first within descending day groups:\n%s", view)
+	}
+	if strings.Count(view, "2026-09-25") != 1 || strings.Count(view, "2026-09-24") != 1 {
+		t.Fatalf("history should display one heading per day:\n%s", view)
+	}
+	for _, text := range []string{"14:00–14:45", "45m", "09:00–09:12", "12m"} {
+		if !strings.Contains(view, text) {
+			t.Fatalf("history does not display %q:\n%s", text, view)
+		}
+	}
+	if strings.Contains(view, "14:00:00") || strings.Contains(view, "45m 0s") {
+		t.Fatalf("history contains tracked seconds:\n%s", view)
+	}
+}
+
 func typeInput(model Model, input string) (Model, Cmd) {
 	return model.Update(KeyMsg{Runes: []rune(input)})
 }
