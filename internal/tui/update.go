@@ -62,6 +62,11 @@ func (m Model) updateMessage(msg Message) (Model, Cmd) {
 		return m.applySnapshot(value.Data), nil
 	case TasksLoadedMsg:
 		return m.applyTasksLoaded(value), nil
+	case TrackingTickMsg:
+		if !value.At.IsZero() {
+			m.UI.ClockNow = value.At.UTC()
+		}
+		return m, nil
 	case SyncStateMsg:
 		return m.applySyncState(value), nil
 	case ErrorMsg:
@@ -95,6 +100,9 @@ func (m *Model) ensureUI() {
 	}
 	if m.UI.Height == 0 {
 		m.UI.Height = 24
+	}
+	if m.UI.ClockNow.IsZero() {
+		m.UI.ClockNow = time.Now().UTC()
 	}
 	if m.UI.ExpandedNodes == nil {
 		m.UI.ExpandedNodes = make(map[TreeNodeRef]bool)
@@ -271,6 +279,7 @@ func (m *Model) applySnapshot(data Snapshot) Model {
 	oldNode := m.UI.SelectedNode
 	oldTask := m.UI.SelectedTask
 	m.Data = cloneSnapshot(data)
+	m.UI.ClockNow = time.Now().UTC()
 	m.ensureActiveProvider()
 	m.UI.ExpandedNodes = cloneExpanded(m.UI.ExpandedNodes)
 	m.initializeExpansion()
@@ -537,6 +546,10 @@ func commandResultText(command AppCommand) string {
 		return "Task created"
 	case CommandUpdateTask:
 		return "Task updated"
+	case CommandStartTracking:
+		return "Task tracking started"
+	case CommandStopTracking:
+		return "Task tracking stopped"
 	case CommandCompleteTask:
 		return "Task completion updated"
 	case CommandDeleteTask:
@@ -664,6 +677,25 @@ func (m Model) updateBrowse(key KeyMsg, action Action) (Model, Cmd) {
 		command.Status = row.Task.Status
 		m.Status = Status{Level: StatusInfo, Text: "Completing task locally; sync is asynchronous"}
 		return m, m.emit(command)
+	case ActionTrackTask:
+		row, ok := m.selectedTask()
+		if !ok {
+			m.Status = Status{Level: StatusWarning, Text: "Select a task before starting time tracking"}
+			return m, nil
+		}
+		if active := m.Data.ActiveTracking; active != nil && active.ProviderID == row.Task.ProviderID && active.TaskID == row.Task.ID {
+			m.Status = Status{Level: StatusInfo, Text: "Stopping task tracking..."}
+			return m, m.emit(AppCommand{Kind: CommandStopTracking})
+		}
+		m.Status = Status{Level: StatusInfo, Text: "Starting task tracking..."}
+		return m, m.emit(AppCommand{Kind: CommandStartTracking, ProviderID: row.Task.ProviderID, TaskID: row.Task.ID})
+	case ActionStopTracking:
+		if m.Data.ActiveTracking == nil {
+			m.Status = Status{Level: StatusWarning, Text: "No task is currently being tracked"}
+			return m, nil
+		}
+		m.Status = Status{Level: StatusInfo, Text: "Stopping task tracking..."}
+		return m, m.emit(AppCommand{Kind: CommandStopTracking})
 	case ActionDelete:
 		command, ok := m.taskCommand(CommandDeleteTask)
 		if !ok {

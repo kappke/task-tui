@@ -623,6 +623,68 @@ func (c *Client) DeleteTask(ctx context.Context, taskID string) error {
 	return c.doJSON(ctx, http.MethodDelete, path, nil, nil)
 }
 
+// StartTimeEntry starts tracking time on a ClickUp task for the authenticated user.
+func (c *Client) StartTimeEntry(ctx context.Context, workspaceID, taskID string) (timeEntry, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	taskID = strings.TrimSpace(taskID)
+	if workspaceID == "" || taskID == "" {
+		return timeEntry{}, errors.New("ClickUp workspace and task IDs are required to start time tracking")
+	}
+	path := "/team/" + url.PathEscape(workspaceID) + "/time_entries/start"
+	var response timeEntryResponse
+	if err := c.doJSON(ctx, http.MethodPost, path, struct {
+		TaskID   string `json:"tid"`
+		Billable bool   `json:"billable"`
+	}{TaskID: taskID}, &response); err != nil {
+		return timeEntry{}, err
+	}
+	if response.Data.Task.ID.String() == "" || response.Data.Start.String() == "" {
+		return timeEntry{}, c.malformedResponse(http.MethodPost, path, "time entry task or start time is missing")
+	}
+	return response.Data, nil
+}
+
+// GetRunningTimeEntry returns the authenticated user's running ClickUp timer.
+func (c *Client) GetRunningTimeEntry(ctx context.Context, workspaceID string) (timeEntry, bool, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return timeEntry{}, false, errors.New("ClickUp workspace ID is required to get running time tracking")
+	}
+	path := "/team/" + url.PathEscape(workspaceID) + "/time_entries/current"
+	var response timeEntryResponse
+	if err := c.doJSONContentType(ctx, http.MethodGet, path, nil, &response); err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return timeEntry{}, false, nil
+		}
+		return timeEntry{}, false, err
+	}
+	if response.Data.Task.ID.String() == "" {
+		return timeEntry{}, false, nil
+	}
+	if response.Data.Start.String() == "" {
+		return timeEntry{}, false, c.malformedResponse(http.MethodGet, path, "running time entry start time is missing")
+	}
+	return response.Data, true, nil
+}
+
+// StopTimeEntry stops the authenticated user's currently running ClickUp timer.
+func (c *Client) StopTimeEntry(ctx context.Context, workspaceID string) (timeEntry, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return timeEntry{}, errors.New("ClickUp workspace ID is required to stop time tracking")
+	}
+	path := "/team/" + url.PathEscape(workspaceID) + "/time_entries/stop"
+	var response timeEntryResponse
+	if err := c.doJSON(ctx, http.MethodPost, path, struct{}{}, &response); err != nil {
+		return timeEntry{}, err
+	}
+	if response.Data.Task.ID.String() == "" {
+		return timeEntry{}, c.malformedResponse(http.MethodPost, path, "time entry task is missing")
+	}
+	return response.Data, nil
+}
+
 func (c *Client) endpoint(path string) (string, error) {
 	if c.baseErr != nil {
 		return "", c.baseErr
@@ -700,7 +762,11 @@ func (c *Client) token(ctx context.Context) (string, error) {
 }
 
 func (c *Client) doJSON(ctx context.Context, method string, path string, input any, output any) (resultErr error) {
-	return c.doJSONInternal(ctx, method, path, input, output)
+	return c.doJSONInternal(ctx, method, path, input, output, false)
+}
+
+func (c *Client) doJSONContentType(ctx context.Context, method string, path string, input any, output any) error {
+	return c.doJSONInternal(ctx, method, path, input, output, true)
 }
 
 func (c *Client) doJSONVersion(ctx context.Context, method string, path string, input any, output any, version string) (resultErr error) {
@@ -711,10 +777,10 @@ func (c *Client) doJSONVersion(ctx context.Context, method string, path string, 
 	if err != nil {
 		return &RequestError{Method: method, URL: path, Err: err}
 	}
-	return c.doJSONEndpoint(ctx, method, endpoint, input, output)
+	return c.doJSONEndpoint(ctx, method, endpoint, input, output, input != nil)
 }
 
-func (c *Client) doJSONInternal(ctx context.Context, method string, path string, input any, output any) (resultErr error) {
+func (c *Client) doJSONInternal(ctx context.Context, method string, path string, input any, output any, setContentType bool) (resultErr error) {
 	if ctx == nil {
 		return &RequestError{Method: method, URL: path, Err: errors.New("nil context")}
 	}
@@ -723,10 +789,10 @@ func (c *Client) doJSONInternal(ctx context.Context, method string, path string,
 	if err != nil {
 		return &RequestError{Method: method, URL: path, Err: err}
 	}
-	return c.doJSONEndpoint(ctx, method, endpoint, input, output)
+	return c.doJSONEndpoint(ctx, method, endpoint, input, output, setContentType || input != nil)
 }
 
-func (c *Client) doJSONEndpoint(ctx context.Context, method string, endpoint string, input any, output any) (resultErr error) {
+func (c *Client) doJSONEndpoint(ctx context.Context, method string, endpoint string, input any, output any, setContentType bool) (resultErr error) {
 	requestContext := ctx
 	cancel := func() {}
 	if c.timeout > 0 {
@@ -760,7 +826,7 @@ func (c *Client) doJSONEndpoint(ctx context.Context, method string, endpoint str
 	}
 	request.Header.Set("Authorization", token)
 	request.Header.Set("Accept", "application/json")
-	if input != nil {
+	if setContentType {
 		request.Header.Set("Content-Type", "application/json")
 	}
 

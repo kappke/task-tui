@@ -209,10 +209,20 @@ type View struct {
 	Spaces           []Space
 	Lists            []List
 	Tasks            []Task
+	ActiveTracking   *ActiveTracking
 	EditorOptions    []TaskEditorOptions
 	TaskColumns      []TaskColumn
 	TaskColumnValues []TaskColumnValueSet
 	SyncErrors       map[ProviderID]string
+}
+
+// ActiveTracking is the locally persisted single running task session.
+type ActiveTracking struct {
+	ProviderID  ProviderID
+	TaskID      TaskID
+	TaskTitle   string
+	StartedAt   time.Time
+	BaseTracked time.Duration
 }
 
 // TaskColumn is a provider-neutral dynamic column attached to one list.

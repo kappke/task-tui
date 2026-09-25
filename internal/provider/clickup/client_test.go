@@ -93,6 +93,85 @@ func TestClientConfiguredTeamAvoidsTeamDiscovery(t *testing.T) {
 	}
 }
 
+func TestClientStartsAndStopsTaskTimeEntries(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/team/workspace-1/time_entries/start":
+			if r.Method != http.MethodPost {
+				t.Errorf("start method = %s, want POST", r.Method)
+			}
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("decode start payload: %v", err)
+			}
+			if payload["tid"] != "remote-task" || payload["billable"] != false {
+				t.Errorf("start payload = %#v", payload)
+			}
+			requests++
+			_, _ = io.WriteString(w, `{"data":{"id":"entry-1","task":{"id":"remote-task","name":"Task"},"start":"1595289395842","duration":-53}}`)
+		case "/team/workspace-1/time_entries/current":
+			if r.Method != http.MethodGet || r.Header.Get("Content-Type") != "application/json" {
+				t.Errorf("current timer request = %s %s content-type=%q", r.Method, r.URL.Path, r.Header.Get("Content-Type"))
+			}
+			requests++
+			_, _ = io.WriteString(w, `{"data":{"id":"entry-1","task":{"id":"remote-task","name":"Task"},"start":"1595289395842","duration":-53}}`)
+		case "/team/workspace-1/time_entries/stop":
+			if r.Method != http.MethodPost || r.Header.Get("Content-Type") != "application/json" {
+				t.Errorf("stop request = %s %s content-type=%q", r.Method, r.URL.Path, r.Header.Get("Content-Type"))
+			}
+			requests++
+			_, _ = io.WriteString(w, `{"data":{"id":"entry-1","task":{"id":"remote-task","name":"Task"},"start":"1595289395842","duration":56948}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"})
+	client.requestPacer.interval = 0
+	started, err := client.StartTimeEntry(context.Background(), "workspace-1", "remote-task")
+	if err != nil {
+		t.Fatalf("StartTimeEntry() error = %v", err)
+	}
+	if started.Task.ID.String() != "remote-task" || started.Duration != -53 {
+		t.Fatalf("started entry = %#v", started)
+	}
+	running, active, err := client.GetRunningTimeEntry(context.Background(), "workspace-1")
+	if err != nil || !active || running.Task.ID.String() != "remote-task" {
+		t.Fatalf("GetRunningTimeEntry() = %#v, active=%v, error=%v", running, active, err)
+	}
+	stopped, err := client.StopTimeEntry(context.Background(), "workspace-1")
+	if err != nil {
+		t.Fatalf("StopTimeEntry() error = %v", err)
+	}
+	if stopped.Task.ID.String() != "remote-task" || stopped.Duration != 56948 {
+		t.Fatalf("stopped entry = %#v", stopped)
+	}
+	if requests != 3 {
+		t.Fatalf("request count = %d, want 3", requests)
+	}
+}
+
+func TestClientGetRunningTimeEntryAcceptsNoCurrentTimer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/team/workspace-1/time_entries/current" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `{"data":null}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"})
+	client.requestPacer.interval = 0
+	entry, running, err := client.GetRunningTimeEntry(context.Background(), "workspace-1")
+	if err != nil || running || entry.Task.ID.String() != "" {
+		t.Fatalf("GetRunningTimeEntry() = %#v, running=%v, error=%v; want no timer", entry, running, err)
+	}
+}
+
 func TestClientPacesRequests(t *testing.T) {
 	var mu sync.Mutex
 	var requestTimes []time.Time

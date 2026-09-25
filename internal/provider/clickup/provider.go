@@ -247,6 +247,7 @@ func (p *Provider) Capabilities() provider.Capabilities {
 var _ provider.Provider = (*Provider)(nil)
 
 var _ provider.Authenticator = (*Provider)(nil)
+var _ provider.TaskTimeTracker = (*Provider)(nil)
 
 // Authenticate resolves the configured token without performing eager
 // authentication during construction. API requests authenticate themselves
@@ -872,6 +873,69 @@ func (p *Provider) DeleteTask(ctx context.Context, task domain.Task) error {
 		return fmt.Errorf("delete ClickUp task %s: %w", remoteID, err)
 	}
 	return nil
+}
+
+// StartTaskTimeTracking starts a timer for a provider-owned remote task.
+func (p *Provider) StartTaskTimeTracking(ctx context.Context, workspaceID, remoteTaskID string) (provider.TimeTrackingEntry, error) {
+	if err := p.ensureReady(); err != nil {
+		return provider.TimeTrackingEntry{}, err
+	}
+	entry, err := p.client.StartTimeEntry(ctx, workspaceID, remoteTaskID)
+	if err != nil {
+		return provider.TimeTrackingEntry{}, fmt.Errorf("start ClickUp time tracking for task %s: %w", remoteTaskID, err)
+	}
+	if entry.Task.ID.String() != strings.TrimSpace(remoteTaskID) {
+		return provider.TimeTrackingEntry{}, fmt.Errorf("ClickUp started tracking task %s instead of %s", entry.Task.ID, remoteTaskID)
+	}
+	startedAt, err := parseTimeEntryStart(entry.Start.String())
+	if err != nil {
+		return provider.TimeTrackingEntry{}, fmt.Errorf("parse ClickUp time entry start: %w", err)
+	}
+	return provider.TimeTrackingEntry{TaskID: entry.Task.ID.String(), TaskTitle: entry.Task.Name, StartedAt: startedAt, Duration: time.Duration(max(entry.Duration, 0)) * time.Millisecond}, nil
+}
+
+// StopTaskTimeTracking stops the authenticated user's running timer.
+func (p *Provider) StopTaskTimeTracking(ctx context.Context, workspaceID string) (provider.TimeTrackingEntry, error) {
+	if err := p.ensureReady(); err != nil {
+		return provider.TimeTrackingEntry{}, err
+	}
+	entry, err := p.client.StopTimeEntry(ctx, workspaceID)
+	if err != nil {
+		return provider.TimeTrackingEntry{}, fmt.Errorf("stop ClickUp time tracking: %w", err)
+	}
+	startedAt, err := parseTimeEntryStart(entry.Start.String())
+	if err != nil {
+		return provider.TimeTrackingEntry{}, fmt.Errorf("parse ClickUp time entry start: %w", err)
+	}
+	return provider.TimeTrackingEntry{TaskID: entry.Task.ID.String(), TaskTitle: entry.Task.Name, StartedAt: startedAt, Duration: time.Duration(max(entry.Duration, 0)) * time.Millisecond}, nil
+}
+
+// GetRunningTaskTimeTracking returns the timer currently running in a workspace.
+func (p *Provider) GetRunningTaskTimeTracking(ctx context.Context, workspaceID string) (provider.TimeTrackingEntry, bool, error) {
+	if err := p.ensureReady(); err != nil {
+		return provider.TimeTrackingEntry{}, false, err
+	}
+	entry, running, err := p.client.GetRunningTimeEntry(ctx, workspaceID)
+	if err != nil || !running {
+		return provider.TimeTrackingEntry{}, running, err
+	}
+	startedAt, err := parseTimeEntryStart(entry.Start.String())
+	if err != nil {
+		return provider.TimeTrackingEntry{}, false, fmt.Errorf("parse ClickUp time entry start: %w", err)
+	}
+	return provider.TimeTrackingEntry{
+		TaskID:    entry.Task.ID.String(),
+		TaskTitle: entry.Task.Name,
+		StartedAt: startedAt,
+	}, true, nil
+}
+
+func parseTimeEntryStart(value string) (time.Time, error) {
+	millis, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || millis <= 0 {
+		return time.Time{}, fmt.Errorf("invalid ClickUp timestamp %q", value)
+	}
+	return time.UnixMilli(millis).UTC(), nil
 }
 
 // GetSpaces, GetLists, GetTasks, and GetTask are small aliases for callers

@@ -42,6 +42,8 @@ func TestDefaultKeyMap(t *testing.T) {
 		{key: "f", action: ActionFilter},
 		{key: "o", action: ActionSort},
 		{key: "c", action: ActionConfigureColumns},
+		{key: "t", action: ActionTrackTask},
+		{key: "T", action: ActionStopTracking},
 		{key: "r", action: ActionRefresh},
 		{key: ":", action: ActionCommand},
 		{key: "q", action: ActionQuit},
@@ -1665,7 +1667,7 @@ func TestTaskTableRendersMetadataAndUppercasesStatus(t *testing.T) {
 	estimate := 90 * time.Minute
 	tracked := 45 * time.Minute
 	due := time.Date(2026, time.September, 18, 0, 0, 0, 0, time.UTC)
-	snapshot.Tasks[0].Title = "A task title that is intentionally much longer than the name column"
+	snapshot.Tasks[0].Title = strings.Repeat("A task title that is intentionally much longer than the name column ", 3)
 	snapshot.Tasks[0].Status = "open"
 	snapshot.Tasks[0].Assignee = "alice, Bob"
 	snapshot.Tasks[0].Priority = PriorityHigh
@@ -1705,6 +1707,41 @@ func TestAsyncSnapshotSyncAndResize(t *testing.T) {
 	}
 	if lines := strings.Count(model.View(), "\n") + 1; lines > 8 {
 		t.Fatalf("rendered %d lines for height 8", lines)
+	}
+}
+
+func TestTaskTrackingCommandsAndLiveDuration(t *testing.T) {
+	model := New(testSnapshot())
+	model, _ = model.Update(KeyMsg{Key: "tab"})
+	model, command := model.Update(KeyMsg{Key: "t"})
+	start := commandMessage(t, command)
+	if start.Kind != CommandStartTracking || start.ProviderID != "work" || start.TaskID != "same" {
+		t.Fatalf("start tracking command = %#v", start)
+	}
+
+	startedAt := time.Date(2026, time.September, 25, 10, 0, 0, 0, time.UTC)
+	model.Data.ActiveTracking = &ActiveTracking{
+		ProviderID:  "work",
+		TaskID:      "same",
+		TaskTitle:   "Fix auth",
+		StartedAt:   startedAt,
+		BaseTracked: time.Hour,
+	}
+	model, _ = model.Update(TrackingTickMsg{At: startedAt.Add(3*time.Second + 900*time.Millisecond)})
+	view := model.View()
+	for _, text := range []string{"TRACKING 01:00:03 | Fix auth", "01:00:03"} {
+		if !strings.Contains(view, text) {
+			t.Fatalf("live tracking view does not contain %q:\n%s", text, view)
+		}
+	}
+
+	model, command = model.Update(KeyMsg{Key: "t"})
+	if stop := commandMessage(t, command); stop.Kind != CommandStopTracking {
+		t.Fatalf("tracking toggle command = %#v, want stop", stop)
+	}
+	model, command = model.Update(KeyMsg{Key: "T"})
+	if stop := commandMessage(t, command); stop.Kind != CommandStopTracking {
+		t.Fatalf("stop shortcut command = %#v", stop)
 	}
 }
 

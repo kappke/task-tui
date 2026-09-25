@@ -38,6 +38,11 @@ type TasksLoadedMsg struct {
 	Replace    bool
 }
 
+// TrackingTickMsg advances the displayed duration for the active task.
+type TrackingTickMsg struct {
+	At time.Time
+}
+
 // EntityType identifies the owner of a sync update. It aliases the foundation
 // entity type so domain events can cross the adapter without conversion.
 type EntityType = domain.EntityType

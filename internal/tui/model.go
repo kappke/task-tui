@@ -62,9 +62,19 @@ type Snapshot struct {
 	Spaces           []Space
 	Lists            []List
 	Tasks            []Task
+	ActiveTracking   *ActiveTracking
 	EditorOptions    []TaskEditorOptions
 	TaskColumns      []ListTaskColumn
 	TaskColumnValues []TaskColumnValueSet
+}
+
+// ActiveTracking identifies the task whose timer is currently running.
+type ActiveTracking struct {
+	ProviderID  ProviderID
+	TaskID      TaskID
+	TaskTitle   string
+	StartedAt   time.Time
+	BaseTracked time.Duration
 }
 
 // ListTaskColumn describes a provider-neutral dynamic column available in one list.
@@ -294,6 +304,7 @@ type UIState struct {
 	ConfirmPrompt           string
 	Width                   int
 	Height                  int
+	ClockNow                time.Time
 	Quitting                bool
 }
 
@@ -365,6 +376,7 @@ func NewWithOptions(data Snapshot, options Options) Model {
 			CollapsedGroups: make(map[string]bool),
 			Width:           100,
 			Height:          24,
+			ClockNow:        time.Now().UTC(),
 		},
 	}
 	m.initializeSelection()
@@ -392,6 +404,10 @@ func cloneSnapshot(in Snapshot) Snapshot {
 	out.Spaces = append([]Space(nil), in.Spaces...)
 	out.Lists = append([]List(nil), in.Lists...)
 	out.Tasks = append([]Task(nil), in.Tasks...)
+	if in.ActiveTracking != nil {
+		tracking := *in.ActiveTracking
+		out.ActiveTracking = &tracking
+	}
 	out.EditorOptions = append([]TaskEditorOptions(nil), in.EditorOptions...)
 	out.TaskColumns = append([]ListTaskColumn(nil), in.TaskColumns...)
 	out.TaskColumnValues = append([]TaskColumnValueSet(nil), in.TaskColumnValues...)

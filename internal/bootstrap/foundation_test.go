@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kappke/task-tui/internal/app"
 	"github.com/kappke/task-tui/internal/command"
 	"github.com/kappke/task-tui/internal/credentials"
 	"github.com/kappke/task-tui/internal/domain"
@@ -221,6 +222,189 @@ func TestFoundationSnapshotLoadsMoreThanTwoHundredTasksForSelectedList(t *testin
 	if len(view.Tasks) != 205 {
 		t.Fatalf("selected-list snapshot task count = %d, want 205", len(view.Tasks))
 	}
+}
+
+func TestFoundationHandlerStartsAndStopsLocalTaskTracking(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	providerID := domain.ProviderID("local")
+	if _, err := store.UpsertProvider(ctx, domain.Provider{ID: providerID, Type: domain.ProviderTypeLocal, Name: "Local", Enabled: true}); err != nil {
+		t.Fatalf("insert provider: %v", err)
+	}
+	now := time.Now().UTC()
+	space, err := store.UpsertSpace(ctx, domain.Space{ID: "space", ProviderID: providerID, Name: "Personal", SyncState: domain.SyncStateLocal, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		t.Fatalf("insert space: %v", err)
+	}
+	list, err := store.UpsertList(ctx, domain.List{ID: "list", ProviderID: providerID, SpaceID: space.ID, Name: "Today", SyncState: domain.SyncStateLocal, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		t.Fatalf("insert list: %v", err)
+	}
+	baseTracked := 15 * time.Minute
+	if _, err := store.UpsertTask(ctx, domain.Task{
+		ID:          "task",
+		ProviderID:  providerID,
+		ListID:      list.ID,
+		Title:       "Write tests",
+		Status:      "todo",
+		Priority:    domain.PriorityNormal,
+		TimeTracked: &baseTracked,
+		SyncState:   domain.SyncStateLocal,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("insert task: %v", err)
+	}
+
+	handler := newFoundationHandler(app.NewService(nil, nil), nil, store, nil, nil, nil, "")
+	event, err := handler.Handle(ctx, command.Command{Kind: command.KindStartTaskTracking, ProviderID: string(providerID), TaskID: "task"})
+	if err != nil || event.Kind != command.EventChanged {
+		t.Fatalf("start tracking: event=%#v error=%v", event, err)
+	}
+	session, err := loadActiveTrackingSession(ctx, store)
+	if err != nil || session == nil || session.TaskID != "task" {
+		t.Fatalf("active tracking session = %#v, error=%v", session, err)
+	}
+	view, err := newFoundationDataStore(store).Snapshot(ctx)
+	if err != nil || view.ActiveTracking == nil || view.ActiveTracking.TaskID != "task" {
+		t.Fatalf("snapshot active tracking = %#v, error=%v", view.ActiveTracking, err)
+	}
+	session.StartedAt = time.Now().UTC().Add(-2300 * time.Millisecond)
+	if err := saveActiveTrackingSession(ctx, store, session); err != nil {
+		t.Fatalf("age active tracking session: %v", err)
+	}
+	event, err = handler.Handle(ctx, command.Command{Kind: command.KindStopTaskTracking})
+	if err != nil || event.Kind != command.EventChanged {
+		t.Fatalf("stop tracking: event=%#v error=%v", event, err)
+	}
+	updated, err := store.GetTaskByProvider(ctx, providerID, "task")
+	if err != nil {
+		t.Fatalf("load tracked task: %v", err)
+	}
+	if updated.TimeTracked == nil || *updated.TimeTracked < baseTracked+2*time.Second || *updated.TimeTracked > baseTracked+3*time.Second {
+		t.Fatalf("tracked duration = %v, want about %s", updated.TimeTracked, baseTracked+2300*time.Millisecond)
+	}
+	session, err = loadActiveTrackingSession(ctx, store)
+	if err != nil || session != nil {
+		t.Fatalf("active session after stop = %#v, error=%v", session, err)
+	}
+	view, err = newFoundationDataStore(store).Snapshot(ctx)
+	if err != nil || view.ActiveTracking != nil {
+		t.Fatalf("snapshot active tracking after stop = %#v, error=%v", view.ActiveTracking, err)
+	}
+}
+
+func TestFoundationHandlerPollsAndReconcilesExternalClickUpTracking(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	providerID := domain.ProviderID("clickup-work")
+	if _, err := store.UpsertProvider(ctx, domain.Provider{ID: providerID, Type: domain.ProviderTypeClickUp, Name: "Work", Enabled: true}); err != nil {
+		t.Fatalf("insert provider: %v", err)
+	}
+	now := time.Now().UTC()
+	space, err := store.UpsertSpace(ctx, domain.Space{ID: "space", ProviderID: providerID, Name: "Work", SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		t.Fatalf("insert space: %v", err)
+	}
+	list, err := store.UpsertList(ctx, domain.List{ID: "list", ProviderID: providerID, SpaceID: space.ID, Name: "Inbox", SyncState: domain.SyncStateSynced, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		t.Fatalf("insert list: %v", err)
+	}
+	for _, task := range []struct{ id, remoteID, title string }{
+		{id: "task-a", remoteID: "remote-a", title: "Task A"},
+		{id: "task-b", remoteID: "remote-b", title: "Task B"},
+	} {
+		remoteID := task.remoteID
+		if _, err := store.UpsertTask(ctx, domain.Task{
+			ID:         domain.TaskID(task.id),
+			ProviderID: providerID,
+			ListID:     list.ID,
+			RemoteID:   &remoteID,
+			Title:      task.title,
+			Status:     "todo",
+			Priority:   domain.PriorityNormal,
+			SyncState:  domain.SyncStateSynced,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}); err != nil {
+			t.Fatalf("insert task %s: %v", task.id, err)
+		}
+	}
+
+	tracker := &fakeTaskTimeTracker{
+		running: true,
+		entry: providerpkg.TimeTrackingEntry{
+			TaskID:    "remote-a",
+			TaskTitle: "Task A",
+			StartedAt: now.Add(-time.Minute),
+		},
+	}
+	handler := newFoundationHandler(app.NewService(nil, nil), nil, store,
+		map[domain.ProviderID]providerpkg.TaskTimeTracker{providerID: tracker}, nil, nil, "workspace-1")
+
+	event, err := handler.Handle(ctx, command.Command{Kind: command.KindPollTaskTracking})
+	if err != nil || event.Kind != command.EventChanged {
+		t.Fatalf("first tracking poll: event=%#v error=%v", event, err)
+	}
+	session, err := loadActiveTrackingSession(ctx, store)
+	if err != nil || session == nil || session.TaskID != "task-a" || session.RemoteTaskID != "remote-a" {
+		t.Fatalf("first active session = %#v, error=%v", session, err)
+	}
+
+	tracker.entry = providerpkg.TimeTrackingEntry{
+		TaskID:    "remote-b",
+		TaskTitle: "Task B renamed outside the TUI",
+		StartedAt: now.Add(-10 * time.Second),
+	}
+	event, err = handler.Handle(ctx, command.Command{Kind: command.KindPollTaskTracking})
+	if err != nil || event.Kind != command.EventChanged {
+		t.Fatalf("changed-task tracking poll: event=%#v error=%v", event, err)
+	}
+	session, err = loadActiveTrackingSession(ctx, store)
+	if err != nil || session == nil || session.TaskID != "task-b" || session.RemoteTaskID != "remote-b" {
+		t.Fatalf("reconciled active session = %#v, error=%v", session, err)
+	}
+
+	tracker.running = false
+	event, err = handler.Handle(ctx, command.Command{Kind: command.KindPollTaskTracking})
+	if err != nil || event.Kind != command.EventChanged {
+		t.Fatalf("stopped-task tracking poll: event=%#v error=%v", event, err)
+	}
+	session, err = loadActiveTrackingSession(ctx, store)
+	if err != nil || session != nil {
+		t.Fatalf("active session after external stop = %#v, error=%v", session, err)
+	}
+}
+
+type fakeTaskTimeTracker struct {
+	running bool
+	entry   providerpkg.TimeTrackingEntry
+}
+
+func (f *fakeTaskTimeTracker) StartTaskTimeTracking(_ context.Context, _, remoteTaskID string) (providerpkg.TimeTrackingEntry, error) {
+	f.entry.TaskID = remoteTaskID
+	f.entry.StartedAt = time.Now().UTC()
+	f.running = true
+	return f.entry, nil
+}
+
+func (f *fakeTaskTimeTracker) StopTaskTimeTracking(context.Context, string) (providerpkg.TimeTrackingEntry, error) {
+	f.running = false
+	return f.entry, nil
+}
+
+func (f *fakeTaskTimeTracker) GetRunningTaskTimeTracking(context.Context, string) (providerpkg.TimeTrackingEntry, bool, error) {
+	return f.entry, f.running, nil
 }
 
 func TestCurrentSQLiteRunnerUpgradesLegacyBootstrapDatabase(t *testing.T) {
@@ -494,6 +678,37 @@ func TestFoundationUICommandRefreshPreservesListID(t *testing.T) {
 	}
 	if translated.Kind != command.KindRefresh || translated.ProviderID != "clickup" || translated.ListID != "list-local" {
 		t.Fatalf("refresh translation = %#v", translated)
+	}
+}
+
+func TestFoundationUITrackingCommandsReachApplicationHandler(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   foundationtui.AppCommand
+		kind    command.Kind
+		wantID  string
+		wantPID string
+	}{
+		{
+			name:    "start selected task",
+			input:   foundationtui.AppCommand{Kind: foundationtui.CommandStartTracking, ProviderID: "work", TaskID: "task-1"},
+			kind:    command.KindStartTaskTracking,
+			wantID:  "task-1",
+			wantPID: "work",
+		},
+		{name: "stop active task", input: foundationtui.AppCommand{Kind: foundationtui.CommandStopTracking}, kind: command.KindStopTaskTracking},
+		{name: "poll current timer", input: foundationtui.AppCommand{Kind: foundationtui.CommandPollTracking}, kind: command.KindPollTaskTracking},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			translated, dispatch, err := foundationUICommand(test.input)
+			if err != nil || !dispatch {
+				t.Fatalf("translate tracking command: dispatch=%v error=%v", dispatch, err)
+			}
+			if translated.Kind != test.kind || translated.TaskID != test.wantID || translated.ProviderID != test.wantPID {
+				t.Fatalf("translated command = %#v, want kind=%s provider=%q task=%q", translated, test.kind, test.wantPID, test.wantID)
+			}
+		})
 	}
 }
 

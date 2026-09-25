@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/kappke/task-tui/internal/domain"
@@ -95,6 +96,46 @@ func (s *Store) UpdateTaskWithQueue(ctx context.Context, task domain.Task, opera
 		Operation: operation.Operation,
 		Payload:   operation.Payload,
 	})
+}
+
+// UpdateTaskAndDeleteAppState commits a task update and its completed tracking
+// state together so a local timer cannot be counted twice after a crash.
+func (s *Store) UpdateTaskAndDeleteAppState(ctx context.Context, task domain.Task, key string) (domain.Task, error) {
+	if strings.TrimSpace(key) == "" {
+		return domain.Task{}, errors.New("sqlite: app state key is empty")
+	}
+	record, err := s.taskRecordForUpdate(ctx, task)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("sqlite: begin tracked task update %q: %w", task.ID, err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if err := updateTaskTx(ctx, tx, record); err != nil {
+		return domain.Task{}, fmt.Errorf("sqlite: update tracked task %q: %w", task.ID, err)
+	}
+	if err := replaceTaskMemberships(ctx, tx, record); err != nil {
+		return domain.Task{}, fmt.Errorf("sqlite: update tracked task %q memberships: %w", task.ID, err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM app_state WHERE key = ?", key); err != nil {
+		return domain.Task{}, fmt.Errorf("sqlite: clear app state %q: %w", key, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.Task{}, fmt.Errorf("sqlite: commit tracked task update %q: %w", task.ID, err)
+	}
+	committed = true
+	updated, err := s.getTaskByProvider(ctx, record.ProviderID, record.ID)
+	if err != nil {
+		return domain.Task{}, adaptError(err, false)
+	}
+	return domainTask(updated), nil
 }
 
 func (s *Store) CreateTaskWithQueue(ctx context.Context, task domain.Task, operation *domain.SyncOperation) (domain.Task, error) {

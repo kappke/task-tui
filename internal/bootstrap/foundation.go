@@ -28,7 +28,10 @@ import (
 )
 
 const foundationUIStateKey = "main"
+const foundationTrackingStateKey = "active_time_tracking"
 const foundationTaskPageSize = 200
+
+var errTrackingOperationBusy = errors.New("a task tracking operation is already in progress")
 
 // foundationDataStore adapts the authoritative SQLite store to the small
 // lifecycle persistence contract. All snapshots are assembled from local rows.
@@ -40,6 +43,16 @@ type foundationTaskScope struct {
 	providerID ProviderID
 	spaceID    SpaceID
 	listID     ListID
+}
+
+type activeTrackingSession struct {
+	ProviderID   domain.ProviderID `json:"provider_id"`
+	TaskID       domain.TaskID     `json:"task_id"`
+	TaskTitle    string            `json:"task_title"`
+	RemoteTaskID string            `json:"remote_task_id,omitempty"`
+	WorkspaceID  string            `json:"workspace_id,omitempty"`
+	StartedAt    time.Time         `json:"started_at"`
+	BaseTracked  time.Duration     `json:"base_tracked"`
 }
 
 var _ DataStore = (*foundationDataStore)(nil)
@@ -76,6 +89,10 @@ func (s *foundationDataStore) Snapshot(ctx context.Context) (View, error) {
 }
 
 func (s *foundationDataStore) snapshotWithTaskScope(ctx context.Context, providers []domain.Provider, providerID, listID string) (View, error) {
+	tracking, err := activeTrackingForView(ctx, s.store)
+	if err != nil {
+		return View{}, err
+	}
 	spaces := make([]domain.Space, 0)
 	workspaces := make([]domain.Workspace, 0)
 	lists := make([]domain.List, 0)
@@ -144,6 +161,7 @@ func (s *foundationDataStore) snapshotWithTaskScope(ctx context.Context, provide
 		}
 	}
 	view := viewFromDomain(providers, spaces, lists, tasks)
+	view.ActiveTracking = tracking
 	for _, workspace := range workspaces {
 		view.Workspaces = append(view.Workspaces, Workspace{
 			ID:         WorkspaceID(workspace.ID),
@@ -166,6 +184,78 @@ func (s *foundationDataStore) snapshotWithTaskScope(ctx context.Context, provide
 		return View{}, err
 	}
 	return view, nil
+}
+
+func loadActiveTrackingSession(ctx context.Context, store *sqlite.Store) (*activeTrackingSession, error) {
+	if store == nil {
+		return nil, errors.New("load active time tracking: store unavailable")
+	}
+	state, err := store.GetAppState(ctx, foundationTrackingStateKey)
+	if errors.Is(err, sqlite.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load active time tracking: %w", err)
+	}
+	var session activeTrackingSession
+	if err := json.Unmarshal(state.Value, &session); err != nil {
+		return nil, fmt.Errorf("decode active time tracking: %w", err)
+	}
+	if session.ProviderID == "" || session.TaskID == "" || session.StartedAt.IsZero() {
+		return nil, errors.New("decode active time tracking: provider, task, and start time are required")
+	}
+	session.StartedAt = session.StartedAt.UTC()
+	return &session, nil
+}
+
+func saveActiveTrackingSession(ctx context.Context, store *sqlite.Store, session *activeTrackingSession) error {
+	if store == nil {
+		return errors.New("save active time tracking: store unavailable")
+	}
+	if session == nil {
+		err := store.DeleteAppState(ctx, foundationTrackingStateKey)
+		if errors.Is(err, sqlite.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if session.ProviderID == "" || session.TaskID == "" || session.StartedAt.IsZero() {
+		return errors.New("save active time tracking: provider, task, and start time are required")
+	}
+	value, err := json.Marshal(session)
+	if err != nil {
+		return fmt.Errorf("encode active time tracking: %w", err)
+	}
+	_, err = store.SetAppState(ctx, sqlite.AppState{Key: foundationTrackingStateKey, Value: value, UpdatedAt: time.Now().UTC()})
+	if err != nil {
+		return fmt.Errorf("save active time tracking: %w", err)
+	}
+	return nil
+}
+
+func activeTrackingForView(ctx context.Context, store *sqlite.Store) (*ActiveTracking, error) {
+	session, err := loadActiveTrackingSession(ctx, store)
+	if err != nil || session == nil {
+		return nil, err
+	}
+	title := session.TaskTitle
+	baseTracked := session.BaseTracked
+	task, err := store.GetTaskByProvider(ctx, session.ProviderID, session.TaskID)
+	if err == nil {
+		title = task.Title
+		if task.TimeTracked != nil {
+			baseTracked = *task.TimeTracked
+		}
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return nil, fmt.Errorf("load tracked task %s: %w", session.TaskID, err)
+	}
+	return &ActiveTracking{
+		ProviderID:  ProviderID(session.ProviderID),
+		TaskID:      TaskID(session.TaskID),
+		TaskTitle:   title,
+		StartedAt:   session.StartedAt,
+		BaseTracked: baseTracked,
+	}, nil
 }
 
 func (s *foundationDataStore) taskColumns(ctx context.Context, providers []domain.Provider, lists []domain.List) ([]TaskColumn, error) {
@@ -1654,11 +1744,17 @@ func (s *foundationSyncController) emit(event foundationsync.Event) {
 	}
 }
 
-// foundationHandler translates the stable command package into the typed app
-// command API. It is the only default path from the TUI into app.Service.
+// foundationHandler dispatches normalized UI commands to application behavior,
+// scoped synchronization, or time tracking.
 type foundationHandler struct {
-	service *app.Service
-	sync    *foundationSyncController
+	service           *app.Service
+	sync              *foundationSyncController
+	store             *sqlite.Store
+	timeTrackers      map[domain.ProviderID]providerpkg.TaskTimeTracker
+	taskFetchers      map[ProviderID]*cachedProvider
+	workspaceResolver func(context.Context, domain.ProviderID, domain.ListID) (string, error)
+	workspaceFallback string
+	trackingGate      chan struct{}
 
 	mu        sync.RWMutex
 	accepting bool
@@ -1666,8 +1762,26 @@ type foundationHandler struct {
 
 var _ command.Handler = (*foundationHandler)(nil)
 
-func newFoundationHandler(service *app.Service, syncController *foundationSyncController) *foundationHandler {
-	return &foundationHandler{service: service, sync: syncController, accepting: true}
+func newFoundationHandler(
+	service *app.Service,
+	syncController *foundationSyncController,
+	store *sqlite.Store,
+	timeTrackers map[domain.ProviderID]providerpkg.TaskTimeTracker,
+	taskFetchers map[ProviderID]*cachedProvider,
+	workspaceResolver func(context.Context, domain.ProviderID, domain.ListID) (string, error),
+	workspaceFallback string,
+) *foundationHandler {
+	return &foundationHandler{
+		service:           service,
+		sync:              syncController,
+		store:             store,
+		timeTrackers:      timeTrackers,
+		taskFetchers:      taskFetchers,
+		workspaceResolver: workspaceResolver,
+		workspaceFallback: strings.TrimSpace(workspaceFallback),
+		trackingGate:      make(chan struct{}, 1),
+		accepting:         true,
+	}
 }
 
 func (h *foundationHandler) Handle(ctx context.Context, input command.Command) (command.Event, error) {
@@ -1702,6 +1816,46 @@ func (h *foundationHandler) Handle(ctx context.Context, input command.Command) (
 		}
 		return command.Event{Kind: command.EventRefresh}, nil
 	}
+	if input.Kind == command.KindStartTaskTracking {
+		release, err := h.beginTrackingOperation(ctx, true)
+		if err != nil {
+			return command.Event{}, err
+		}
+		defer release()
+		if err := h.startTaskTracking(ctx, domain.ProviderID(input.ProviderID), domain.TaskID(input.TaskID)); err != nil {
+			return command.Event{}, err
+		}
+		return command.Event{Kind: command.EventChanged}, nil
+	}
+	if input.Kind == command.KindStopTaskTracking {
+		release, err := h.beginTrackingOperation(ctx, true)
+		if err != nil {
+			return command.Event{}, err
+		}
+		defer release()
+		if err := h.stopTaskTracking(ctx); err != nil {
+			return command.Event{}, err
+		}
+		return command.Event{Kind: command.EventChanged}, nil
+	}
+	if input.Kind == command.KindPollTaskTracking {
+		release, err := h.beginTrackingOperation(ctx, false)
+		if errors.Is(err, errTrackingOperationBusy) {
+			return command.Event{Kind: command.EventNone}, nil
+		}
+		if err != nil {
+			return command.Event{}, err
+		}
+		defer release()
+		changed, err := h.pollTaskTracking(ctx)
+		if err != nil {
+			return command.Event{}, err
+		}
+		if changed {
+			return command.Event{Kind: command.EventChanged}, nil
+		}
+		return command.Event{Kind: command.EventNone}, nil
+	}
 	appCommand, err := foundationCommand(input)
 	if err != nil {
 		return command.Event{}, err
@@ -1711,6 +1865,457 @@ func (h *foundationHandler) Handle(ctx context.Context, input command.Command) (
 		return command.Event{}, err
 	}
 	return commandEvent(event), nil
+}
+
+func (h *foundationHandler) beginTrackingOperation(ctx context.Context, wait bool) (func(), error) {
+	if h == nil || h.trackingGate == nil {
+		return nil, errors.New("task tracking operations are unavailable")
+	}
+	if ctx == nil {
+		return nil, errors.New("task tracking operation: nil context")
+	}
+	if wait {
+		select {
+		case h.trackingGate <- struct{}{}:
+			return func() { <-h.trackingGate }, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	select {
+	case h.trackingGate <- struct{}{}:
+		return func() { <-h.trackingGate }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+		return nil, errTrackingOperationBusy
+	}
+}
+
+func (h *foundationHandler) startTaskTracking(ctx context.Context, providerID domain.ProviderID, taskID domain.TaskID) error {
+	if h == nil || h.store == nil {
+		return errors.New("start task tracking: local store unavailable")
+	}
+	if ctx == nil {
+		return errors.New("start task tracking: nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	session, err := loadActiveTrackingSession(ctx, h.store)
+	if err != nil {
+		return err
+	}
+	if session != nil {
+		if session.ProviderID == providerID && session.TaskID == taskID {
+			return h.stopTaskTracking(ctx)
+		}
+	}
+	task, err := h.store.GetTaskByProvider(ctx, providerID, taskID)
+	if err != nil {
+		return fmt.Errorf("load task %s for time tracking: %w", taskID, err)
+	}
+	if task.IsDeleted {
+		return fmt.Errorf("start task tracking: task %s is deleted", taskID)
+	}
+	providerRecord, err := h.store.GetProvider(ctx, providerID)
+	if err != nil {
+		return fmt.Errorf("load provider %s for time tracking: %w", providerID, err)
+	}
+	now := time.Now().UTC()
+	active := &activeTrackingSession{
+		ProviderID: providerID,
+		TaskID:     taskID,
+		TaskTitle:  task.Title,
+		StartedAt:  now,
+	}
+	if task.TimeTracked != nil {
+		active.BaseTracked = *task.TimeTracked
+	}
+	var tracker providerpkg.TaskTimeTracker
+	if providerRecord.Type == domain.ProviderTypeClickUp {
+		tracker = h.timeTrackers[providerID]
+		if tracker == nil {
+			return fmt.Errorf("start task tracking: ClickUp time tracking is unavailable for provider %s", providerID)
+		}
+		if task.RemoteID == nil || strings.TrimSpace(*task.RemoteID) == "" {
+			return fmt.Errorf("start task tracking: task %s has not been synchronized to ClickUp", taskID)
+		}
+		if h.workspaceResolver != nil {
+			active.WorkspaceID, err = h.workspaceResolver(ctx, providerID, task.ListID)
+			if err != nil {
+				return fmt.Errorf("resolve ClickUp workspace for task %s: %w", taskID, err)
+			}
+		}
+	} else if providerRecord.Type != domain.ProviderTypeLocal {
+		return fmt.Errorf("start task tracking: provider %s does not support time tracking", providerID)
+	}
+	if session != nil {
+		if err := h.stopTaskTracking(ctx); err != nil {
+			return fmt.Errorf("stop current task tracking: %w", err)
+		}
+	}
+	writeCtx := ctx
+	cancelWrite := func() {}
+	if tracker != nil {
+		entry, startErr := tracker.StartTaskTimeTracking(ctx, active.WorkspaceID, *task.RemoteID)
+		if startErr != nil {
+			return startErr
+		}
+		writeCtx, cancelWrite = persistenceContext(ctx)
+		defer cancelWrite()
+		active.RemoteTaskID = entry.TaskID
+		if !entry.StartedAt.IsZero() {
+			active.StartedAt = entry.StartedAt.UTC()
+		}
+	}
+	if err := saveActiveTrackingSession(writeCtx, h.store, active); err != nil {
+		if tracker != nil {
+			_, stopErr := tracker.StopTaskTimeTracking(writeCtx, active.WorkspaceID)
+			return errors.Join(fmt.Errorf("persist active time tracking: %w", err), stopErr)
+		}
+		return err
+	}
+	return nil
+}
+
+func (h *foundationHandler) stopTaskTracking(ctx context.Context) error {
+	if h == nil || h.store == nil {
+		return errors.New("stop task tracking: local store unavailable")
+	}
+	if ctx == nil {
+		return errors.New("stop task tracking: nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	session, err := loadActiveTrackingSession(ctx, h.store)
+	if err != nil {
+		return err
+	}
+	if session == nil {
+		return errors.New("stop task tracking: no task is currently being tracked")
+	}
+	now := time.Now().UTC()
+	duration := now.Sub(session.StartedAt)
+	if duration < 0 {
+		duration = 0
+	}
+	providerRecord, err := h.store.GetProvider(ctx, session.ProviderID)
+	if err != nil {
+		return fmt.Errorf("load provider %s for time tracking: %w", session.ProviderID, err)
+	}
+	remote := providerRecord.Type == domain.ProviderTypeClickUp
+	writeCtx := ctx
+	cancelWrite := func() {}
+	if remote {
+		tracker := h.timeTrackers[session.ProviderID]
+		if tracker == nil {
+			return fmt.Errorf("stop task tracking: ClickUp time tracking is unavailable for provider %s", session.ProviderID)
+		}
+		entry, err := tracker.StopTaskTimeTracking(ctx, session.WorkspaceID)
+		if err != nil {
+			return err
+		}
+		writeCtx, cancelWrite = persistenceContext(ctx)
+		defer cancelWrite()
+		if entry.TaskID != session.RemoteTaskID {
+			return h.finishUnexpectedClickUpTimer(writeCtx, session, entry, now)
+		}
+		if entry.Duration > 0 {
+			duration = entry.Duration
+		}
+	} else if providerRecord.Type != domain.ProviderTypeLocal {
+		return fmt.Errorf("stop task tracking: provider %s does not support time tracking", session.ProviderID)
+	}
+	task, err := h.store.GetTaskByProvider(writeCtx, session.ProviderID, session.TaskID)
+	if err != nil {
+		if remote {
+			clearErr := saveActiveTrackingSession(writeCtx, h.store, nil)
+			if errors.Is(err, domain.ErrNotFound) && clearErr == nil {
+				return nil
+			}
+			return errors.Join(fmt.Errorf("load stopped task %s: %w", session.TaskID, err), clearErr)
+		}
+		return fmt.Errorf("load stopped task %s: %w", session.TaskID, err)
+	}
+	tracked := session.BaseTracked
+	if task.TimeTracked != nil && *task.TimeTracked > tracked {
+		tracked = *task.TimeTracked
+	}
+	tracked += duration
+	task.TimeTracked = &tracked
+	task.UpdatedAt = now
+	if _, err := h.store.UpdateTaskAndDeleteAppState(writeCtx, task, foundationTrackingStateKey); err != nil {
+		if remote {
+			clearErr := saveActiveTrackingSession(writeCtx, h.store, nil)
+			return errors.Join(fmt.Errorf("persist stopped time tracking: %w", err), clearErr)
+		}
+		return fmt.Errorf("persist stopped time tracking: %w", err)
+	}
+	return nil
+}
+
+func (h *foundationHandler) finishUnexpectedClickUpTimer(ctx context.Context, session *activeTrackingSession, entry providerpkg.TimeTrackingEntry, now time.Time) error {
+	task, err := h.store.GetTaskByRemoteID(ctx, session.ProviderID, entry.TaskID)
+	if err != nil {
+		clearErr := saveActiveTrackingSession(ctx, h.store, nil)
+		if errors.Is(err, domain.ErrNotFound) && clearErr == nil {
+			return nil
+		}
+		return errors.Join(fmt.Errorf("stopped ClickUp timer for uncached task %s: %w", entry.TaskID, err), clearErr)
+	}
+	duration := entry.Duration
+	if duration <= 0 && !entry.StartedAt.IsZero() {
+		duration = now.Sub(entry.StartedAt)
+	}
+	if duration < 0 {
+		duration = 0
+	}
+	tracked := time.Duration(0)
+	if task.TimeTracked != nil {
+		tracked = *task.TimeTracked
+	}
+	tracked += duration
+	task.TimeTracked = &tracked
+	task.UpdatedAt = now
+	if _, err := h.store.UpdateTaskAndDeleteAppState(ctx, task, foundationTrackingStateKey); err != nil {
+		clearErr := saveActiveTrackingSession(ctx, h.store, nil)
+		return errors.Join(fmt.Errorf("persist stopped ClickUp time for task %s: %w", entry.TaskID, err), clearErr)
+	}
+	return nil
+}
+
+type runningTaskTimer struct {
+	providerID  domain.ProviderID
+	workspaceID string
+	entry       providerpkg.TimeTrackingEntry
+}
+
+func (h *foundationHandler) pollTaskTracking(ctx context.Context) (bool, error) {
+	if h == nil || h.store == nil {
+		return false, errors.New("poll task tracking: local store unavailable")
+	}
+	if ctx == nil {
+		return false, errors.New("poll task tracking: nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	current, err := loadActiveTrackingSession(ctx, h.store)
+	if err != nil {
+		return false, err
+	}
+	if current != nil {
+		providerRecord, err := h.store.GetProvider(ctx, current.ProviderID)
+		if err != nil {
+			return false, fmt.Errorf("load provider %s while polling time tracking: %w", current.ProviderID, err)
+		}
+		if providerRecord.Type == domain.ProviderTypeClickUp && h.timeTrackers[current.ProviderID] == nil {
+			return false, nil
+		}
+	}
+	providerIDs := make([]domain.ProviderID, 0, len(h.timeTrackers))
+	for providerID := range h.timeTrackers {
+		providerIDs = append(providerIDs, providerID)
+	}
+	sort.Slice(providerIDs, func(i, j int) bool { return providerIDs[i] < providerIDs[j] })
+	var running *runningTaskTimer
+	for _, providerID := range providerIDs {
+		tracker := h.timeTrackers[providerID]
+		workspaces, err := h.trackingWorkspaces(ctx, providerID, current)
+		if err != nil {
+			return false, err
+		}
+		for _, workspaceID := range workspaces {
+			entry, active, err := tracker.GetRunningTaskTimeTracking(ctx, workspaceID)
+			if err != nil {
+				return false, fmt.Errorf("poll ClickUp time tracking for workspace %s: %w", workspaceID, err)
+			}
+			if active {
+				running = &runningTaskTimer{providerID: providerID, workspaceID: workspaceID, entry: entry}
+				break
+			}
+		}
+		if running != nil {
+			break
+		}
+	}
+	if running == nil {
+		if current == nil {
+			return false, nil
+		}
+		providerRecord, err := h.store.GetProvider(ctx, current.ProviderID)
+		if err != nil {
+			return false, fmt.Errorf("load provider %s while polling time tracking: %w", current.ProviderID, err)
+		}
+		if providerRecord.Type != domain.ProviderTypeClickUp {
+			return false, nil
+		}
+		if err := h.refreshTrackedTask(ctx, current.ProviderID, current.TaskID); err != nil {
+			return false, fmt.Errorf("refresh stopped ClickUp task %s: %w", current.TaskID, err)
+		}
+		if err := saveActiveTrackingSession(ctx, h.store, nil); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	active, err := h.sessionForRemoteTimer(ctx, *running)
+	if err != nil {
+		return false, err
+	}
+	if current != nil && current.ProviderID == active.ProviderID && current.RemoteTaskID == active.RemoteTaskID && current.StartedAt.Equal(active.StartedAt) {
+		if !strings.HasPrefix(string(active.TaskID), "remote:") {
+			if err := h.refreshTrackedTask(ctx, active.ProviderID, active.TaskID); err != nil {
+				return false, fmt.Errorf("refresh currently tracked ClickUp task %s: %w", active.TaskID, err)
+			}
+		}
+		if current.TaskID != active.TaskID || current.TaskTitle != active.TaskTitle || current.BaseTracked != active.BaseTracked || current.WorkspaceID != active.WorkspaceID {
+			if err := saveActiveTrackingSession(ctx, h.store, active); err != nil {
+				return false, err
+			}
+		}
+		return true, nil
+	}
+	if current != nil {
+		if err := h.finishTrackingSessionFromPoll(ctx, current); err != nil {
+			return false, err
+		}
+	}
+	if !strings.HasPrefix(string(active.TaskID), "remote:") {
+		if err := h.refreshTrackedTask(ctx, active.ProviderID, active.TaskID); err != nil {
+			return false, fmt.Errorf("refresh currently tracked ClickUp task %s: %w", active.TaskID, err)
+		}
+		if task, err := h.store.GetTaskByProvider(ctx, active.ProviderID, active.TaskID); err == nil {
+			active.TaskTitle = task.Title
+			if task.TimeTracked != nil {
+				active.BaseTracked = *task.TimeTracked
+			}
+		} else if !errors.Is(err, domain.ErrNotFound) {
+			return false, fmt.Errorf("reload currently tracked ClickUp task %s: %w", active.TaskID, err)
+		}
+	}
+	if err := saveActiveTrackingSession(ctx, h.store, active); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (h *foundationHandler) trackingWorkspaces(ctx context.Context, providerID domain.ProviderID, current *activeTrackingSession) ([]string, error) {
+	workspaceIDs := make(map[string]struct{})
+	metadata, err := h.store.ListMetadata(ctx, providerID, domain.EntityTypeProvider, providerID.String())
+	if err != nil {
+		return nil, fmt.Errorf("load ClickUp workspaces for provider %s: %w", providerID, err)
+	}
+	for _, item := range metadata {
+		if item.Key != domain.MetadataKeyProviderWorkspaces {
+			continue
+		}
+		var workspaces []domain.Workspace
+		if err := json.Unmarshal([]byte(item.Value), &workspaces); err != nil {
+			return nil, fmt.Errorf("decode ClickUp workspaces for provider %s: %w", providerID, err)
+		}
+		for _, workspace := range workspaces {
+			if workspace.ProviderID != providerID {
+				continue
+			}
+			id := strings.TrimSpace(workspace.ID.String())
+			if workspace.RemoteID != nil && strings.TrimSpace(*workspace.RemoteID) != "" {
+				id = strings.TrimSpace(*workspace.RemoteID)
+			}
+			if id != "" {
+				workspaceIDs[id] = struct{}{}
+			}
+		}
+	}
+	if current != nil && current.ProviderID == providerID && strings.TrimSpace(current.WorkspaceID) != "" {
+		workspaceIDs[strings.TrimSpace(current.WorkspaceID)] = struct{}{}
+	}
+	if h.workspaceFallback != "" {
+		workspaceIDs[h.workspaceFallback] = struct{}{}
+	}
+	result := make([]string, 0, len(workspaceIDs))
+	for id := range workspaceIDs {
+		result = append(result, id)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func (h *foundationHandler) sessionForRemoteTimer(ctx context.Context, running runningTaskTimer) (*activeTrackingSession, error) {
+	entry := running.entry
+	session := &activeTrackingSession{
+		ProviderID:   running.providerID,
+		TaskID:       domain.TaskID("remote:" + entry.TaskID),
+		TaskTitle:    strings.TrimSpace(entry.TaskTitle),
+		RemoteTaskID: entry.TaskID,
+		WorkspaceID:  running.workspaceID,
+		StartedAt:    entry.StartedAt.UTC(),
+	}
+	if session.TaskTitle == "" {
+		session.TaskTitle = "ClickUp task " + entry.TaskID
+	}
+	task, err := h.store.GetTaskByRemoteID(ctx, running.providerID, entry.TaskID)
+	if err == nil {
+		session.TaskID = task.ID
+		session.TaskTitle = task.Title
+		if task.TimeTracked != nil {
+			session.BaseTracked = *task.TimeTracked
+		}
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return nil, fmt.Errorf("resolve running ClickUp task %s: %w", entry.TaskID, err)
+	}
+	return session, nil
+}
+
+func (h *foundationHandler) refreshTrackedTask(ctx context.Context, providerID domain.ProviderID, taskID domain.TaskID) error {
+	if strings.HasPrefix(string(taskID), "remote:") {
+		return nil
+	}
+	fetcher := h.taskFetchers[ProviderID(providerID)]
+	if fetcher == nil {
+		return nil
+	}
+	if err := fetcher.FetchTaskIntoCache(ctx, taskID); err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return err
+	}
+	return nil
+}
+
+func (h *foundationHandler) finishTrackingSessionFromPoll(ctx context.Context, session *activeTrackingSession) error {
+	providerRecord, err := h.store.GetProvider(ctx, session.ProviderID)
+	if err != nil {
+		return fmt.Errorf("load provider %s while reconciling time tracking: %w", session.ProviderID, err)
+	}
+	if providerRecord.Type == domain.ProviderTypeClickUp {
+		if err := h.refreshTrackedTask(ctx, session.ProviderID, session.TaskID); err != nil {
+			return fmt.Errorf("refresh completed ClickUp task %s: %w", session.TaskID, err)
+		}
+		return saveActiveTrackingSession(ctx, h.store, nil)
+	}
+	if providerRecord.Type != domain.ProviderTypeLocal {
+		return fmt.Errorf("reconcile time tracking: provider %s does not support time tracking", session.ProviderID)
+	}
+	task, err := h.store.GetTaskByProvider(ctx, session.ProviderID, session.TaskID)
+	if err != nil {
+		return fmt.Errorf("load locally tracked task %s: %w", session.TaskID, err)
+	}
+	duration := time.Since(session.StartedAt)
+	if duration < 0 {
+		duration = 0
+	}
+	tracked := session.BaseTracked
+	if task.TimeTracked != nil && *task.TimeTracked > tracked {
+		tracked = *task.TimeTracked
+	}
+	tracked += duration
+	task.TimeTracked = &tracked
+	task.UpdatedAt = time.Now().UTC()
+	if _, err := h.store.UpdateTaskAndDeleteAppState(ctx, task, foundationTrackingStateKey); err != nil {
+		return fmt.Errorf("finish locally tracked task %s: %w", session.TaskID, err)
+	}
+	return nil
 }
 
 func (h *foundationHandler) StopAccepting() {
@@ -2398,6 +3003,9 @@ func (u *foundationUIController) teaCommand(ctx context.Context, input foundatio
 			}
 			return foundationtui.NewSnapshotMsg(foundationSnapshot(view))
 		}
+		if input.Kind == foundationtui.CommandPollTracking {
+			return nil
+		}
 		return foundationtui.CommandResultMsg{Command: input}
 	}
 }
@@ -2620,6 +3228,16 @@ func foundationUICommand(input foundationtui.AppCommand) (command.Command, bool,
 			ClearDueAt:    input.ClearDueAt,
 			EditAllFields: input.EditAllFields,
 		}, true, nil
+	case foundationtui.CommandStartTracking:
+		return command.Command{
+			Kind:       command.KindStartTaskTracking,
+			ProviderID: string(input.ProviderID),
+			TaskID:     string(input.TaskID),
+		}, true, nil
+	case foundationtui.CommandStopTracking:
+		return command.Command{Kind: command.KindStopTaskTracking}, true, nil
+	case foundationtui.CommandPollTracking:
+		return command.Command{Kind: command.KindPollTaskTracking}, true, nil
 	case foundationtui.CommandCompleteTask:
 		completed := input.Completed
 		return command.Command{
@@ -2770,6 +3388,15 @@ func foundationSnapshot(view View) foundationtui.Snapshot {
 		Lists:      lists,
 		Tasks:      tasks,
 	})
+	if view.ActiveTracking != nil {
+		snapshot.ActiveTracking = &foundationtui.ActiveTracking{
+			ProviderID:  foundationtui.ProviderID(view.ActiveTracking.ProviderID),
+			TaskID:      foundationtui.TaskID(view.ActiveTracking.TaskID),
+			TaskTitle:   view.ActiveTracking.TaskTitle,
+			StartedAt:   view.ActiveTracking.StartedAt,
+			BaseTracked: view.ActiveTracking.BaseTracked,
+		}
+	}
 	for _, option := range view.EditorOptions {
 		snapshot.EditorOptions = append(snapshot.EditorOptions, foundationtui.TaskEditorOptions{
 			ProviderID: foundationtui.ProviderID(option.ProviderID),
@@ -2834,7 +3461,10 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal, lo
 	taskRepository := sqlite.NewTaskRepository(store)
 	localProvider := localpkg.NewWithStores(spaceRepository, listRepository, taskRepository)
 	providers := make([]providerpkg.Provider, 0, 2)
+	timeTrackers := make(map[domain.ProviderID]providerpkg.TaskTimeTracker)
 	fetchers := make(map[ProviderID]*cachedProvider)
+	var workspaceResolver func(context.Context, domain.ProviderID, domain.ListID) (string, error)
+	workspaceFallback := cfg.ClickUp.WorkspaceID
 	providers = append(providers, localProvider)
 	if err := upsertFoundationProvider(ctx, store, domain.Provider{
 		ID:        localProvider.ID(),
@@ -2854,6 +3484,8 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal, lo
 			return nil, fmt.Errorf("load persisted ClickUp provider settings: %w", err)
 		}
 		cfg.ClickUp = clickUpConfig
+		workspaceFallback = cfg.ClickUp.WorkspaceID
+		workspaceResolver = foundationWorkspaceResolver(store, workspaceFallback)
 		clickupProviderID := domain.ProviderID(cfg.ClickUp.ID)
 		clickupProvider := clickuppkg.NewWithConfig(clickuppkg.ProviderConfig{
 			ProviderID: clickupProviderID,
@@ -2867,13 +3499,14 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal, lo
 			}),
 			ParentResolver:      foundationParentResolver(store),
 			RemoteListResolver:  foundationRemoteListResolver(store),
-			WorkspaceResolver:   foundationWorkspaceResolver(store, cfg.ClickUp.WorkspaceID),
+			WorkspaceResolver:   workspaceResolver,
 			RemoteSpaceResolver: foundationRemoteSpaceResolver(store),
 			LocalListResolver:   foundationLocalListResolver(store, clickupProviderID),
 			RemoteTaskResolver:  foundationRemoteTaskResolver(store),
 		})
 		cached := newCachedProvider(clickupProvider, store, logger)
 		providers = append(providers, cached)
+		timeTrackers[clickupProviderID] = clickupProvider
 		fetchers[ProviderID(clickupProvider.ID())] = cached
 		configuration, marshalErr := json.Marshal(struct {
 			BaseURL     string `json:"base_url"`
@@ -2947,7 +3580,7 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal, lo
 		return nil, fmt.Errorf("create foundation sync engine: %w", err)
 	}
 	syncController := newFoundationSyncController(engine, cfg.Sync.Enabled, fetchers, syncEvents)
-	handler := newFoundationHandler(service, syncController)
+	handler := newFoundationHandler(service, syncController, store, timeTrackers, fetchers, workspaceResolver, workspaceFallback)
 	ui, err := newFoundationUIControllerWithListLoader(terminal, handler, func(ctx context.Context) (View, error) {
 		return newFoundationDataStore(store).Snapshot(ctx)
 	}, func(ctx context.Context, providerID ProviderID, listID ListID) (View, error) {

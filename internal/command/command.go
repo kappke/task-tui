@@ -31,6 +31,9 @@ const (
 	KindAddTaskToList      Kind = "add_task_to_list"
 	KindRemoveTaskFromList Kind = "remove_task_from_list"
 	KindTransferTask       Kind = "transfer_task"
+	KindStartTaskTracking  Kind = "start_task_tracking"
+	KindStopTaskTracking   Kind = "stop_task_tracking"
+	KindPollTaskTracking   Kind = "poll_task_tracking"
 )
 
 // Command is a normalized request from the UI to the application layer.
@@ -132,6 +135,14 @@ func (c Command) Validate() error {
 		if c.Kind == KindTransferTask && strings.TrimSpace(c.DestinationProviderID) == "" {
 			return fmt.Errorf("%w: destination provider is required for transfer", ErrInvalid)
 		}
+	case KindStartTaskTracking:
+		if strings.TrimSpace(c.ProviderID) == "" || strings.TrimSpace(c.TaskID) == "" {
+			return fmt.Errorf("%w: provider and task are required to start time tracking", ErrInvalid)
+		}
+	case KindStopTaskTracking:
+		return nil
+	case KindPollTaskTracking:
+		return nil
 	default:
 		return fmt.Errorf("%w: unknown kind %q", ErrInvalid, c.Kind)
 	}

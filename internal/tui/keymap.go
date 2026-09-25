@@ -30,6 +30,8 @@ const (
 	ActionFilter           Action = "filter"
 	ActionSort             Action = "sort"
 	ActionConfigureColumns Action = "configure_columns"
+	ActionTrackTask        Action = "track_task"
+	ActionStopTracking     Action = "stop_tracking"
 	ActionRefresh          Action = "refresh"
 	ActionCommand          Action = "command"
 	ActionCancel           Action = "cancel"
@@ -75,6 +77,8 @@ func DefaultKeyMap() KeyMap {
 		"f":           ActionFilter,
 		"o":           ActionSort,
 		"c":           ActionConfigureColumns,
+		"t":           ActionTrackTask,
+		"T":           ActionStopTracking,
 		"r":           ActionRefresh,
 		":":           ActionCommand,
 		"esc":         ActionCancel,
@@ -180,7 +184,7 @@ func normalizeKey(value string) string {
 	case "\b", "\x7f":
 		return "backspace"
 	}
-	if value == "G" {
+	if value == "G" || value == "T" {
 		return value
 	}
 	return strings.TrimSpace(strings.ToLower(value))

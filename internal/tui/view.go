@@ -22,11 +22,15 @@ func (m Model) View() string {
 	}
 
 	header := fit(" TASK MANAGER | overall sync: "+string(m.overallSync()), width)
+	trackingLine := m.trackingLine()
 	divider := fit(strings.Repeat("-", width), width)
 	modeLine := m.modeLine(width)
 	completionLine := m.commandCompletionLine(width)
 	statusLine := m.statusLine(width)
 	fixedLines := 3
+	if trackingLine != "" {
+		fixedLines++
+	}
 	if modeLine != "" {
 		fixedLines++
 	}
@@ -39,6 +43,9 @@ func (m Model) View() string {
 	bodyHeight := height - fixedLines
 	if bodyHeight < 1 {
 		lines := []string{header}
+		if len(lines) < height && trackingLine != "" {
+			lines = append(lines, fit(trackingLine, width))
+		}
 		if len(lines) < height {
 			lines = append(lines, divider)
 		}
@@ -59,7 +66,11 @@ func (m Model) View() string {
 
 	body := m.bodyLines(width, bodyHeight)
 	lines := make([]string, 0, height)
-	lines = append(lines, header, divider)
+	lines = append(lines, header)
+	if trackingLine != "" {
+		lines = append(lines, fit(trackingLine, width))
+	}
+	lines = append(lines, divider)
 	if modeLine != "" {
 		lines = append(lines, modeLine)
 	}
@@ -386,7 +397,7 @@ func (m Model) detailLines(width int) []string {
 	}
 	appendField("PRIORITY", priority)
 	appendField("TIME ESTIMATE", formatTaskDuration(task.TimeEstimate))
-	appendField("TIME TRACKED", formatTaskDuration(task.TimeTracked))
+	appendField("TIME TRACKED", m.displayTrackedTime(task))
 	due := "(none)"
 	if task.DueAt != nil {
 		due = task.DueAt.Format("2006-01-02 15:04 MST")
@@ -622,7 +633,38 @@ func (m Model) footerLine() string {
 	if m.UI.Mode == ModeColumnConfig {
 		return "j/k select column | space show/hide | +/- or h/l resize | enter/esc close"
 	}
-	return "j/k or up/down move | tab switch panel | h/l or left/right scroll | enter/space open/toggle group | +/- expand/collapse all | g/G first/last | n new | e edit | x complete | d delete | / search | f filter | o sort | c columns | : group/filter/sort/commands | r refresh | q quit"
+	return "j/k move | tab panel | h/l scroll | enter open | +/- expand | g/G first/last | n new | e edit | x complete | d delete | t track/switch | T stop | / search | f filter | o sort | c columns | : commands | r refresh | q quit"
+}
+
+func (m Model) trackingLine() string {
+	tracking := m.Data.ActiveTracking
+	if tracking == nil {
+		return ""
+	}
+	duration := tracking.BaseTracked + m.UI.ClockNow.Sub(tracking.StartedAt)
+	if duration < tracking.BaseTracked {
+		duration = tracking.BaseTracked
+	}
+	providerName := string(tracking.ProviderID)
+	for _, provider := range m.Data.Providers {
+		if provider.ID == tracking.ProviderID {
+			providerName = displayProviderName(provider)
+			break
+		}
+	}
+	return fmt.Sprintf("TRACKING %s | %s [%s]", formatClockDuration(duration), safeText(tracking.TaskTitle), safeText(providerName))
+}
+
+func (m Model) displayTrackedTime(task Task) string {
+	tracking := m.Data.ActiveTracking
+	if tracking == nil || tracking.ProviderID != task.ProviderID || tracking.TaskID != task.ID {
+		return formatTaskDuration(task.TimeTracked)
+	}
+	duration := tracking.BaseTracked + m.UI.ClockNow.Sub(tracking.StartedAt)
+	if duration < tracking.BaseTracked {
+		duration = tracking.BaseTracked
+	}
+	return formatClockDuration(duration)
 }
 
 func (m Model) overallSync() SyncState {
@@ -948,7 +990,7 @@ func (m Model) taskTableColumnValue(row TaskRow, column taskTableColumn) string 
 	case taskColumnEstimate:
 		return formatTaskDuration(row.Task.TimeEstimate)
 	case taskColumnTracked:
-		return formatTaskDuration(row.Task.TimeTracked)
+		return m.displayTrackedTime(row.Task)
 	case taskColumnDue:
 		return formatTaskDueDate(row.Task.DueAt)
 	default:
@@ -1021,6 +1063,17 @@ func formatTaskDuration(value *time.Duration) string {
 		return "<1m"
 	}
 	return strings.Join(parts, " ")
+}
+
+func formatClockDuration(value time.Duration) string {
+	if value < 0 {
+		value = 0
+	}
+	seconds := int64(value / time.Second)
+	hours := seconds / 3600
+	minutes := (seconds % 3600) / 60
+	seconds %= 60
+	return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
 }
 
 func formatTaskDueDate(value *time.Time) string {

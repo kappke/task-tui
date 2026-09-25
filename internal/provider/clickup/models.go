@@ -120,6 +120,22 @@ type wireTask struct {
 	CustomFields []wireCustomField `json:"custom_fields"`
 }
 
+type timeEntryResponse struct {
+	Data timeEntry `json:"data"`
+}
+
+type timeEntry struct {
+	ID       wireString  `json:"id"`
+	Task     wireTaskRef `json:"task"`
+	Start    wireString  `json:"start"`
+	Duration int64       `json:"duration"`
+}
+
+type wireTaskRef struct {
+	ID   wireString `json:"id"`
+	Name string     `json:"name"`
+}
+
 type wireAssignee struct {
 	ID       wireString `json:"id"`
 	Username string     `json:"username"`

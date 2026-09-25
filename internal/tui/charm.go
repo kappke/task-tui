@@ -30,13 +30,14 @@ type CharmModel struct {
 	core    Model
 	options CharmOptions
 
-	input           textinput.Model
-	help            help.Model
-	helpKeys        charmHelpKeyMap
-	viewport        viewport.Model
-	pendingTaskEdit *pendingTaskEdit
-	refreshing      bool
-	refreshFrame    int
+	input                 textinput.Model
+	help                  help.Model
+	helpKeys              charmHelpKeyMap
+	viewport              viewport.Model
+	pendingTaskEdit       *pendingTaskEdit
+	refreshing            bool
+	refreshFrame          int
+	trackingTickScheduled bool
 }
 
 type pendingTaskEdit struct {
@@ -51,6 +52,8 @@ type taskEditorFinishedMsg struct {
 }
 
 type refreshTickMsg struct{}
+type trackingTickMsg struct{}
+type trackingPollTickMsg struct{}
 
 var refreshFrames = [...]string{"|", "/", "-", "\\"}
 
@@ -123,13 +126,21 @@ func (m *CharmModel) CoreModel() Model {
 	return m.core
 }
 
-// Init implements tea.Model. A cache-load command is emitted only for models
-// created without an initial snapshot.
+// Init implements tea.Model. It loads cached data when needed and starts the
+// periodic timer refresh when an application command boundary is configured.
 func (m *CharmModel) Init() tea.Cmd {
 	if m == nil {
 		return nil
 	}
-	return m.dispatch(m.core.Init())
+	commands := []tea.Cmd{m.dispatch(m.core.Init())}
+	if m.core.Data.ActiveTracking != nil {
+		m.trackingTickScheduled = true
+		commands = append(commands, trackingTick())
+	}
+	if m.options.OnCommand != nil {
+		commands = append(commands, trackingPollTick(time.Second))
+	}
+	return tea.Batch(commands...)
 }
 
 // Update translates Bubble Tea messages into the existing presentation state
@@ -148,6 +159,24 @@ func (m *CharmModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.refreshFrame = (m.refreshFrame + 1) % len(refreshFrames)
 		return m, refreshTick()
+	}
+	if _, ok := msg.(trackingTickMsg); ok {
+		m.trackingTickScheduled = false
+		if m.core.Data.ActiveTracking == nil {
+			return m, nil
+		}
+		next, _ := m.core.Update(TrackingTickMsg{At: time.Now().UTC()})
+		m.core = next
+		m.trackingTickScheduled = true
+		return m, trackingTick()
+	}
+	if _, ok := msg.(trackingPollTickMsg); ok {
+		if m.options.OnCommand == nil || m.core.UI.Quitting {
+			return m, nil
+		}
+		commands := []tea.Cmd{m.dispatch(m.core.emit(AppCommand{Kind: CommandPollTracking}))}
+		commands = append(commands, trackingPollTick(30*time.Second))
+		return m, tea.Batch(commands...)
 	}
 
 	if key, ok := msg.(tea.KeyMsg); ok && m.shouldOpenTaskEditor(key) {
@@ -193,6 +222,10 @@ func (m *CharmModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.refreshing {
 		commands = append(commands, refreshTick())
 	}
+	if m.core.Data.ActiveTracking != nil && !m.trackingTickScheduled {
+		m.trackingTickScheduled = true
+		commands = append(commands, trackingTick())
+	}
 	if m.core.UI.Quitting {
 		commands = append(commands, tea.Quit)
 	}
@@ -201,6 +234,14 @@ func (m *CharmModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func refreshTick() tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return refreshTickMsg{} })
+}
+
+func trackingTick() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg { return trackingTickMsg{} })
+}
+
+func trackingPollTick(delay time.Duration) tea.Cmd {
+	return tea.Tick(delay, func(time.Time) tea.Msg { return trackingPollTickMsg{} })
 }
 
 func (m *CharmModel) shouldOpenTaskEditor(msg tea.KeyMsg) bool {
@@ -378,11 +419,15 @@ func (m *CharmModel) View() string {
 		fitAtOffset(headerText, maxInt(width-4, 1), 0),
 	)
 	modeLine := m.charmModeLine(width)
+	trackingLine := m.charmTrackingLine(width)
 	completionLine := m.charmCommandCompletionLine(width)
 	statusLine := m.charmStatusLine(width)
 	footer := m.charmFooter(width)
 
 	fixedHeight := 2
+	if trackingLine != "" {
+		fixedHeight++
+	}
 	if modeLine != "" {
 		fixedHeight++
 	}
@@ -402,7 +447,11 @@ func (m *CharmModel) View() string {
 
 	body := m.charmBody(width, bodyHeight)
 	lines := make([]string, 0, height)
-	lines = append(lines, header, charmMutedStyle.Render(strings.Repeat("-", maxInt(width, 1))))
+	lines = append(lines, header)
+	if trackingLine != "" {
+		lines = append(lines, trackingLine)
+	}
+	lines = append(lines, charmMutedStyle.Render(strings.Repeat("-", maxInt(width, 1))))
 	if modeLine != "" {
 		lines = append(lines, modeLine)
 	}
@@ -927,6 +976,14 @@ func (m *CharmModel) charmStatusLine(width int) string {
 	}
 }
 
+func (m *CharmModel) charmTrackingLine(width int) string {
+	line := m.core.trackingLine()
+	if line == "" {
+		return ""
+	}
+	return charmGoodStyle.Render(fit(line, width))
+}
+
 func (m *CharmModel) charmFooter(width int) string {
 	helpModel := m.help
 	helpModel.Width = width
@@ -956,6 +1013,7 @@ func newCharmHelpKeyMap() charmHelpKeyMap {
 		bind([]string{"+", "="}, "+", "expand all"),
 		bind([]string{"-"}, "-", "collapse all"),
 		bind([]string{"n", "e", "x", "d"}, "n/e/x/d", "task"),
+		bind([]string{"t", "T"}, "t/T", "track/stop"),
 		bind([]string{"/"}, "/", "search"),
 		bind([]string{"f"}, "f", "filter"),
 		bind([]string{"o"}, "o", "sort"),
