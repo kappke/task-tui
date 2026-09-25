@@ -247,6 +247,128 @@ func TestTaskColumnsAreDiscoveredDisplayedAndConfiguredPerList(t *testing.T) {
 	}
 }
 
+func TestTaskColumnsCanBeReorderedAndFixated(t *testing.T) {
+	model := New(testSnapshot())
+	model.UI.SelectedNode = TreeNodeRef{Kind: TreeNodeList, ProviderID: "work", SpaceID: "engineering", ListID: "backend"}
+	model, _ = model.Update(KeyMsg{Key: "c"})
+	if model.UI.Mode != ModeColumnConfig {
+		t.Fatalf("column configuration mode = %q, want column config", model.UI.Mode)
+	}
+	model, _ = model.Update(KeyMsg{Key: "j"})
+	model, _ = model.Update(KeyMsg{Key: "]"})
+	columns := model.availableTaskColumns()
+	if columns[0].ID != taskColumnTask || columns[1].ID != taskColumnAssignees || columns[2].ID != taskColumnStatus {
+		t.Fatalf("column order after moving status right = %#v", columns)
+	}
+	model, _ = model.Update(KeyMsg{Key: "f"})
+	for _, id := range []string{taskColumnTask, taskColumnAssignees, taskColumnStatus} {
+		preference, ok := model.taskColumnPreference(id)
+		if !ok || !preference.Fixed {
+			t.Errorf("column %q fixation preference = %#v, exists=%v; want fixed prefix", id, preference, ok)
+		}
+	}
+	if !strings.Contains(model.columnConfigLines(120)[4], "[F]") {
+		t.Fatalf("column configuration did not display fixation state:\n%s", strings.Join(model.columnConfigLines(120), "\n"))
+	}
+	state := model.UI.ListViews[ListViewKey{ProviderID: "work", ListID: "backend"}]
+	if len(state.Columns) < 3 || state.Columns[0].ID != taskColumnTask || state.Columns[0].Order != 1 ||
+		state.Columns[1].ID != taskColumnAssignees || state.Columns[1].Order != 2 ||
+		state.Columns[2].ID != taskColumnStatus || state.Columns[2].Order != 3 || !state.Columns[2].Fixed {
+		t.Fatalf("per-list order/fixation state = %#v", state.Columns)
+	}
+
+	model, _ = model.Update(KeyMsg{Key: "j"})
+	model, _ = model.Update(KeyMsg{Key: "["})
+	columns = model.availableTaskColumns()
+	if columns[2].ID != taskColumnPriority || columns[3].ID != taskColumnStatus || model.fixedTaskColumnCount(columns) != 4 {
+		t.Fatalf("reordering before a fixated column did not preserve the fixed prefix: columns=%#v preferences=%#v", columns, model.UI.ColumnPreferences)
+	}
+	model, _ = model.Update(KeyMsg{Key: "f"})
+	if model.fixedTaskColumnCount(model.availableTaskColumns()) != 2 {
+		t.Fatalf("unfixating the selected column left an invalid prefix: %#v", model.UI.ColumnPreferences)
+	}
+}
+
+func TestFixatedColumnsStayVisibleDuringHorizontalScroll(t *testing.T) {
+	model := New(testSnapshot())
+	model.UI.ColumnPreferences = []TaskColumnPreference{
+		{ID: "alpha", Visible: true, Width: 3, Order: 1, Fixed: true},
+		{ID: "beta", Visible: true, Width: 3, Order: 2, Fixed: true},
+		{ID: "gamma", Visible: true, Width: 3, Order: 3},
+	}
+	columns := []taskTableColumn{
+		{ID: "alpha", Label: "ALPHA", Width: 3},
+		{ID: "beta", Label: "BETA", Width: 3},
+		{ID: "gamma", Label: "GAMMA", Width: 3},
+	}
+	row := TaskRow{ColumnValues: map[string]string{"alpha": "a1", "beta": "b1", "gamma": "gamma"}}
+	left := model.taskTableLineAtOffset(row, "  ", columns, 20, 0)
+	scrolled := model.taskTableLineAtOffset(row, "  ", columns, 20, 2)
+	const fixedPrefixWidth = 12
+	if left[:fixedPrefixWidth] != scrolled[:fixedPrefixWidth] {
+		t.Fatalf("fixed prefix changed during scroll: before %q after %q", left[:fixedPrefixWidth], scrolled[:fixedPrefixWidth])
+	}
+	if left[fixedPrefixWidth:] == scrolled[fixedPrefixWidth:] {
+		t.Fatalf("scrolling did not move the unfixed columns: before %q after %q", left, scrolled)
+	}
+}
+
+func TestTaskPanelAndGroupHeadingsStayFixedWithoutFixatedColumns(t *testing.T) {
+	model := New(testSnapshot())
+	model.UI.SelectedNode = TreeNodeRef{Kind: TreeNodeList, ProviderID: "work", SpaceID: "engineering", ListID: "backend"}
+	model.UI.Focus = PanelTasks
+	model.UI.GroupBy = TaskGroupStatus
+	model.UI.TaskHorizontalOffset = 4
+	if fixed := model.fixedTaskColumnCount(model.taskTableColumns(60)); fixed != 0 {
+		t.Fatalf("test has %d fixated columns; want none", fixed)
+	}
+
+	checkHeadings := func(name string, lines []string) {
+		t.Helper()
+		if len(lines) < 3 || !strings.Contains(lines[0], "TASKS | LIST Backend") {
+			t.Errorf("%s panel heading scrolled with table content: %#v", name, lines)
+		}
+		for _, line := range lines {
+			if strings.Contains(line, "[-]") {
+				if !strings.Contains(line, "  [-]") || !strings.Contains(line, "OPEN") {
+					t.Errorf("%s group heading scrolled with table content: %q", name, line)
+				}
+				return
+			}
+		}
+		t.Errorf("%s view omitted the task group heading: %#v", name, lines)
+	}
+	checkHeadings("core", model.taskLines(60, 12))
+	checkHeadings("Charm", NewCharmModel(model, CharmOptions{}).charmTaskLines(60, 12))
+}
+
+func TestStatusColorRangeCannotBleedIntoFixatedColumns(t *testing.T) {
+	columns := []taskTableColumn{
+		{ID: "pinned", Width: 4},
+		{ID: taskColumnStatus, Width: 4},
+		{ID: "later", Width: 4},
+	}
+	const fixedCount = 1
+	const markerWidth = 2
+	fixedWidth := taskTableFixedPrefixWidth(columns, fixedCount, markerWidth)
+	for _, test := range []struct {
+		name      string
+		offset    int
+		wantStart int
+		wantEnd   int
+	}{
+		{name: "partly hidden behind pinned prefix", offset: 3, wantStart: fixedWidth, wantEnd: fixedWidth + 1},
+		{name: "fully hidden behind pinned prefix", offset: 4, wantStart: fixedWidth, wantEnd: fixedWidth},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			start, end, ok := taskStatusCellRange(columns, fixedCount, test.offset, markerWidth)
+			if !ok || start != test.wantStart || end != test.wantEnd {
+				t.Fatalf("status color range = (%d, %d, %v), want (%d, %d, true)", start, end, ok, test.wantStart, test.wantEnd)
+			}
+		})
+	}
+}
+
 func TestTaskDetailViewOpensScrollsAndCloses(t *testing.T) {
 	snapshot := testSnapshot()
 	snapshot.Tasks[0].Description = strings.Repeat("This description explains the authentication regression and the required fix. ", 4)

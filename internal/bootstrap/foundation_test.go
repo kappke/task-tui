@@ -225,8 +225,8 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 		GroupBy:         string(foundationtui.TaskGroupStatus),
 		CollapsedGroups: []string{" status:done ", "status:done", "assignee:alice"},
 		ListViews: []ListViewState{
-			{ProviderID: "work", ListID: "backend", Filter: "status:open", Sort: "status asc, priority desc", GroupBy: string(foundationtui.TaskGroupStatus), Columns: []TaskColumnPreference{{ID: "status", Visible: false, Width: 9}}},
-			{ProviderID: "personal", ListID: "today", Filter: "priority:high", Sort: "title desc", GroupBy: string(foundationtui.TaskGroupPriority), Columns: []TaskColumnPreference{{ID: "task", Visible: true, Width: 55}}},
+			{ProviderID: "work", ListID: "backend", Filter: "status:open", Sort: "status asc, priority desc", GroupBy: string(foundationtui.TaskGroupStatus), Columns: []TaskColumnPreference{{ID: "status", Visible: false, Width: 9, Order: 3, Fixed: true}}},
+			{ProviderID: "personal", ListID: "today", Filter: "priority:high", Sort: "title desc", GroupBy: string(foundationtui.TaskGroupPriority), Columns: []TaskColumnPreference{{ID: "task", Visible: true, Width: 55, Order: 1, Fixed: true}}},
 		},
 	})
 	if ui.model.UI.ActiveProviderID != "work" || ui.model.UI.SelectedNode.ListID != "backend" {
@@ -250,7 +250,9 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 		t.Fatalf("saved per-list views = %#v, want sorted personal and work preferences", state.ListViews)
 	}
 	if len(state.ListViews[0].Columns) != 1 || state.ListViews[0].Columns[0].ID != "task" || state.ListViews[0].Columns[0].Width != 55 ||
-		len(state.ListViews[1].Columns) != 1 || state.ListViews[1].Columns[0].ID != "status" || state.ListViews[1].Columns[0].Visible {
+		state.ListViews[0].Columns[0].Order != 1 || !state.ListViews[0].Columns[0].Fixed ||
+		len(state.ListViews[1].Columns) != 1 || state.ListViews[1].Columns[0].ID != "status" || state.ListViews[1].Columns[0].Visible ||
+		state.ListViews[1].Columns[0].Order != 3 || !state.ListViews[1].Columns[0].Fixed {
 		t.Fatalf("saved per-list column preferences = %#v", state.ListViews)
 	}
 	if state.ListViews[0].Sort != "title desc" || state.ListViews[1].Sort != "status asc, priority desc" || state.Sort != "status asc, priority desc" {
@@ -778,7 +780,7 @@ func TestUIStateNormalizesRemoteListAndRestartRefreshFindsSharedTasks(t *testing
 		SpaceID:    string(space.ID),
 		ListID:     selectedRemote,
 		ListViews: []ListViewState{
-			{ProviderID: string(providerID), ListID: string(selected.ID), Filter: "status:open", GroupBy: "status"},
+			{ProviderID: string(providerID), ListID: string(selected.ID), Filter: "status:open", GroupBy: "status", Columns: []TaskColumnPreference{{ID: "status", Visible: true, Width: 9, Order: 2, Fixed: true}}},
 			{ProviderID: string(providerID), ListID: string(other.ID), Filter: "priority:high", GroupBy: "priority"},
 		},
 	}); err != nil {
@@ -802,6 +804,9 @@ func TestUIStateNormalizesRemoteListAndRestartRefreshFindsSharedTasks(t *testing
 	}
 	if len(state.ListViews) != 2 || state.ListViews[0].ProviderID != string(providerID) || state.ListViews[0].ListID != string(selected.ID) || state.ListViews[0].Filter != "status:open" || state.ListViews[1].ListID != string(other.ID) || state.ListViews[1].GroupBy != "priority" {
 		t.Fatalf("persisted per-list view state = %#v, want selected and other list preferences", state.ListViews)
+	}
+	if len(state.ListViews[0].Columns) != 1 || state.ListViews[0].Columns[0].ID != "status" || state.ListViews[0].Columns[0].Order != 2 || !state.ListViews[0].Columns[0].Fixed {
+		t.Fatalf("persisted column order/fixation = %#v", state.ListViews[0].Columns)
 	}
 
 	selectedTaskRemote, otherTaskRemote := "task-selected", "task-other"

@@ -2096,7 +2096,9 @@ func foundationTaskColumnPreferences(values []TaskColumnPreference) []foundation
 		if strings.TrimSpace(value.ID) == "" {
 			continue
 		}
-		result = append(result, foundationtui.TaskColumnPreference{ID: value.ID, Visible: value.Visible, Width: value.Width})
+		result = append(result, foundationtui.TaskColumnPreference{
+			ID: value.ID, Visible: value.Visible, Width: value.Width, Order: value.Order, Fixed: value.Fixed,
+		})
 	}
 	return result
 }
@@ -2115,7 +2117,9 @@ func bootstrapTaskColumnPreferences(values []foundationtui.TaskColumnPreference)
 		if strings.TrimSpace(value.ID) == "" {
 			continue
 		}
-		result = append(result, TaskColumnPreference{ID: value.ID, Visible: value.Visible, Width: value.Width})
+		result = append(result, TaskColumnPreference{
+			ID: value.ID, Visible: value.Visible, Width: value.Width, Order: value.Order, Fixed: value.Fixed,
+		})
 	}
 	return result
 }

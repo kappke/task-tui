@@ -55,6 +55,13 @@ operators, Boolean conditions, and applicable values such as the current list's
 statuses and task priorities. In the command palette, bare `:filter` and
 `:sort` open the same editable prompts; arguments apply an expression directly.
 
+Press `c` to configure columns for the selected list. Use `space` to show or hide
+a column, `+`/`-` to resize it, `[`/`]` to reorder it, and `f` to fixate it.
+Fixating a column also fixates all columns before it; unfixating one clears the
+fixed state from it and every column after it. Fixed columns stay in place while
+the rest of the table scrolls horizontally. The task-pane heading and group
+headings also remain fixed during horizontal scrolling.
+
 Use `--headless` to render the cached view and exit:
 
 ```bash

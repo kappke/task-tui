@@ -80,11 +80,13 @@ type TaskColumnValueSet struct {
 	Values     map[string]string
 }
 
-// TaskColumnPreference stores a visibility or width override for one column.
+// TaskColumnPreference stores presentation overrides for one task column.
 type TaskColumnPreference struct {
 	ID      string
 	Visible bool
 	Width   int
+	Order   int
+	Fixed   bool
 }
 
 // TaskEditorOptions contains cached values used by the external editor's
@@ -195,7 +197,7 @@ type ListViewKey struct {
 	ListID     ListID
 }
 
-// ListViewState stores the filter and grouping used the last time a list was
+// ListViewState stores the task-view preferences used the last time a list was
 // viewed. Filter is kept in its editable form so it can be persisted directly.
 type ListViewState struct {
 	Filter  string

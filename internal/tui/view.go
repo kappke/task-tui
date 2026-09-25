@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -175,8 +176,8 @@ func (m Model) taskLines(width, lineLimit int) []string {
 		return nil
 	}
 	lines := []string{
-		fitAtOffset(m.taskHeading(), width, m.UI.TaskHorizontalOffset),
-		fitAtOffset(m.taskTableHeaderLine(width), width, m.UI.TaskHorizontalOffset),
+		fit(m.taskHeading(), width),
+		m.taskTableHeaderLineAtOffset(width, m.UI.TaskHorizontalOffset),
 	}
 	if len(lines) >= lineLimit {
 		return lines[:lineLimit]
@@ -245,7 +246,7 @@ func (m Model) taskLines(width, lineLimit int) []string {
 		visualIndex++
 		if group.Collapsed {
 			if groupIndex >= offset && len(lines) < lineLimit {
-				lines = append(lines, fitAtOffset(m.taskGroupLine(group), width, m.UI.TaskHorizontalOffset))
+				lines = append(lines, fit(m.taskGroupLine(group), width))
 			}
 			continue
 		}
@@ -255,7 +256,7 @@ func (m Model) taskLines(width, lineLimit int) []string {
 			continue
 		}
 		if groupIndex >= offset && len(lines) < lineLimit {
-			lines = append(lines, fitAtOffset(m.taskGroupLine(group), width, m.UI.TaskHorizontalOffset))
+			lines = append(lines, fit(m.taskGroupLine(group), width))
 		}
 		rowStart := 0
 		if offset > visualIndex {
@@ -329,7 +330,7 @@ func (m Model) taskRowLineWithColumns(row TaskRow, index, width int, columns []t
 	if index == m.UI.TaskCursor {
 		marker = "> "
 	}
-	return fitAtOffset(m.taskTableLineWithColumns(row, marker, columns), width, m.UI.TaskHorizontalOffset)
+	return m.taskTableLineAtOffset(row, marker, columns, width, m.UI.TaskHorizontalOffset)
 }
 
 func (m Model) detailLines(width int) []string {
@@ -440,8 +441,9 @@ func (m Model) columnConfigLines(width int) []string {
 	columns := m.availableTaskColumns()
 	lines := []string{
 		fit("TASK COLUMNS | "+safeText(list.Name), width),
-		fit("j/k select | space toggle | +/- resize | enter or esc close", width),
+		fit("j/k select | space show/hide | +/- resize | [/] reorder | f fixate | enter/esc close", width),
 	}
+	fixedCount := m.fixedTaskColumnCount(columns)
 	for index, column := range columns {
 		marker := "  "
 		if index == m.UI.ColumnCursor {
@@ -455,9 +457,14 @@ func (m Model) columnConfigLines(width int) []string {
 		if column.ID == taskColumnTask {
 			visible = true
 		}
+		fixated := index < fixedCount
 		check := "[ ]"
 		if visible {
 			check = "[x]"
+		}
+		fixation := "[ ]"
+		if fixated {
+			fixation = "[F]"
 		}
 		columnWidth := column.Width
 		if configured && preference.Width > 0 {
@@ -467,7 +474,7 @@ func (m Model) columnConfigLines(width int) []string {
 		if column.ID == taskColumnTask {
 			detail = " (required)"
 		}
-		lines = append(lines, fit(fmt.Sprintf("%s%s %s  width %d%s", marker, check, safeText(column.Label), columnWidth, detail), width))
+		lines = append(lines, fit(fmt.Sprintf("%s%s %s %s  width %d%s", marker, check, fixation, safeText(column.Label), columnWidth, detail), width))
 	}
 	return lines
 }
@@ -534,7 +541,7 @@ func wrapDetailText(text string, width int) []string {
 
 func (m Model) modeLine(width int) string {
 	if m.UI.Mode == ModeColumnConfig {
-		return fit("COLUMNS: j/k select | space toggle | +/- resize | enter/esc close", width)
+		return fit("COLUMNS: j/k select | space show/hide | +/- resize | [/] reorder | f fixate", width)
 	}
 	var prefix, suffix string
 	switch m.UI.Mode {
@@ -758,7 +765,39 @@ func (m Model) availableTaskColumns() []taskTableColumn {
 		width := clamp(runeCount(column.Name)+2, 12, 24)
 		columns = append(columns, taskTableColumn{ID: column.ID, Label: strings.ToUpper(column.Name), Width: width})
 	}
-	return columns
+	return m.orderTaskColumns(columns)
+}
+
+func (m Model) orderTaskColumns(columns []taskTableColumn) []taskTableColumn {
+	ordered := append([]taskTableColumn(nil), columns...)
+	maxOrder := 0
+	for _, column := range ordered {
+		preference, ok := m.taskColumnPreference(column.ID)
+		if ok && preference.Order > maxOrder {
+			maxOrder = preference.Order
+		}
+	}
+	if maxOrder == 0 {
+		return ordered
+	}
+	positions := make(map[string]int, len(ordered))
+	for index, column := range ordered {
+		positions[column.ID] = index
+	}
+	sort.SliceStable(ordered, func(left, right int) bool {
+		leftPreference, leftConfigured := m.taskColumnPreference(ordered[left].ID)
+		rightPreference, rightConfigured := m.taskColumnPreference(ordered[right].ID)
+		leftOrder := maxOrder + positions[ordered[left].ID] + 1
+		rightOrder := maxOrder + positions[ordered[right].ID] + 1
+		if leftConfigured && leftPreference.Order > 0 {
+			leftOrder = leftPreference.Order
+		}
+		if rightConfigured && rightPreference.Order > 0 {
+			rightOrder = rightPreference.Order
+		}
+		return leftOrder < rightOrder
+	})
+	return ordered
 }
 
 func (m Model) listByID(providerID ProviderID, listID ListID) (List, bool) {
@@ -811,19 +850,20 @@ func (m Model) taskColumnPreference(id string) (TaskColumnPreference, bool) {
 func (m Model) taskTableHeaderLine(width int) string {
 	columns := m.taskTableColumns(width)
 	var line strings.Builder
+	line.WriteString("  ")
 	for index, column := range columns {
 		if index > 0 {
 			line.WriteString(taskTableGap)
 		}
 		label := column.Label
-		cellWidth := column.Width
-		if column.ID == taskColumnTask {
-			label = "  TASK"
-			cellWidth += 2
-		}
-		line.WriteString(taskTableCell(label, cellWidth))
+		line.WriteString(taskTableCell(label, column.Width))
 	}
 	return line.String()
+}
+
+func (m Model) taskTableHeaderLineAtOffset(width, offset int) string {
+	columns := m.taskTableColumns(width)
+	return m.fitTaskTableLine(m.taskTableHeaderLine(width), columns, width, offset)
 }
 
 func (m Model) taskTableLine(row TaskRow, marker string, width int) string {
@@ -840,6 +880,59 @@ func (m Model) taskTableLineWithColumns(row TaskRow, marker string, columns []ta
 		line.WriteString(taskTableCell(m.taskTableColumnValue(row, column), column.Width))
 	}
 	return line.String()
+}
+
+func (m Model) taskTableLineAtOffset(row TaskRow, marker string, columns []taskTableColumn, width, offset int) string {
+	return m.fitTaskTableLine(m.taskTableLineWithColumns(row, marker, columns), columns, width, offset)
+}
+
+func (m Model) fitTaskTableLine(line string, columns []taskTableColumn, width, offset int) string {
+	fixedCount := m.fixedTaskColumnCount(columns)
+	if fixedCount == 0 {
+		return fitAtOffset(line, width, offset)
+	}
+	if fixedCount >= len(columns) {
+		return fitAtOffset(line, width, 0)
+	}
+
+	fixedWidth := taskTableFixedPrefixWidth(columns, fixedCount, 2)
+	if fixedWidth >= width {
+		return fitAtOffset(line, width, 0)
+	}
+	runes := []rune(line)
+	fixedWidth = minInt(fixedWidth, len(runes))
+	fixed := string(runes[:fixedWidth])
+	return fixed + fitAtOffset(string(runes[fixedWidth:]), width-fixedWidth, offset)
+}
+
+func (m Model) fixedTaskColumnCount(columns []taskTableColumn) int {
+	count := 0
+	for _, column := range columns {
+		preference, ok := m.taskColumnPreference(column.ID)
+		if !ok || !preference.Fixed {
+			break
+		}
+		count++
+	}
+	return count
+}
+
+func taskTableFixedPrefixWidth(columns []taskTableColumn, fixedCount, markerWidth int) int {
+	fixedCount = clamp(fixedCount, 0, len(columns))
+	if fixedCount == 0 {
+		return 0
+	}
+	width := markerWidth
+	for index, column := range columns[:fixedCount] {
+		if index > 0 {
+			width += runeCount(taskTableGap)
+		}
+		width += column.Width
+	}
+	if fixedCount < len(columns) {
+		width += runeCount(taskTableGap)
+	}
+	return width
 }
 
 func (m Model) taskTableColumnValue(row TaskRow, column taskTableColumn) string {
@@ -939,6 +1032,22 @@ func formatTaskDueDate(value *time.Time) string {
 
 func (m Model) maxHorizontalOffset(panel Panel) int {
 	width := m.horizontalPanelWidth(panel)
+	if panel == PanelTasks {
+		columns := m.taskTableColumns(width)
+		fixedCount := m.fixedTaskColumnCount(columns)
+		if fixedCount > 0 {
+			fixedWidth := taskTableFixedPrefixWidth(columns, fixedCount, 2)
+			scrollingWidth := maxInt(width-fixedWidth, 0)
+			remainingWidth := 0
+			for index, column := range columns[fixedCount:] {
+				if index > 0 {
+					remainingWidth += runeCount(taskTableGap)
+				}
+				remainingWidth += column.Width
+			}
+			return maxInt(remainingWidth-scrollingWidth, 0)
+		}
+	}
 	return maxInt(m.maxPanelLineWidth(panel)-width, 0)
 }
 
@@ -973,7 +1082,6 @@ func (m Model) maxPanelLineWidth(panel Panel) int {
 		return maxWidth
 	}
 
-	maxWidth := runeCount(m.taskHeading())
 	rowWidth := runeCount("  ")
 	for index, column := range m.taskTableColumns(0) {
 		if index > 0 {
@@ -981,13 +1089,7 @@ func (m Model) maxPanelLineWidth(panel Panel) int {
 		}
 		rowWidth += column.Width
 	}
-	maxWidth = maxInt(maxWidth, rowWidth)
-	if m.UI.GroupBy != TaskGroupNone {
-		for _, group := range m.VisibleTaskGroups() {
-			maxWidth = maxInt(maxWidth, runeCount(m.taskGroupLine(group)))
-		}
-	}
-	return maxWidth
+	return rowWidth
 }
 
 func treeDisplayParts(node TreeNode, compact bool) (kind, expansion string) {

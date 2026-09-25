@@ -1016,6 +1016,12 @@ func (m Model) updateColumnConfig(key string) (Model, Cmd) {
 		m.UI.ColumnCursor = clamp(m.UI.ColumnCursor+1, 0, len(columns)-1)
 	case "k", "up":
 		m.UI.ColumnCursor = clamp(m.UI.ColumnCursor-1, 0, len(columns)-1)
+	case "[":
+		m.moveTaskColumn(columns, m.UI.ColumnCursor, m.UI.ColumnCursor-1)
+	case "]":
+		m.moveTaskColumn(columns, m.UI.ColumnCursor, m.UI.ColumnCursor+1)
+	case "f":
+		m.toggleTaskColumnFixation(columns, m.UI.ColumnCursor)
 	case "space":
 		if column.ID == taskColumnTask {
 			m.Status = Status{Level: StatusWarning, Text: "The task title column is required"}
@@ -1041,7 +1047,69 @@ func (m Model) updateColumnConfig(key string) (Model, Cmd) {
 		m.UI.Mode = ModeBrowse
 		m.Status = Status{Level: StatusInfo, Text: "Column configuration closed"}
 	}
+	m.UI.TaskHorizontalOffset = clamp(m.UI.TaskHorizontalOffset, 0, m.maxHorizontalOffset(PanelTasks))
 	return m, nil
+}
+
+func (m *Model) moveTaskColumn(columns []taskTableColumn, from, to int) {
+	if from < 0 || from >= len(columns) || to < 0 || to >= len(columns) || from == to {
+		return
+	}
+	ordered := append([]taskTableColumn(nil), columns...)
+	column := ordered[from]
+	if from < to {
+		copy(ordered[from:to], ordered[from+1:to+1])
+	} else {
+		copy(ordered[to+1:from+1], ordered[to:from])
+	}
+	ordered[to] = column
+	lastFixed := -1
+	for index, item := range ordered {
+		preference, ok := m.taskColumnPreference(item.ID)
+		if ok && preference.Fixed {
+			lastFixed = index
+		}
+	}
+	for index, item := range ordered {
+		preference, configured := m.taskColumnPreference(item.ID)
+		if !configured {
+			preference = TaskColumnPreference{ID: item.ID, Visible: true, Width: item.Width}
+		}
+		preference.Order = index + 1
+		preference.Fixed = index <= lastFixed
+		m.setTaskColumnPreference(preference)
+	}
+	m.UI.ColumnCursor = to
+	direction := "right"
+	if to < from {
+		direction = "left"
+	}
+	m.Status = Status{Level: StatusSuccess, Text: fmt.Sprintf("Moved %s %s", column.Label, direction)}
+}
+
+func (m *Model) toggleTaskColumnFixation(columns []taskTableColumn, index int) {
+	if index < 0 || index >= len(columns) {
+		return
+	}
+	fixedCount := m.fixedTaskColumnCount(columns)
+	lastFixed := index
+	if index < fixedCount {
+		lastFixed = index - 1
+	}
+	for columnIndex, column := range columns {
+		preference, configured := m.taskColumnPreference(column.ID)
+		if !configured {
+			preference = TaskColumnPreference{ID: column.ID, Visible: true, Width: column.Width}
+		}
+		preference.Fixed = columnIndex <= lastFixed
+		m.setTaskColumnPreference(preference)
+	}
+	column := columns[index]
+	state := "Fixated"
+	if index < fixedCount {
+		state = "Unfixated"
+	}
+	m.Status = Status{Level: StatusSuccess, Text: fmt.Sprintf("%s %s and columns to its left", state, column.Label)}
 }
 
 func (m *Model) resizeTaskColumn(column taskTableColumn, delta int) {

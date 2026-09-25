@@ -169,7 +169,7 @@ type UIState struct {
 	ListViews       []ListViewState `json:"list_views,omitempty"`
 }
 
-// ListViewState persists task filter and grouping preferences for one list.
+// ListViewState persists task-view preferences for one list.
 type ListViewState struct {
 	ProviderID string                 `json:"provider_id"`
 	ListID     string                 `json:"list_id"`
@@ -179,11 +179,13 @@ type ListViewState struct {
 	Columns    []TaskColumnPreference `json:"columns,omitempty"`
 }
 
-// TaskColumnPreference stores visibility and width overrides for one list.
+// TaskColumnPreference stores presentation overrides for one list.
 type TaskColumnPreference struct {
 	ID      string `json:"id"`
 	Visible bool   `json:"visible"`
 	Width   int    `json:"width,omitempty"`
+	Order   int    `json:"order,omitempty"`
+	Fixed   bool   `json:"fixed,omitempty"`
 }
 
 // View is the local snapshot supplied to the TUI. It is intentionally a

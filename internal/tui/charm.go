@@ -608,8 +608,8 @@ func (m *CharmModel) charmTaskLines(width, lineLimit int) []string {
 		return nil
 	}
 	lines := []string{
-		charmSectionStyle.Render(fitAtOffset(m.core.taskHeading(), width, m.core.UI.TaskHorizontalOffset)),
-		charmTableHeaderStyle.Render(fitAtOffset(m.core.taskTableHeaderLine(width), width, m.core.UI.TaskHorizontalOffset)),
+		charmSectionStyle.Render(fit(m.core.taskHeading(), width)),
+		charmTableHeaderStyle.Render(m.core.taskTableHeaderLineAtOffset(width, m.core.UI.TaskHorizontalOffset)),
 	}
 	if len(lines) >= lineLimit {
 		return lines[:lineLimit]
@@ -696,7 +696,7 @@ func (m *CharmModel) charmTaskLines(width, lineLimit int) []string {
 		visualIndex++
 		if group.Collapsed {
 			if groupIndex >= offset && len(lines) < lineLimit {
-				heading := fitAtOffset(m.core.taskGroupLine(group), width, m.core.UI.TaskHorizontalOffset)
+				heading := fit(m.core.taskGroupLine(group), width)
 				if m.core.taskGroupSelected(group) {
 					lines = append(lines, charmSelectedStyle.Render(heading))
 				} else {
@@ -711,7 +711,7 @@ func (m *CharmModel) charmTaskLines(width, lineLimit int) []string {
 			continue
 		}
 		if groupIndex >= offset && len(lines) < lineLimit {
-			heading := fitAtOffset(m.core.taskGroupLine(group), width, m.core.UI.TaskHorizontalOffset)
+			heading := fit(m.core.taskGroupLine(group), width)
 			if m.core.taskGroupSelected(group) {
 				lines = append(lines, charmSelectedStyle.Render(heading))
 			} else {
@@ -736,10 +736,9 @@ func (m *CharmModel) charmTaskLines(width, lineLimit int) []string {
 }
 
 func (m *CharmModel) charmTaskRowLine(row TaskRow, marker string, width int, selected bool, columns []taskTableColumn) string {
-	fullLine := m.core.taskTableLineWithColumns(row, marker, columns)
-	offset := clamp(m.core.UI.TaskHorizontalOffset, 0, runeCount(fullLine))
-	line := fitAtOffset(fullLine, width, offset)
-	line = colorTaskStatusCell(line, row.Task.Status, offset, marker, columns)
+	offset := m.core.UI.TaskHorizontalOffset
+	line := m.core.taskTableLineAtOffset(row, marker, columns, width, offset)
+	line = colorTaskStatusCell(line, row.Task.Status, offset, marker, columns, m.core.fixedTaskColumnCount(columns))
 	if selected {
 		if m.core.UI.Focus == PanelTasks {
 			return charmSelectedTaskStyle.Render(line)
@@ -749,40 +748,83 @@ func (m *CharmModel) charmTaskRowLine(row TaskRow, marker string, width int, sel
 	return line
 }
 
-func colorTaskStatusCell(line, status string, offset int, marker string, columns []taskTableColumn) string {
+func colorTaskStatusCell(line, status string, offset int, marker string, columns []taskTableColumn, fixedCount int) string {
 	if line == "" {
 		return line
 	}
-	statusStart := runeCount(marker)
-	statusEnd := statusStart
-	statusFound := false
-	for index, column := range columns {
-		if index > 0 {
-			statusStart += runeCount(taskTableGap)
-		}
-		if column.ID == taskColumnStatus {
-			statusEnd = statusStart + column.Width
-			statusFound = true
-			break
-		}
-		statusStart += column.Width
-	}
+	statusStart, statusEnd, statusFound := taskStatusCellRange(columns, fixedCount, offset, runeCount(marker))
 	if !statusFound {
 		return line
 	}
-	start := statusStart - offset
-	end := statusEnd - offset
 	visible := []rune(line)
-	if end <= 0 || start >= len(visible) {
+	if statusEnd <= 0 || statusStart >= len(visible) {
 		return line
 	}
-	start = clamp(start, 0, len(visible))
-	end = clamp(end, start, len(visible))
+	start := clamp(statusStart, 0, len(visible))
+	end := clamp(statusEnd, start, len(visible))
 	if start == end {
 		return line
 	}
 	styled := taskStatusStyle(status).Render(string(visible[start:end]))
 	return string(visible[:start]) + styled + string(visible[end:])
+}
+
+func taskStatusCellRange(columns []taskTableColumn, fixedCount, offset, markerWidth int) (int, int, bool) {
+	statusIndex := -1
+	for index, column := range columns {
+		if column.ID == taskColumnStatus {
+			statusIndex = index
+			break
+		}
+	}
+	if statusIndex < 0 {
+		return 0, 0, false
+	}
+	if fixedCount <= 0 {
+		start := markerWidth
+		for index, column := range columns {
+			if index > 0 {
+				start += runeCount(taskTableGap)
+			}
+			if index == statusIndex {
+				return start - offset, start + column.Width - offset, true
+			}
+			start += column.Width
+		}
+	}
+	if statusIndex < fixedCount {
+		start := markerWidth
+		for index, column := range columns[:fixedCount] {
+			if index > 0 {
+				start += runeCount(taskTableGap)
+			}
+			if index == statusIndex {
+				return start, start + column.Width, true
+			}
+			start += column.Width
+		}
+	}
+	start := taskTableFixedPrefixWidth(columns, fixedCount, markerWidth)
+	for index := fixedCount; index <= statusIndex; index++ {
+		column := columns[index]
+		if index > fixedCount {
+			start += runeCount(taskTableGap)
+		}
+		if index == statusIndex {
+			cellStart := start - offset
+			cellEnd := start + column.Width - offset
+			scrollStart := taskTableFixedPrefixWidth(columns, fixedCount, markerWidth)
+			if cellStart < scrollStart {
+				cellStart = scrollStart
+			}
+			if cellEnd < scrollStart {
+				cellEnd = scrollStart
+			}
+			return cellStart, cellEnd, true
+		}
+		start += column.Width
+	}
+	return 0, 0, false
 }
 
 func taskStatusStyle(status string) lipgloss.Style {
@@ -800,7 +842,7 @@ func taskStatusStyle(status string) lipgloss.Style {
 
 func (m *CharmModel) charmModeLine(width int) string {
 	if m.core.UI.Mode == ModeColumnConfig {
-		return fit("COLUMNS: j/k select | space toggle | +/- or h/l resize | enter/esc close", width)
+		return fit("COLUMNS: j/k select | space show/hide | +/- or h/l resize | [/] reorder | f fixate", width)
 	}
 	if m.core.UI.Mode == ModeConfirm {
 		return charmWarnStyle.Render(fit("CONFIRM: "+safeText(m.core.UI.ConfirmPrompt)+"  [y/enter] yes  [n/esc] no", width))
@@ -954,6 +996,8 @@ func newCharmColumnHelpKeyMap() charmHelpKeyMap {
 	short := []key.Binding{
 		bind([]string{"j", "k", "up", "down"}, "j/k", "select"),
 		bind([]string{"space"}, "space", "show/hide"),
+		bind([]string{"f"}, "f", "fixate"),
+		bind([]string{"[", "]"}, "[/]", "reorder"),
 		bind([]string{"+", "=", "-", "h", "l", "left", "right"}, "+/-", "resize"),
 		bind([]string{"enter", "esc"}, "enter", "close"),
 	}
