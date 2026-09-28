@@ -1595,7 +1595,7 @@ type foundationSyncController struct {
 	engine   *foundationsync.Engine
 	enabled  bool
 	fetchers map[ProviderID]*cachedProvider
-	events   chan foundationsync.Event
+	events   *foundationSyncEventStream
 
 	mu        sync.Mutex
 	closing   bool
@@ -1604,11 +1604,83 @@ type foundationSyncController struct {
 	nextID    uint64
 }
 
+const foundationSyncEventBufferSize = 64
+
+type foundationSyncEventStream struct {
+	mu     sync.Mutex
+	events chan foundationsync.Event
+}
+
+func newFoundationSyncEventStream(bufferSize int) *foundationSyncEventStream {
+	if bufferSize < 1 {
+		bufferSize = foundationSyncEventBufferSize
+	}
+	return &foundationSyncEventStream{events: make(chan foundationsync.Event, bufferSize)}
+}
+
+func (s *foundationSyncEventStream) Events() <-chan foundationsync.Event {
+	if s == nil {
+		return nil
+	}
+	return s.events
+}
+
+func (s *foundationSyncEventStream) Emit(event foundationsync.Event) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	select {
+	case s.events <- event:
+		return
+	default:
+	}
+
+	if !isTerminalSyncEvent(event.Kind) {
+		return
+	}
+
+	// Completion and failure events trigger a cache reload, so preserve them
+	// when progress or operation events have filled the buffer.
+	pending := make([]foundationsync.Event, 0, cap(s.events))
+	for {
+		select {
+		case queued := <-s.events:
+			pending = append(pending, queued)
+		default:
+			goto drained
+		}
+	}
+
+drained:
+	discard := -1
+	for index, queued := range pending {
+		if !isTerminalSyncEvent(queued.Kind) {
+			discard = index
+			break
+		}
+	}
+	if discard < 0 && len(pending) > 0 {
+		discard = 0
+	}
+	for index, queued := range pending {
+		if index != discard {
+			s.events <- queued
+		}
+	}
+	s.events <- event
+}
+
+func isTerminalSyncEvent(kind foundationsync.EventKind) bool {
+	return kind == foundationsync.EventSyncCompleted || kind == foundationsync.EventSyncFailed
+}
+
 var _ SyncController = (*foundationSyncController)(nil)
 
-func newFoundationSyncController(engine *foundationsync.Engine, enabled bool, fetchers map[ProviderID]*cachedProvider, events chan foundationsync.Event) *foundationSyncController {
+func newFoundationSyncController(engine *foundationsync.Engine, enabled bool, fetchers map[ProviderID]*cachedProvider, events *foundationSyncEventStream) *foundationSyncController {
 	if events == nil {
-		events = make(chan foundationsync.Event, 64)
+		events = newFoundationSyncEventStream(foundationSyncEventBufferSize)
 	}
 	return &foundationSyncController{
 		engine:    engine,
@@ -1623,7 +1695,7 @@ func (s *foundationSyncController) Events() <-chan foundationsync.Event {
 	if s == nil {
 		return nil
 	}
-	return s.events
+	return s.events.Events()
 }
 
 func (s *foundationSyncController) Stop(ctx context.Context) error {
@@ -1761,10 +1833,7 @@ func (s *foundationSyncController) emit(event foundationsync.Event) {
 	if s == nil || s.events == nil {
 		return
 	}
-	select {
-	case s.events <- event:
-	default:
-	}
+	s.events.Emit(event)
 }
 
 // foundationHandler dispatches normalized UI commands to application behavior,
@@ -3747,15 +3816,10 @@ func buildFoundationGraph(ctx context.Context, cfg Config, terminal Terminal, lo
 		}
 		logContext(ctx, logger, level, "sync event", args...)
 	}
-	syncEvents := make(chan foundationsync.Event, 64)
+	syncEvents := newFoundationSyncEventStream(foundationSyncEventBufferSize)
 	engine, err := foundationsync.NewEngine(store, providers, foundationsync.EngineOptions{
-		Worker: workerOptions,
-		EventSink: func(event foundationsync.Event) {
-			select {
-			case syncEvents <- event:
-			default:
-			}
-		},
+		Worker:    workerOptions,
+		EventSink: syncEvents.Emit,
 	})
 	if err != nil {
 		closeStore()

@@ -1334,6 +1334,40 @@ func TestFoundationSyncMessageKeepsOperationFailureVisible(t *testing.T) {
 	}
 }
 
+func TestFoundationSyncCompletionReloadsContentWhenEventBufferIsFull(t *testing.T) {
+	events := newFoundationSyncEventStream(2)
+	events.Emit(foundationsync.Event{ProviderID: "work", Kind: foundationsync.EventProgress, Message: "fetching spaces"})
+	events.Emit(foundationsync.Event{ProviderID: "work", Kind: foundationsync.EventPullCompleted})
+	events.Emit(foundationsync.Event{ProviderID: "work", Kind: foundationsync.EventSyncCompleted})
+	close(events.events)
+
+	ui, err := newFoundationUIController(
+		NewStreamTerminal(bytes.NewBuffer(nil), &bytes.Buffer{}, false),
+		foundationNoopHandler{},
+		func(context.Context) (View, error) {
+			return View{
+				Providers: []ProviderRecord{{ID: "work", Type: ProviderTypeClickUp, Name: "Work"}},
+				Spaces:    []Space{{ID: "engineering", ProviderID: "work", Name: "Engineering"}},
+				Lists:     []List{{ID: "backend", ProviderID: "work", SpaceID: "engineering", Name: "Backend"}},
+				Tasks:     []Task{{ID: "task-1", ProviderID: "work", ListID: "backend", Title: "New task"}},
+			}, nil
+		},
+		events.Events(),
+	)
+	if err != nil {
+		t.Fatalf("newFoundationUIController() error = %v", err)
+	}
+
+	ui.runSyncEvents(context.Background())
+
+	if len(ui.model.Data.Lists) != 1 || ui.model.Data.Lists[0].ID != "backend" {
+		t.Fatalf("reloaded lists = %#v, want newly synced backend list", ui.model.Data.Lists)
+	}
+	if len(ui.model.Data.Tasks) != 1 || ui.model.Data.Tasks[0].Title != "New task" {
+		t.Fatalf("reloaded tasks = %#v, want newly synced task", ui.model.Data.Tasks)
+	}
+}
+
 type foundationTestProvider struct {
 	id                domain.ProviderID
 	spaces            []domain.Space
