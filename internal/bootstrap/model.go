@@ -174,6 +174,7 @@ type UIState struct {
 	SpaceID          string                `json:"space_id,omitempty"`
 	ListID           string                `json:"list_id,omitempty"`
 	Panel            string                `json:"panel,omitempty"`
+	HideHierarchy    bool                  `json:"hide_hierarchy,omitempty"`
 	Cursor           int                   `json:"cursor,omitempty"`
 	Filter           string                `json:"filter,omitempty"`
 	Sort             string                `json:"sort,omitempty"`

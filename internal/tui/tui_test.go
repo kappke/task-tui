@@ -27,6 +27,7 @@ func TestDefaultKeyMap(t *testing.T) {
 		{key: "right", action: ActionScrollRight},
 		{key: "tab", action: ActionNextPanel},
 		{key: "shift+tab", action: ActionPreviousPanel},
+		{key: "b", action: ActionToggleHierarchy},
 		{key: "enter", action: ActionSelect},
 		{key: "+", action: ActionExpandAll},
 		{key: "=", action: ActionExpandAll},
@@ -55,6 +56,50 @@ func TestDefaultKeyMap(t *testing.T) {
 				t.Fatalf("MapKey(%q) = %q, want %q", test.key, got, test.action)
 			}
 		})
+	}
+}
+
+func TestListsPanelCanBeHiddenAndShown(t *testing.T) {
+	model := New(testSnapshot())
+	selectedNode := model.UI.SelectedNode
+	selectedTask := model.UI.SelectedTask
+
+	model, command := model.Update(KeyMsg{Key: "b"})
+	if command != nil {
+		t.Fatalf("hiding the lists panel emitted a command: %v", command)
+	}
+	if !model.UI.HideHierarchy || model.UI.Focus != PanelTasks {
+		t.Fatalf("hidden panel state = hidden %v, focus %q; want hidden and task focus", model.UI.HideHierarchy, model.UI.Focus)
+	}
+	if model.UI.SelectedNode != selectedNode || model.UI.SelectedTask != selectedTask {
+		t.Fatalf("hiding changed the selection: node=%#v task=%#v", model.UI.SelectedNode, model.UI.SelectedTask)
+	}
+	if got := strings.Join(model.bodyLines(100, 10), "\n"); strings.Contains(got, "WORKSPACES") || !strings.Contains(got, "TASKS | LIST Backend") {
+		t.Fatalf("hidden panel layout did not expand the task pane:\n%s", got)
+	}
+	if got := model.horizontalPanelWidth(PanelTasks); got != 96 {
+		t.Fatalf("hidden task panel width = %d, want 96", got)
+	}
+	charm := NewCharmModel(model, CharmOptions{})
+	if got := charm.charmBody(100, 10); strings.Contains(got, "WORKSPACES") || !strings.Contains(got, "TASKS | LIST Backend") {
+		t.Fatalf("Charm layout did not hide the lists panel:\n%s", got)
+	}
+
+	model, command = model.Update(KeyMsg{Key: "b"})
+	if command != nil || model.UI.HideHierarchy {
+		t.Fatalf("showing the lists panel: hidden=%v command=%v", model.UI.HideHierarchy, command)
+	}
+	if got := strings.Join(model.bodyLines(100, 10), "\n"); !strings.Contains(got, "WORKSPACES") {
+		t.Fatalf("shown panel layout omitted the hierarchy:\n%s", got)
+	}
+}
+
+func TestPanelNavigationRevealsHiddenListsPanel(t *testing.T) {
+	model := New(testSnapshot())
+	model, _ = model.Update(KeyMsg{Key: "b"})
+	model, command := model.Update(KeyMsg{Key: "shift+tab"})
+	if command != nil || model.UI.HideHierarchy || model.UI.Focus != PanelHierarchy {
+		t.Fatalf("navigation to hidden panel: hidden=%v focus=%q command=%v", model.UI.HideHierarchy, model.UI.Focus, command)
 	}
 }
 

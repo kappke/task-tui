@@ -13,6 +13,7 @@ const (
 	ActionMoveDown            Action = "move_down"
 	ActionPreviousPanel       Action = "previous_panel"
 	ActionNextPanel           Action = "next_panel"
+	ActionToggleHierarchy     Action = "toggle_hierarchy"
 	ActionScrollLeft          Action = "scroll_left"
 	ActionScrollRight         Action = "scroll_right"
 	ActionSelect              Action = "select"
@@ -61,6 +62,7 @@ func DefaultKeyMap() KeyMap {
 		"right":       ActionScrollRight,
 		"tab":         ActionNextPanel,
 		"shift+tab":   ActionPreviousPanel,
+		"b":           ActionToggleHierarchy,
 		"enter":       ActionSelect,
 		"+":           ActionExpandAll,
 		"=":           ActionExpandAll,

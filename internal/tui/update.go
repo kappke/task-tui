@@ -92,6 +92,9 @@ func (m *Model) ensureUI() {
 	if m.UI.Focus == "" {
 		m.UI.Focus = PanelHierarchy
 	}
+	if m.UI.HideHierarchy && m.UI.Focus == PanelHierarchy {
+		m.UI.Focus = PanelTasks
+	}
 	if m.UI.Mode == "" {
 		m.UI.Mode = ModeBrowse
 	}
@@ -695,6 +698,8 @@ func (m Model) updateBrowse(key KeyMsg, action Action) (Model, Cmd) {
 		m.previousPanel()
 	case ActionNextPanel:
 		return m, m.nextPanel()
+	case ActionToggleHierarchy:
+		m.toggleHierarchy()
 	case ActionScrollLeft:
 		m.scrollHorizontal(-horizontalScrollStep)
 	case ActionScrollRight:
@@ -1022,6 +1027,12 @@ func (m *Model) moveCursorToEdge(last bool) {
 }
 
 func (m *Model) previousPanel() {
+	if m.UI.HideHierarchy {
+		m.UI.HideHierarchy = false
+		m.UI.Focus = PanelHierarchy
+		m.Status = Status{Level: StatusInfo, Text: "Focus: hierarchy"}
+		return
+	}
 	if m.UI.Focus == PanelTasks {
 		m.UI.Focus = PanelHierarchy
 		m.Status = Status{Level: StatusInfo, Text: "Focus: hierarchy"}
@@ -1032,6 +1043,12 @@ func (m *Model) previousPanel() {
 }
 
 func (m *Model) nextPanel() Cmd {
+	if m.UI.HideHierarchy {
+		m.UI.HideHierarchy = false
+		m.UI.Focus = PanelHierarchy
+		m.Status = Status{Level: StatusInfo, Text: "Focus: hierarchy"}
+		return nil
+	}
 	if m.UI.Focus == PanelHierarchy {
 		m.UI.Focus = PanelTasks
 		m.Status = Status{Level: StatusInfo, Text: "Focus: tasks"}
@@ -1040,6 +1057,18 @@ func (m *Model) nextPanel() Cmd {
 	m.UI.Focus = PanelHierarchy
 	m.Status = Status{Level: StatusInfo, Text: "Focus: hierarchy"}
 	return nil
+}
+
+func (m *Model) toggleHierarchy() {
+	m.UI.HideHierarchy = !m.UI.HideHierarchy
+	if m.UI.HideHierarchy {
+		if m.UI.Focus == PanelHierarchy {
+			m.UI.Focus = PanelTasks
+		}
+		m.Status = Status{Level: StatusInfo, Text: "Lists panel hidden"}
+		return
+	}
+	m.Status = Status{Level: StatusInfo, Text: "Lists panel shown"}
 }
 
 func (m *Model) loadSelectedList() Cmd {

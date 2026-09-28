@@ -106,6 +106,13 @@ func (m Model) bodyLines(width, height int) []string {
 	if m.UI.Mode == ModeColumnConfig {
 		return m.visibleColumnConfigLines(width, height)
 	}
+	if m.UI.HideHierarchy {
+		lines := m.taskLines(width, height)
+		if len(lines) > height {
+			return lines[:height]
+		}
+		return lines
+	}
 	if width < 72 {
 		lines := m.treeLines(width)
 		lines = append(lines, fit("", width))
@@ -719,7 +726,7 @@ func (m Model) footerLine() string {
 	if m.UI.Mode == ModeTrackingHistory {
 		return "j/k navigate | g/G first/last | r refresh history | esc close"
 	}
-	return "j/k move | tab panel | h/l scroll | enter open | +/- expand | g/G first/last | n new | e edit | x complete | d delete | t track/switch | T stop | a tracked time | / search | f filter | o sort | c columns | : commands | r refresh | q quit"
+	return "j/k move | tab panel | b lists panel | h/l scroll | enter open | +/- expand | g/G first/last | n new | e edit | x complete | d delete | t track/switch | T stop | a tracked time | / search | f filter | o sort | c columns | : commands | r refresh | q quit"
 }
 
 func (m Model) trackingLine() string {
@@ -1230,6 +1237,9 @@ func (m Model) horizontalPanelWidth(panel Panel) int {
 		width = 100
 	}
 	if width < 72 {
+		return maxInt(width-4, 1)
+	}
+	if panel == PanelTasks && m.UI.HideHierarchy {
 		return maxInt(width-4, 1)
 	}
 

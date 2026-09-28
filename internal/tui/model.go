@@ -291,6 +291,7 @@ const (
 // UIState contains only presentation state. Domain objects remain in Data.
 type UIState struct {
 	Focus                   Panel
+	HideHierarchy           bool
 	Mode                    Mode
 	ActiveProviderID        ProviderID
 	TreeCursor              int

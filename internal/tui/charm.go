@@ -562,6 +562,10 @@ func (m *CharmModel) charmBody(width, height int) string {
 		lines := m.core.visibleModeLines(width, height)
 		return m.clipBody(strings.Join(lines, "\n"), width, height)
 	}
+	if m.core.UI.HideHierarchy {
+		body := m.charmPanel(strings.Join(m.charmTaskLines(maxInt(width-4, 1), maxInt(height-2, 1)), "\n"), width, height, PanelTasks)
+		return m.clipBody(body, width, height)
+	}
 	if width < 72 {
 		treeHeight := height / 2
 		if treeHeight < 3 {
@@ -1108,6 +1112,7 @@ func newCharmHelpKeyMap() charmHelpKeyMap {
 	short := []key.Binding{
 		bind([]string{"j", "k", "up", "down"}, "j/k", "move"),
 		bind([]string{"tab", "shift+tab"}, "tab", "panel"),
+		bind([]string{"b"}, "b", "lists panel"),
 		bind([]string{"h", "l", "left", "right"}, "h/l", "scroll"),
 		bind([]string{"enter", "space"}, "enter/space", "open/toggle subtasks/group"),
 		bind([]string{"+", "="}, "+", "expand all"),

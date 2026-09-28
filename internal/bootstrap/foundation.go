@@ -2749,9 +2749,13 @@ func (u *foundationUIController) SetState(state UIState) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.model.UI.Focus = foundationPanel(state.Panel)
+	u.model.UI.HideHierarchy = state.HideHierarchy
 	u.model.UI.ActiveProviderID = foundationtui.ProviderID(state.ProviderID)
 	if u.model.UI.Focus == "" {
 		u.model.UI.Focus = foundationtui.PanelHierarchy
+	}
+	if u.model.UI.HideHierarchy {
+		u.model.UI.Focus = foundationtui.PanelTasks
 	}
 	u.model.UI.TreeCursor = 0
 	u.model.UI.TaskCursor = 0
@@ -2992,8 +2996,9 @@ func (u *foundationUIController) State() UIState {
 	defer u.mu.RUnlock()
 	model := u.model
 	state := UIState{
-		Panel:  string(model.UI.Focus),
-		Cursor: model.UI.TaskCursor,
+		Panel:         string(model.UI.Focus),
+		HideHierarchy: model.UI.HideHierarchy,
+		Cursor:        model.UI.TaskCursor,
 	}
 	if model.UI.Focus != foundationtui.PanelTasks {
 		state.Cursor = model.UI.TreeCursor

@@ -570,6 +570,7 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 		t.Fatalf("newFoundationUIController() error = %v", err)
 	}
 	ui.model.UI.Focus = foundationtui.PanelTasks
+	ui.model.UI.HideHierarchy = true
 	ui.model.UI.GroupBy = foundationtui.TaskGroupStatus
 	ui.model.UI.SubtaskDisplay = foundationtui.SubtaskDisplayCollapsed
 	ui.model.UI.CollapsedGroups = map[string]bool{
@@ -582,6 +583,9 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 	}
 
 	state := ui.State()
+	if !state.HideHierarchy {
+		t.Fatal("saved UI state did not retain the hidden lists panel")
+	}
 	if len(state.CollapsedGroups) != 2 || state.CollapsedGroups[0] != "assignee:alice" || state.CollapsedGroups[1] != "status:done" {
 		t.Fatalf("saved collapsed groups = %#v, want sorted active keys", state.CollapsedGroups)
 	}
@@ -594,6 +598,7 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 
 	ui.SetState(UIState{
 		Panel:          string(foundationtui.PanelTasks),
+		HideHierarchy:  true,
 		ProviderID:     "work",
 		SpaceID:        "engineering",
 		ListID:         "backend",
@@ -612,6 +617,9 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 	})
 	if ui.model.UI.ActiveProviderID != "work" || ui.model.UI.SelectedNode.ListID != "backend" {
 		t.Fatalf("restored selection = %#v, active provider = %q", ui.model.UI.SelectedNode, ui.model.UI.ActiveProviderID)
+	}
+	if !ui.model.UI.HideHierarchy || ui.model.UI.Focus != foundationtui.PanelTasks {
+		t.Fatalf("restored hierarchy visibility = hidden %v, focus %q; want hidden and task focus", ui.model.UI.HideHierarchy, ui.model.UI.Focus)
 	}
 	state = ui.State()
 	if state.ProviderID != "work" || state.SpaceID != "engineering" || state.ListID != "backend" {
