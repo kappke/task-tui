@@ -15,6 +15,7 @@ var commandNames = []string{
 	"sort",
 	"group",
 	"ungroup",
+	"subtasks",
 	"provider",
 	"refresh",
 	"task",
@@ -29,7 +30,9 @@ var taskCommandNames = []string{"create", "edit", "complete", "delete", "move", 
 
 var hierarchyCommandNames = []string{"create", "new"}
 
-var groupNames = []string{"status", "assignee", "priority", "tasks", "none"}
+var groupNames = []string{"status", "assignee", "priority", "none"}
+
+var subtaskDisplayNames = []string{"expanded", "collapsed", "separate"}
 
 func (m Model) commandCompletion() (prefix string, candidates []string, start, end int) {
 	input := m.UI.Input
@@ -85,6 +88,10 @@ func (m Model) commandCompletion() (prefix string, candidates []string, start, e
 	case "group", "groupby":
 		if len(before) == 1 || (len(before) == 2 && normalize(before[1]) == "by") {
 			candidates = matchingCompletions(groupNames, fragment)
+		}
+	case "subtasks", "subtask-display":
+		if len(before) == 1 {
+			candidates = matchingCompletions(subtaskDisplayNames, fragment)
 		}
 	case "provider":
 		if len(before) == 1 {

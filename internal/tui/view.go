@@ -306,6 +306,9 @@ func (m Model) taskHeading() string {
 	if m.UI.GroupBy != TaskGroupNone {
 		heading += " | GROUP " + string(m.UI.GroupBy)
 	}
+	if m.UI.SubtaskDisplay != "" {
+		heading += " | SUBTASKS " + string(m.UI.SubtaskDisplay)
+	}
 	return heading
 }
 
@@ -1063,7 +1066,16 @@ func taskTableFixedPrefixWidth(columns []taskTableColumn, fixedCount, markerWidt
 func (m Model) taskTableColumnValue(row TaskRow, column taskTableColumn) string {
 	switch column.ID {
 	case taskColumnTask:
-		return "  " + strings.Repeat("  ", maxInt(row.HierarchyDepth, 0)) + taskTitle(row)
+		label := "  " + strings.Repeat("  ", maxInt(row.HierarchyDepth, 0))
+		if row.HasSubtasks {
+			switch m.subtaskDisplayFor(taskRef(row)) {
+			case SubtaskDisplayCollapsed:
+				label += "[+] "
+			case SubtaskDisplayExpanded:
+				label += "[-] "
+			}
+		}
+		return label + taskTitle(row)
 	case taskColumnStatus:
 		return displayTaskStatus(row.Task.Status)
 	case taskColumnAssignees:

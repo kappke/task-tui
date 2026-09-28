@@ -95,6 +95,9 @@ func (m *Model) ensureUI() {
 	if m.UI.Mode == "" {
 		m.UI.Mode = ModeBrowse
 	}
+	if _, err := ParseSubtaskDisplayMode(string(m.UI.SubtaskDisplay)); err != nil {
+		m.UI.SubtaskDisplay = SubtaskDisplaySeparate
+	}
 	if m.UI.Width == 0 {
 		m.UI.Width = 100
 	}
@@ -109,6 +112,9 @@ func (m *Model) ensureUI() {
 	}
 	if m.UI.CollapsedGroups == nil {
 		m.UI.CollapsedGroups = make(map[string]bool)
+	}
+	if m.UI.SubtaskOverrides == nil {
+		m.UI.SubtaskOverrides = make(map[TaskRef]SubtaskDisplayMode)
 	}
 	if m.UI.ListViews == nil {
 		m.UI.ListViews = make(map[ListViewKey]ListViewState)
@@ -127,7 +133,12 @@ func (m Model) selectedListViewKey() (ListViewKey, bool) {
 }
 
 func (m Model) currentListViewState() ListViewState {
-	state := ListViewState{Sort: sortCriteriaString(m.UI.SortBy), GroupBy: m.UI.GroupBy, Columns: cloneColumnPreferences(m.UI.ColumnPreferences)}
+	state := ListViewState{
+		Sort:           sortCriteriaString(m.UI.SortBy),
+		GroupBy:        m.UI.GroupBy,
+		SubtaskDisplay: m.UI.SubtaskDisplay,
+		Columns:        cloneColumnPreferences(m.UI.ColumnPreferences),
+	}
 	if m.UI.FilterActive {
 		state.Filter = m.editableFilterText()
 	}
@@ -161,7 +172,7 @@ func (m *Model) rememberListView(key ListViewKey, state ListViewState) {
 }
 
 func sameListViewState(left, right ListViewState) bool {
-	if left.Filter != right.Filter || left.Sort != right.Sort || left.GroupBy != right.GroupBy || len(left.Columns) != len(right.Columns) {
+	if left.Filter != right.Filter || left.Sort != right.Sort || left.GroupBy != right.GroupBy || left.SubtaskDisplay != right.SubtaskDisplay || len(left.Columns) != len(right.Columns) {
 		return false
 	}
 	for index := range left.Columns {
@@ -195,6 +206,8 @@ func (m *Model) restoreListViewState(state ListViewState) {
 	if group, err := ParseTaskGroupMode(string(state.GroupBy)); err == nil {
 		m.UI.GroupBy = group
 	}
+	m.UI.SubtaskDisplay = normalizedSubtaskDisplay(state.SubtaskDisplay, state.GroupBy)
+	m.UI.SubtaskOverrides = make(map[TaskRef]SubtaskDisplayMode)
 	m.UI.FocusedGroup = ""
 	m.UI.TaskGroupCursor = 0
 	m.UI.TaskHeaderSelected = false
@@ -204,6 +217,16 @@ func (m *Model) restoreListViewState(state ListViewState) {
 	m.UI.SelectedTask = TaskRef{}
 	m.selectTaskAt(0)
 	m.keepVisible()
+}
+
+func normalizedSubtaskDisplay(display SubtaskDisplayMode, group TaskGroupMode) SubtaskDisplayMode {
+	if mode, err := ParseSubtaskDisplayMode(string(display)); err == nil {
+		return mode
+	}
+	if display == "" && group == TaskGroupMode("tasks_subtasks") {
+		return SubtaskDisplayExpanded
+	}
+	return SubtaskDisplaySeparate
 }
 
 func (m *Model) initializeSelection() {
@@ -562,6 +585,8 @@ func commandResultText(command AppCommand) string {
 			return "Task grouping cleared"
 		}
 		return "Tasks grouped by " + string(command.GroupBy)
+	case CommandSubtaskDisplay:
+		return "Subtasks displayed " + string(command.SubtaskDisplay)
 	case CommandRefresh:
 		return "Refresh started"
 	default:
@@ -1320,7 +1345,11 @@ func hierarchyExpansionText(expanded bool) string {
 
 func (m *Model) setAllTaskGroupsExpanded(expanded bool) {
 	if m.UI.GroupBy == TaskGroupNone {
-		m.Status = Status{Level: StatusWarning, Text: "Enable task grouping before expanding or collapsing all tasks"}
+		mode := SubtaskDisplayCollapsed
+		if expanded {
+			mode = SubtaskDisplayExpanded
+		}
+		m.setSubtaskDisplay(mode)
 		return
 	}
 
@@ -1541,7 +1570,7 @@ func (m *Model) beginCommand() {
 	m.UI.InputCursor = 0
 	m.UI.InputOrigin = ""
 	m.resetCommandCompletion()
-	m.Status = Status{Level: StatusInfo, Text: "Commands: create, edit, complete, delete, search, filter, sort, group, columns, refresh"}
+	m.Status = Status{Level: StatusInfo, Text: "Use tab to complete commands and arguments"}
 }
 
 func (m Model) updateInput(key KeyMsg) (Model, Cmd) {
@@ -1795,7 +1824,7 @@ func (m Model) applySort(criteria []SortCriterion, command AppCommand) (Model, C
 }
 
 func (m Model) applyGrouping(mode TaskGroupMode, command AppCommand) (Model, Cmd) {
-	if mode != TaskGroupNone && mode != TaskGroupStatus && mode != TaskGroupAssignee && mode != TaskGroupPriority && mode != TaskGroupTasksSubtasks {
+	if mode != TaskGroupNone && mode != TaskGroupStatus && mode != TaskGroupAssignee && mode != TaskGroupPriority {
 		m.Status = Status{Level: StatusError, Text: "unknown task group " + string(mode)}
 		return m, nil
 	}
@@ -1826,6 +1855,29 @@ func (m Model) applyGrouping(mode TaskGroupMode, command AppCommand) (Model, Cmd
 	return m, m.emit(command)
 }
 
+func (m Model) applySubtaskDisplay(mode SubtaskDisplayMode, command AppCommand) (Model, Cmd) {
+	if _, err := ParseSubtaskDisplayMode(string(mode)); err != nil {
+		m.Status = Status{Level: StatusError, Text: err.Error()}
+		return m, nil
+	}
+	m.UI.Mode = ModeBrowse
+	m.UI.Input = ""
+	m.UI.InputCursor = 0
+	m.setSubtaskDisplay(mode)
+	command.SubtaskDisplay = mode
+	return m, m.emit(command)
+}
+
+func (m *Model) setSubtaskDisplay(mode SubtaskDisplayMode) {
+	selected := m.UI.SelectedTask
+	m.UI.SubtaskDisplay = mode
+	m.UI.SubtaskOverrides = make(map[TaskRef]SubtaskDisplayMode)
+	m.UI.TaskOffset = 0
+	m.selectTaskRef(selected)
+	m.keepVisible()
+	m.Status = Status{Level: StatusInfo, Text: "Subtasks displayed " + string(mode)}
+}
+
 func (m Model) submitPalette() (Model, Cmd) {
 	command, err := ParseCommand(m.UI.Input)
 	if err != nil {
@@ -1851,6 +1903,8 @@ func (m Model) submitPalette() (Model, Cmd) {
 		return m.applySort(command.Sort, command)
 	case CommandGroup:
 		return m.applyGrouping(command.GroupBy, command)
+	case CommandSubtaskDisplay:
+		return m.applySubtaskDisplay(command.SubtaskDisplay, command)
 	case CommandConfigureColumns:
 		m.UI.Mode = ModeBrowse
 		m.beginColumnConfiguration()
@@ -2355,8 +2409,19 @@ func (m *Model) toggleTaskGroup() {
 		m.Status = Status{Level: StatusWarning, Text: "Focus the task panel to toggle a group"}
 		return
 	}
+	if !m.UI.TaskHeaderSelected {
+		if row, ok := m.selectedTask(); ok {
+			if !row.HasSubtasks {
+				row.HasSubtasks = m.taskHasSubtasks(taskRef(row))
+			}
+			if row.HasSubtasks {
+				m.toggleTaskSubtasks(row)
+				return
+			}
+		}
+	}
 	if m.UI.GroupBy == TaskGroupNone {
-		m.Status = Status{Level: StatusWarning, Text: "Enable task grouping before collapsing groups"}
+		m.Status = Status{Level: StatusWarning, Text: "Select a task with subtasks to expand or collapse them"}
 		return
 	}
 
@@ -2426,6 +2491,31 @@ func (m *Model) toggleTaskGroup() {
 	m.UI.TaskCursor = -1
 	m.UI.TaskOffset = 0
 	m.Status = Status{Level: StatusInfo, Text: "Collapsed group " + group.Label}
+}
+
+func (m *Model) toggleTaskSubtasks(row TaskRow) {
+	ref := taskRef(row)
+	mode := SubtaskDisplayCollapsed
+	if current := m.subtaskDisplayFor(ref); current == SubtaskDisplayCollapsed || current == SubtaskDisplaySeparate {
+		mode = SubtaskDisplayExpanded
+	}
+	m.UI.SubtaskOverrides = cloneSubtaskOverrides(m.UI.SubtaskOverrides)
+	m.UI.SubtaskOverrides[ref] = mode
+	m.keepVisible()
+	verb := "Collapsed"
+	if mode == SubtaskDisplayExpanded {
+		verb = "Expanded"
+	}
+	m.Status = Status{Level: StatusInfo, Text: verb + " subtasks for " + taskTitle(row)}
+}
+
+func (m Model) taskHasSubtasks(parent TaskRef) bool {
+	for _, task := range m.Data.Tasks {
+		if task.ProviderID == parent.ProviderID && task.ParentTaskID != nil && *task.ParentTaskID == parent.TaskID {
+			return true
+		}
+	}
+	return false
 }
 
 func taskRef(row TaskRow) TaskRef {

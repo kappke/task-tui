@@ -122,6 +122,7 @@ func TestListViewFilterAndGroupingAreRememberedPerList(t *testing.T) {
 	model.UI.Filter = filter
 	model.UI.FilterActive = true
 	model.UI.GroupBy = TaskGroupStatus
+	model.UI.SubtaskDisplay = SubtaskDisplayExpanded
 	model, _ = model.Update(KeyMsg{Key: ":"})
 	model, _ = typeInput(model, "sort status asc")
 	model, _ = model.Update(KeyMsg{Key: "enter"})
@@ -132,8 +133,8 @@ func TestListViewFilterAndGroupingAreRememberedPerList(t *testing.T) {
 	if model.UI.SelectedNode.ListID != "today" {
 		t.Fatalf("selected list after provider switch = %q, want today", model.UI.SelectedNode.ListID)
 	}
-	if model.UI.FilterActive || model.UI.GroupBy != TaskGroupNone || len(model.UI.SortBy) != 0 {
-		t.Fatalf("new list inherited previous view: filter=%#v active=%v group=%q sort=%v", model.UI.Filter, model.UI.FilterActive, model.UI.GroupBy, model.UI.SortBy)
+	if model.UI.FilterActive || model.UI.GroupBy != TaskGroupNone || model.UI.SubtaskDisplay != SubtaskDisplaySeparate || len(model.UI.SortBy) != 0 {
+		t.Fatalf("new list inherited previous view: filter=%#v active=%v group=%q subtasks=%q sort=%v", model.UI.Filter, model.UI.FilterActive, model.UI.GroupBy, model.UI.SubtaskDisplay, model.UI.SortBy)
 	}
 
 	model, _ = model.Update(KeyMsg{Key: "f"})
@@ -143,21 +144,24 @@ func TestListViewFilterAndGroupingAreRememberedPerList(t *testing.T) {
 	model, _ = typeInput(model, "group priority")
 	model, _ = model.Update(KeyMsg{Key: "enter"})
 	model, _ = model.Update(KeyMsg{Key: ":"})
+	model, _ = typeInput(model, "subtasks collapsed")
+	model, _ = model.Update(KeyMsg{Key: "enter"})
+	model, _ = model.Update(KeyMsg{Key: ":"})
 	model, _ = typeInput(model, "sort priority desc, title asc")
 	model, _ = model.Update(KeyMsg{Key: "enter"})
 
 	model, _ = model.Update(KeyMsg{Key: ":"})
 	model, _ = typeInput(model, "provider work")
 	model, _ = model.Update(KeyMsg{Key: "enter"})
-	if model.UI.SelectedNode.ListID != "backend" || !model.UI.FilterActive || model.UI.Filter.String() != "status:open" || model.UI.GroupBy != TaskGroupStatus || sortCriteriaString(model.UI.SortBy) != "status asc" {
-		t.Fatalf("restored work list view: list=%q filter=%q active=%v group=%q sort=%v", model.UI.SelectedNode.ListID, model.UI.Filter.String(), model.UI.FilterActive, model.UI.GroupBy, model.UI.SortBy)
+	if model.UI.SelectedNode.ListID != "backend" || !model.UI.FilterActive || model.UI.Filter.String() != "status:open" || model.UI.GroupBy != TaskGroupStatus || model.UI.SubtaskDisplay != SubtaskDisplayExpanded || sortCriteriaString(model.UI.SortBy) != "status asc" {
+		t.Fatalf("restored work list view: list=%q filter=%q active=%v group=%q subtasks=%q sort=%v", model.UI.SelectedNode.ListID, model.UI.Filter.String(), model.UI.FilterActive, model.UI.GroupBy, model.UI.SubtaskDisplay, model.UI.SortBy)
 	}
 
 	model, _ = model.Update(KeyMsg{Key: ":"})
 	model, _ = typeInput(model, "provider personal")
 	model, _ = model.Update(KeyMsg{Key: "enter"})
-	if model.UI.SelectedNode.ListID != "today" || !model.UI.FilterActive || model.UI.Filter.String() != "priority:high" || model.UI.GroupBy != TaskGroupPriority || sortCriteriaString(model.UI.SortBy) != "priority desc, task asc" {
-		t.Fatalf("restored personal list view: list=%q filter=%q active=%v group=%q sort=%v", model.UI.SelectedNode.ListID, model.UI.Filter.String(), model.UI.FilterActive, model.UI.GroupBy, model.UI.SortBy)
+	if model.UI.SelectedNode.ListID != "today" || !model.UI.FilterActive || model.UI.Filter.String() != "priority:high" || model.UI.GroupBy != TaskGroupPriority || model.UI.SubtaskDisplay != SubtaskDisplayCollapsed || sortCriteriaString(model.UI.SortBy) != "priority desc, task asc" {
+		t.Fatalf("restored personal list view: list=%q filter=%q active=%v group=%q subtasks=%q sort=%v", model.UI.SelectedNode.ListID, model.UI.Filter.String(), model.UI.FilterActive, model.UI.GroupBy, model.UI.SubtaskDisplay, model.UI.SortBy)
 	}
 }
 
@@ -1003,7 +1007,7 @@ func TestTaskListCommandPaletteTargetsSelectedTask(t *testing.T) {
 func TestCommandCompletionCyclesCommandsAndOptions(t *testing.T) {
 	model := New(testSnapshot())
 	model, _ = model.Update(KeyMsg{Key: ":"})
-	if view := model.View(); !strings.Contains(view, "create") || !strings.Contains(view, "refresh") {
+	if view := model.View(); !strings.Contains(view, "options:") || !strings.Contains(view, "create") {
 		t.Fatalf("command suggestions are not visible:\n%s", view)
 	}
 
@@ -1047,7 +1051,7 @@ func TestCharmCommandCompletionIsRendered(t *testing.T) {
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{':'}})
 	model = updated.(*CharmModel)
 	view := model.View()
-	if !strings.Contains(view, "create") || !strings.Contains(view, "refresh") {
+	if !strings.Contains(view, "options:") || !strings.Contains(view, "create") {
 		t.Fatalf("Charm command suggestions are not visible:\n%s", view)
 	}
 }
@@ -1188,17 +1192,36 @@ func TestTaskGroupingByStatusAssigneeAndHierarchy(t *testing.T) {
 		t.Fatalf("assignee groups = %#v, want Alice/Bob/Unassigned", assigneeGroups)
 	}
 
-	model.UI.GroupBy = TaskGroupTasksSubtasks
+	model.UI.GroupBy = TaskGroupNone
+	model.UI.SubtaskDisplay = SubtaskDisplayExpanded
 	hierarchyGroups := model.VisibleTaskGroups()
-	if len(hierarchyGroups) != 4 {
-		t.Fatalf("hierarchy groups = %#v, want four roots", hierarchyGroups)
+	if len(hierarchyGroups) != 1 {
+		t.Fatalf("expanded subtask groups = %#v, want one ungrouped group", hierarchyGroups)
 	}
-	var hierarchy []TaskRow
-	for _, group := range hierarchyGroups {
-		hierarchy = append(hierarchy, group.Rows...)
-	}
+	hierarchy := hierarchyGroups[0].Rows
 	if len(hierarchy) != 5 || hierarchy[2].Task.ID != parentID || hierarchy[3].Task.ID != "child" || hierarchy[3].HierarchyDepth != 1 {
 		t.Fatalf("hierarchy rows = %#v, want parent followed by indented child", hierarchy)
+	}
+
+	model.UI.GroupBy = TaskGroupStatus
+	groups := model.VisibleTaskGroups()
+	for _, group := range groups {
+		if group.Key == "open" {
+			childIndex := findTask(group.Rows, TaskRef{ProviderID: "work", TaskID: "child"})
+			if childIndex < 0 || group.Rows[childIndex].HierarchyDepth != 1 {
+				t.Fatalf("grouped child row = %#v, want nested under parent", group.Rows)
+			}
+		}
+	}
+	model.UI.SubtaskDisplay = SubtaskDisplayCollapsed
+	if got := len(model.VisibleTasks()); got != 4 {
+		t.Fatalf("collapsed subtask rows = %d, want four parent tasks", got)
+	}
+	model.UI.SubtaskDisplay = SubtaskDisplaySeparate
+	for _, row := range model.VisibleTasks() {
+		if row.Task.ID == "child" && row.HierarchyDepth != 0 {
+			t.Fatalf("separate child depth = %d, want 0", row.HierarchyDepth)
+		}
 	}
 }
 
@@ -1270,12 +1293,10 @@ func TestTaskStatusCompletionsUseProviderOrder(t *testing.T) {
 
 func TestTaskGroupingCommandPalette(t *testing.T) {
 	for input, want := range map[string]TaskGroupMode{
-		"group status":            TaskGroupStatus,
-		"group assignee":          TaskGroupAssignee,
-		"group priority":          TaskGroupPriority,
-		"group tasks":             TaskGroupTasksSubtasks,
-		"group by tasks/subtasks": TaskGroupTasksSubtasks,
-		"ungroup":                 TaskGroupNone,
+		"group status":   TaskGroupStatus,
+		"group assignee": TaskGroupAssignee,
+		"group priority": TaskGroupPriority,
+		"ungroup":        TaskGroupNone,
 	} {
 		command, err := ParseCommand(input)
 		if err != nil {
@@ -1283,6 +1304,24 @@ func TestTaskGroupingCommandPalette(t *testing.T) {
 		}
 		if command.Kind != CommandGroup || command.GroupBy != want {
 			t.Fatalf("ParseCommand(%q) = %#v, want group %q", input, command, want)
+		}
+	}
+	for _, input := range []string{"group tasks", "group by subtasks"} {
+		if _, err := ParseCommand(input); err == nil {
+			t.Errorf("ParseCommand(%q) unexpectedly accepted subtasks as a grouping", input)
+		}
+	}
+	for input, want := range map[string]SubtaskDisplayMode{
+		"subtasks expanded":  SubtaskDisplayExpanded,
+		"subtasks collapsed": SubtaskDisplayCollapsed,
+		"subtasks separate":  SubtaskDisplaySeparate,
+	} {
+		command, err := ParseCommand(input)
+		if err != nil {
+			t.Fatalf("ParseCommand(%q): %v", input, err)
+		}
+		if command.Kind != CommandSubtaskDisplay || command.SubtaskDisplay != want {
+			t.Fatalf("ParseCommand(%q) = %#v, want subtask display %q", input, command, want)
 		}
 	}
 
@@ -1295,6 +1334,212 @@ func TestTaskGroupingCommandPalette(t *testing.T) {
 	model, command = model.Update(KeyMsg{Key: "enter"})
 	if command == nil || model.UI.GroupBy != TaskGroupStatus {
 		t.Fatalf("group submit: group=%q command=%v", model.UI.GroupBy, command)
+	}
+}
+
+func TestSubtaskDisplayModesStayIndependentOfGrouping(t *testing.T) {
+	parentID := TaskID("parent")
+	snapshot := Snapshot{
+		Providers: []Provider{{ID: "work", Name: "Work", Type: ProviderTypeLocal}},
+		Spaces:    []Space{{ID: "space", ProviderID: "work", Name: "Space"}},
+		Lists:     []List{{ID: "list", ProviderID: "work", SpaceID: "space", Name: "List"}},
+		Tasks: []Task{
+			{ID: parentID, ProviderID: "work", ListID: "list", Title: "Parent", Status: "open"},
+			{ID: "child", ProviderID: "work", ListID: "list", ParentTaskID: &parentID, Title: "Child", Status: "done"},
+		},
+	}
+	model := New(snapshot)
+	model.UI.SelectedNode = TreeNodeRef{Kind: TreeNodeList, ProviderID: "work", SpaceID: "space", ListID: "list"}
+	model.UI.GroupBy = TaskGroupStatus
+
+	for _, test := range []struct {
+		mode      SubtaskDisplayMode
+		wantChild bool
+		wantDepth int
+	}{
+		{mode: SubtaskDisplayCollapsed, wantChild: false},
+		{mode: SubtaskDisplayExpanded, wantChild: true, wantDepth: 1},
+		{mode: SubtaskDisplaySeparate, wantChild: true, wantDepth: 0},
+	} {
+		var command Cmd
+		model, _ = model.Update(KeyMsg{Key: ":"})
+		model, _ = typeInput(model, "subtasks "+string(test.mode))
+		model, command = model.Update(KeyMsg{Key: "enter"})
+		if command == nil {
+			t.Fatalf("subtasks %s did not emit its presentation command: mode=%q input=%q status=%#v", test.mode, model.UI.Mode, model.UI.Input, model.Status)
+		}
+		result := commandMessage(t, command)
+		if result.Kind != CommandSubtaskDisplay || result.SubtaskDisplay != test.mode {
+			t.Fatalf("subtask display command = %#v, want %s", result, test.mode)
+		}
+		if model.UI.GroupBy != TaskGroupStatus || model.UI.SubtaskDisplay != test.mode {
+			t.Fatalf("grouping/display after %s = %q/%q, want status/%s", test.mode, model.UI.GroupBy, model.UI.SubtaskDisplay, test.mode)
+		}
+
+		var child *TaskRow
+		var parent *TaskRow
+		var childGroup string
+		for _, group := range model.VisibleTaskGroups() {
+			for index := range group.Rows {
+				switch group.Rows[index].Task.ID {
+				case "child":
+					child = &group.Rows[index]
+					childGroup = group.Key
+				case parentID:
+					parent = &group.Rows[index]
+					if group.Key != "open" {
+						t.Fatalf("parent group = %q, want open", group.Key)
+					}
+				}
+			}
+		}
+		if (child != nil) != test.wantChild {
+			t.Fatalf("child visibility in %s mode = %v, want %v", test.mode, child != nil, test.wantChild)
+		}
+		if child != nil && child.HierarchyDepth != test.wantDepth {
+			t.Fatalf("child depth in %s mode = %d, want %d", test.mode, child.HierarchyDepth, test.wantDepth)
+		}
+		if child != nil && childGroup != "open" {
+			t.Fatalf("child group in %s mode = %q, want its parent's open group", test.mode, childGroup)
+		}
+		if parent != nil && test.mode == SubtaskDisplayCollapsed && !strings.Contains(model.taskTableColumnValue(*parent, defaultTaskColumns[0]), "[+] Parent") {
+			t.Fatal("collapsed parent row is missing its subtask disclosure marker")
+		}
+		if parent != nil && test.mode == SubtaskDisplayExpanded && !strings.Contains(model.taskTableColumnValue(*parent, defaultTaskColumns[0]), "[-] Parent") {
+			t.Fatal("expanded parent row is missing its subtask disclosure marker")
+		}
+		if model.UI.ListViews[ListViewKey{ProviderID: "work", ListID: "list"}].SubtaskDisplay != test.mode {
+			t.Fatalf("list preference after %s = %#v", test.mode, model.UI.ListViews)
+		}
+	}
+
+	model.UI.Mode = ModeCommand
+	model.UI.Input = "subtasks e"
+	model.UI.InputCursor = runeCount(model.UI.Input)
+	model.completeCommand(false)
+	if model.UI.Input != "subtasks expanded" {
+		t.Fatalf("subtask display completion = %q, want %q", model.UI.Input, "subtasks expanded")
+	}
+}
+
+func TestGroupedSubtasksInheritTopLevelGroupValues(t *testing.T) {
+	parentID := TaskID("parent")
+	snapshot := Snapshot{
+		Providers: []Provider{{ID: "work", Name: "Work", Type: ProviderTypeLocal}},
+		Spaces:    []Space{{ID: "space", ProviderID: "work", Name: "Space"}},
+		Lists:     []List{{ID: "list", ProviderID: "work", SpaceID: "space", Name: "List"}},
+		Tasks: []Task{
+			{ID: parentID, ProviderID: "work", ListID: "list", Title: "Parent", Status: "open", Assignee: "Alice", Priority: PriorityHigh},
+			{ID: "child", ProviderID: "work", ListID: "list", ParentTaskID: &parentID, Title: "Child", Status: "done", Assignee: "Bob", Priority: PriorityLow},
+		},
+	}
+
+	for _, test := range []struct {
+		mode TaskGroupMode
+		key  string
+	}{
+		{mode: TaskGroupStatus, key: "open"},
+		{mode: TaskGroupAssignee, key: "alice"},
+		{mode: TaskGroupPriority, key: "high"},
+	} {
+		t.Run(string(test.mode), func(t *testing.T) {
+			model := New(snapshot)
+			model.UI.SelectedNode = TreeNodeRef{Kind: TreeNodeList, ProviderID: "work", SpaceID: "space", ListID: "list"}
+			model.UI.GroupBy = test.mode
+			model.UI.SubtaskDisplay = SubtaskDisplayExpanded
+
+			var parentGroup, childGroup string
+			for _, group := range model.VisibleTaskGroups() {
+				for _, row := range group.Rows {
+					switch row.Task.ID {
+					case parentID:
+						parentGroup = group.Key
+					case "child":
+						childGroup = group.Key
+					}
+				}
+			}
+			if parentGroup != test.key || childGroup != test.key {
+				t.Fatalf("parent/child groups = %q/%q, want both in %q", parentGroup, childGroup, test.key)
+			}
+		})
+	}
+}
+
+func TestSpaceTogglesSubtasksForOnlyTheSelectedTask(t *testing.T) {
+	parentA := TaskID("parent-a")
+	parentB := TaskID("parent-b")
+	snapshot := Snapshot{
+		Providers: []Provider{{ID: "work", Name: "Work", Type: ProviderTypeLocal}},
+		Spaces:    []Space{{ID: "space", ProviderID: "work", Name: "Space"}},
+		Lists:     []List{{ID: "list", ProviderID: "work", SpaceID: "space", Name: "List"}},
+		Tasks: []Task{
+			{ID: parentA, ProviderID: "work", ListID: "list", Title: "Parent A", Status: "open"},
+			{ID: "child-a", ProviderID: "work", ListID: "list", ParentTaskID: &parentA, Title: "Child A", Status: "done"},
+			{ID: parentB, ProviderID: "work", ListID: "list", Title: "Parent B", Status: "done"},
+			{ID: "child-b", ProviderID: "work", ListID: "list", ParentTaskID: &parentB, Title: "Child B", Status: "open"},
+		},
+	}
+	model := New(snapshot)
+	model.UI.SelectedNode = TreeNodeRef{Kind: TreeNodeList, ProviderID: "work", SpaceID: "space", ListID: "list"}
+	model.UI.Focus = PanelTasks
+	model.UI.GroupBy = TaskGroupStatus
+	model.UI.SubtaskDisplay = SubtaskDisplayCollapsed
+	model.UI.SelectedTask = TaskRef{ProviderID: "work", TaskID: parentA}
+	model.selectTaskRef(model.UI.SelectedTask)
+
+	model, _ = model.Update(KeyMsg{Key: "space"})
+	groups := model.VisibleTaskGroups()
+	var childAVisible, childBVisible bool
+	for _, group := range groups {
+		for _, row := range group.Rows {
+			switch row.Task.ID {
+			case "child-a":
+				childAVisible = true
+				if group.Key != "open" || row.HierarchyDepth != 1 {
+					t.Fatalf("expanded child A row/group = %#v/%q, want depth 1 in open", row, group.Key)
+				}
+			case "child-b":
+				childBVisible = true
+			}
+		}
+	}
+	if !childAVisible || childBVisible {
+		t.Fatalf("single-parent expansion visibility = child-a:%v child-b:%v", childAVisible, childBVisible)
+	}
+
+	model, _ = model.Update(KeyMsg{Key: "space"})
+	if got := len(model.VisibleTasks()); got != 2 {
+		t.Fatalf("rows after collapsing parent A = %d, want the two top-level tasks", got)
+	}
+}
+
+func TestSpaceExpandsOneTaskFromSeparateDisplay(t *testing.T) {
+	parentID := TaskID("parent")
+	snapshot := Snapshot{
+		Providers: []Provider{{ID: "work", Name: "Work", Type: ProviderTypeLocal}},
+		Spaces:    []Space{{ID: "space", ProviderID: "work", Name: "Space"}},
+		Lists:     []List{{ID: "list", ProviderID: "work", SpaceID: "space", Name: "List"}},
+		Tasks: []Task{
+			{ID: parentID, ProviderID: "work", ListID: "list", Title: "Parent"},
+			{ID: "child", ProviderID: "work", ListID: "list", ParentTaskID: &parentID, Title: "Child"},
+		},
+	}
+	model := New(snapshot)
+	model.UI.SelectedNode = TreeNodeRef{Kind: TreeNodeList, ProviderID: "work", SpaceID: "space", ListID: "list"}
+	model.UI.Focus = PanelTasks
+	model.UI.SelectedTask = TaskRef{ProviderID: "work", TaskID: parentID}
+	model.selectTaskRef(model.UI.SelectedTask)
+
+	model, _ = model.Update(KeyMsg{Key: "space"})
+	child, found := model.taskRowForRef(TaskRef{ProviderID: "work", TaskID: "child"})
+	if !found || child.HierarchyDepth != 1 {
+		t.Fatalf("single-task expansion child = %#v, found=%v; want visible at depth 1", child, found)
+	}
+
+	model, _ = model.Update(KeyMsg{Key: "space"})
+	if _, found := model.taskRowForRef(TaskRef{ProviderID: "work", TaskID: "child"}); found {
+		t.Fatal("second space press did not collapse the selected task's subtasks")
 	}
 }
 
@@ -1319,7 +1564,6 @@ func TestTaskGroupsCanBeCollapsedAndExpanded(t *testing.T) {
 		{name: "status", mode: TaskGroupStatus},
 		{name: "assignee", mode: TaskGroupAssignee},
 		{name: "priority", mode: TaskGroupPriority},
-		{name: "tasks and subtasks", mode: TaskGroupTasksSubtasks},
 	}
 
 	for _, test := range tests {
@@ -1336,6 +1580,7 @@ func TestTaskGroupsCanBeCollapsedAndExpanded(t *testing.T) {
 			selected := model.UI.SelectedTask
 			beforeRows := len(model.VisibleTasks())
 			collapsedRows := len(groups[0].Rows)
+			model.focusTaskGroupHeader(groups, 0, selected)
 
 			model, _ = model.Update(KeyMsg{Runes: []rune{' '}})
 			groups = model.VisibleTaskGroups()

@@ -55,6 +55,14 @@ operators, Boolean conditions, and applicable values such as the current list's
 statuses and task priorities. In the command palette, bare `:filter` and
 `:sort` open the same editable prompts; arguments apply an expression directly.
 
+Use `:group status`, `:group assignee`, or `:group priority` to group tasks.
+Subtask presentation is independent of grouping and can be set per list with
+`:subtasks expanded`, `:subtasks collapsed`, or `:subtasks separate`.
+When grouped, a top-level task's group contains its whole subtask tree, regardless
+of the subtasks' own status, assignee, or priority.
+With a task selected, press `space` to expand or collapse just that task's
+subtasks. With a group header selected, `space` continues to toggle that group.
+
 Press `c` to configure columns for the selected list. Use `space` to show or hide
 a column, `+`/`-` to resize it, `[`/`]` to reorder it, and `f` to fixate it.
 Fixating a column also fixates all columns before it; unfixating one clears the

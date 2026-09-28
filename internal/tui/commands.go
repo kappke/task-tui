@@ -37,6 +37,7 @@ const (
 	CommandFilter              CommandKind = "filter_tasks"
 	CommandSort                CommandKind = "sort_tasks"
 	CommandGroup               CommandKind = "group_tasks"
+	CommandSubtaskDisplay      CommandKind = "subtask_display"
 	CommandConfigureColumns    CommandKind = "configure_columns"
 	CommandStartTracking       CommandKind = "start_tracking"
 	CommandStopTracking        CommandKind = "stop_tracking"
@@ -78,6 +79,7 @@ type AppCommand struct {
 	Filter            Filter
 	Sort              []SortCriterion
 	GroupBy           TaskGroupMode
+	SubtaskDisplay    SubtaskDisplayMode
 	Completed         bool
 	Status            string
 	Raw               string
@@ -220,6 +222,13 @@ func ParseCommand(input string) (AppCommand, error) {
 			return AppCommand{}, err
 		}
 		command.GroupBy = mode
+	case "subtasks", "subtask-display":
+		command.Kind = CommandSubtaskDisplay
+		mode, err := ParseSubtaskDisplayMode(strings.TrimSpace(strings.Join(args, " ")))
+		if err != nil {
+			return AppCommand{}, err
+		}
+		command.SubtaskDisplay = mode
 	case "columns", "column":
 		command.Kind = CommandConfigureColumns
 	case "ungroup", "ungrouped":
@@ -237,15 +246,14 @@ func ParseCommand(input string) (AppCommand, error) {
 	return command, nil
 }
 
-// ParseTaskGroupMode accepts the command-palette names for the supported task
-// arrangements. "tasks" and "subtasks" both select the parent-child view.
+// ParseTaskGroupMode accepts the command-palette names for task grouping.
 func ParseTaskGroupMode(input string) (TaskGroupMode, error) {
 	fields := strings.Fields(strings.ToLower(strings.TrimSpace(input)))
 	if len(fields) == 2 && fields[0] == "by" {
 		fields = fields[1:]
 	}
 	if len(fields) != 1 {
-		return TaskGroupNone, errors.New("group requires status, assignee, priority, tasks, or none")
+		return TaskGroupNone, errors.New("group requires status, assignee, priority, or none")
 	}
 	switch fields[0] {
 	case "none", "off", "clear", "ungroup":
@@ -256,9 +264,26 @@ func ParseTaskGroupMode(input string) (TaskGroupMode, error) {
 		return TaskGroupAssignee, nil
 	case "priority", "priorities":
 		return TaskGroupPriority, nil
-	case "task", "tasks", "subtask", "subtasks", "hierarchy", "tasks/subtasks", "task/subtask", "tasks_subtasks":
-		return TaskGroupTasksSubtasks, nil
 	default:
 		return TaskGroupNone, fmt.Errorf("unknown task group %q", fields[0])
+	}
+}
+
+// ParseSubtaskDisplayMode accepts the command-palette names for subtask
+// presentation.
+func ParseSubtaskDisplayMode(input string) (SubtaskDisplayMode, error) {
+	fields := strings.Fields(strings.ToLower(strings.TrimSpace(input)))
+	if len(fields) != 1 {
+		return "", errors.New("subtasks requires expanded, collapsed, or separate")
+	}
+	switch fields[0] {
+	case "expanded", "expand":
+		return SubtaskDisplayExpanded, nil
+	case "collapsed", "collapse":
+		return SubtaskDisplayCollapsed, nil
+	case "separate", "flat":
+		return SubtaskDisplaySeparate, nil
+	default:
+		return "", fmt.Errorf("unknown subtask display mode %q", fields[0])
 	}
 }

@@ -169,27 +169,37 @@ type SyncOperation struct {
 
 // UIState is presentation state persisted independently from domain entities.
 type UIState struct {
-	ProviderID      string          `json:"provider_id,omitempty"`
-	WorkspaceID     string          `json:"workspace_id,omitempty"`
-	SpaceID         string          `json:"space_id,omitempty"`
-	ListID          string          `json:"list_id,omitempty"`
-	Panel           string          `json:"panel,omitempty"`
-	Cursor          int             `json:"cursor,omitempty"`
-	Filter          string          `json:"filter,omitempty"`
-	Sort            string          `json:"sort,omitempty"`
-	GroupBy         string          `json:"group_by,omitempty"`
-	CollapsedGroups []string        `json:"collapsed_groups,omitempty"`
-	ListViews       []ListViewState `json:"list_views,omitempty"`
+	ProviderID       string                `json:"provider_id,omitempty"`
+	WorkspaceID      string                `json:"workspace_id,omitempty"`
+	SpaceID          string                `json:"space_id,omitempty"`
+	ListID           string                `json:"list_id,omitempty"`
+	Panel            string                `json:"panel,omitempty"`
+	Cursor           int                   `json:"cursor,omitempty"`
+	Filter           string                `json:"filter,omitempty"`
+	Sort             string                `json:"sort,omitempty"`
+	GroupBy          string                `json:"group_by,omitempty"`
+	SubtaskDisplay   string                `json:"subtask_display,omitempty"`
+	SubtaskOverrides []TaskSubtaskOverride `json:"subtask_overrides,omitempty"`
+	CollapsedGroups  []string              `json:"collapsed_groups,omitempty"`
+	ListViews        []ListViewState       `json:"list_views,omitempty"`
+}
+
+// TaskSubtaskOverride persists an explicit expansion choice for one task.
+type TaskSubtaskOverride struct {
+	ProviderID string `json:"provider_id"`
+	TaskID     string `json:"task_id"`
+	Display    string `json:"display"`
 }
 
 // ListViewState persists task-view preferences for one list.
 type ListViewState struct {
-	ProviderID string                 `json:"provider_id"`
-	ListID     string                 `json:"list_id"`
-	Filter     string                 `json:"filter,omitempty"`
-	Sort       string                 `json:"sort,omitempty"`
-	GroupBy    string                 `json:"group_by,omitempty"`
-	Columns    []TaskColumnPreference `json:"columns,omitempty"`
+	ProviderID     string                 `json:"provider_id"`
+	ListID         string                 `json:"list_id"`
+	Filter         string                 `json:"filter,omitempty"`
+	Sort           string                 `json:"sort,omitempty"`
+	GroupBy        string                 `json:"group_by,omitempty"`
+	SubtaskDisplay string                 `json:"subtask_display,omitempty"`
+	Columns        []TaskColumnPreference `json:"columns,omitempty"`
 }
 
 // TaskColumnPreference stores presentation overrides for one list.

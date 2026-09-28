@@ -571,28 +571,43 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 	}
 	ui.model.UI.Focus = foundationtui.PanelTasks
 	ui.model.UI.GroupBy = foundationtui.TaskGroupStatus
+	ui.model.UI.SubtaskDisplay = foundationtui.SubtaskDisplayCollapsed
 	ui.model.UI.CollapsedGroups = map[string]bool{
 		"status:done":    true,
 		"assignee:alice": true,
 		"status:open":    false,
+	}
+	ui.model.UI.SubtaskOverrides = map[foundationtui.TaskRef]foundationtui.SubtaskDisplayMode{
+		{ProviderID: "work", TaskID: "task-collapsed"}: foundationtui.SubtaskDisplayCollapsed,
 	}
 
 	state := ui.State()
 	if len(state.CollapsedGroups) != 2 || state.CollapsedGroups[0] != "assignee:alice" || state.CollapsedGroups[1] != "status:done" {
 		t.Fatalf("saved collapsed groups = %#v, want sorted active keys", state.CollapsedGroups)
 	}
+	if state.SubtaskDisplay != string(foundationtui.SubtaskDisplayCollapsed) {
+		t.Fatalf("saved subtask display = %q, want collapsed", state.SubtaskDisplay)
+	}
+	if len(state.SubtaskOverrides) != 1 || state.SubtaskOverrides[0].TaskID != "task-collapsed" || state.SubtaskOverrides[0].Display != "collapsed" {
+		t.Fatalf("saved task subtask overrides = %#v", state.SubtaskOverrides)
+	}
 
 	ui.SetState(UIState{
-		Panel:           string(foundationtui.PanelTasks),
-		ProviderID:      "work",
-		SpaceID:         "engineering",
-		ListID:          "backend",
-		Filter:          "status:open",
-		GroupBy:         string(foundationtui.TaskGroupStatus),
+		Panel:          string(foundationtui.PanelTasks),
+		ProviderID:     "work",
+		SpaceID:        "engineering",
+		ListID:         "backend",
+		Filter:         "status:open",
+		GroupBy:        string(foundationtui.TaskGroupStatus),
+		SubtaskDisplay: string(foundationtui.SubtaskDisplaySeparate),
+		SubtaskOverrides: []TaskSubtaskOverride{
+			{ProviderID: "work", TaskID: "task-expanded", Display: "expanded"},
+			{ProviderID: "work", TaskID: "task-collapsed", Display: "collapsed"},
+		},
 		CollapsedGroups: []string{" status:done ", "status:done", "assignee:alice"},
 		ListViews: []ListViewState{
-			{ProviderID: "work", ListID: "backend", Filter: "status:open", Sort: "status asc, priority desc", GroupBy: string(foundationtui.TaskGroupStatus), Columns: []TaskColumnPreference{{ID: "status", Visible: false, Width: 9, Order: 3, Fixed: true}}},
-			{ProviderID: "personal", ListID: "today", Filter: "priority:high", Sort: "title desc", GroupBy: string(foundationtui.TaskGroupPriority), Columns: []TaskColumnPreference{{ID: "task", Visible: true, Width: 55, Order: 1, Fixed: true}}},
+			{ProviderID: "work", ListID: "backend", Filter: "status:open", Sort: "status asc, priority desc", GroupBy: string(foundationtui.TaskGroupStatus), SubtaskDisplay: string(foundationtui.SubtaskDisplayExpanded), Columns: []TaskColumnPreference{{ID: "status", Visible: false, Width: 9, Order: 3, Fixed: true}}},
+			{ProviderID: "personal", ListID: "today", Filter: "priority:high", Sort: "title desc", GroupBy: string(foundationtui.TaskGroupPriority), SubtaskDisplay: string(foundationtui.SubtaskDisplayCollapsed), Columns: []TaskColumnPreference{{ID: "task", Visible: true, Width: 55, Order: 1, Fixed: true}}},
 		},
 	})
 	if ui.model.UI.ActiveProviderID != "work" || ui.model.UI.SelectedNode.ListID != "backend" {
@@ -605,8 +620,11 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 	if !ui.model.UI.CollapsedGroups["status:done"] || !ui.model.UI.CollapsedGroups["assignee:alice"] || len(ui.model.UI.CollapsedGroups) != 2 {
 		t.Fatalf("restored collapsed groups = %#v, want two unique keys", ui.model.UI.CollapsedGroups)
 	}
-	if !ui.model.UI.FilterActive || ui.model.UI.Filter.String() != "status:open" || ui.model.UI.GroupBy != foundationtui.TaskGroupStatus || foundationSortString(ui.model.UI.SortBy) != "status asc, priority desc" {
-		t.Fatalf("restored active list view = filter %q active %v group %q sort %q", ui.model.UI.Filter.String(), ui.model.UI.FilterActive, ui.model.UI.GroupBy, foundationSortString(ui.model.UI.SortBy))
+	if ui.model.UI.SubtaskOverrides[foundationtui.TaskRef{ProviderID: "work", TaskID: "task-expanded"}] != foundationtui.SubtaskDisplayExpanded || ui.model.UI.SubtaskOverrides[foundationtui.TaskRef{ProviderID: "work", TaskID: "task-collapsed"}] != foundationtui.SubtaskDisplayCollapsed {
+		t.Fatalf("restored task subtask overrides = %#v", ui.model.UI.SubtaskOverrides)
+	}
+	if !ui.model.UI.FilterActive || ui.model.UI.Filter.String() != "status:open" || ui.model.UI.GroupBy != foundationtui.TaskGroupStatus || ui.model.UI.SubtaskDisplay != foundationtui.SubtaskDisplayExpanded || foundationSortString(ui.model.UI.SortBy) != "status asc, priority desc" {
+		t.Fatalf("restored active list view = filter %q active %v group %q subtasks %q sort %q", ui.model.UI.Filter.String(), ui.model.UI.FilterActive, ui.model.UI.GroupBy, ui.model.UI.SubtaskDisplay, foundationSortString(ui.model.UI.SortBy))
 	}
 	filterEditor, _ := ui.model.Update(foundationtui.KeyMsg{Key: "f"})
 	if filterEditor.UI.Mode != foundationtui.ModeFilter || filterEditor.UI.Input != "status:open" {
@@ -623,6 +641,33 @@ func TestFoundationUIStateRoundTripsCollapsedGroups(t *testing.T) {
 	}
 	if state.ListViews[0].Sort != "title desc" || state.ListViews[1].Sort != "status asc, priority desc" || state.Sort != "status asc, priority desc" {
 		t.Fatalf("saved per-list sorting = %#v (active sort %q)", state.ListViews, state.Sort)
+	}
+}
+
+func TestFoundationUIStateMigratesTaskHierarchyGroupingToExpandedSubtasks(t *testing.T) {
+	ui, err := newFoundationUIController(NewStreamTerminal(bytes.NewBuffer(nil), &bytes.Buffer{}, false), foundationNoopHandler{}, nil, nil)
+	if err != nil {
+		t.Fatalf("newFoundationUIController() error = %v", err)
+	}
+	ui.SetState(UIState{
+		Panel:      string(foundationtui.PanelTasks),
+		ProviderID: "work",
+		SpaceID:    "engineering",
+		ListID:     "backend",
+		GroupBy:    "tasks_subtasks",
+		ListViews: []ListViewState{{
+			ProviderID: "work",
+			ListID:     "backend",
+			GroupBy:    "tasks_subtasks",
+		}},
+	})
+
+	if ui.model.UI.GroupBy != foundationtui.TaskGroupNone || ui.model.UI.SubtaskDisplay != foundationtui.SubtaskDisplayExpanded {
+		t.Fatalf("migrated view = group %q, subtasks %q; want no grouping and expanded subtasks", ui.model.UI.GroupBy, ui.model.UI.SubtaskDisplay)
+	}
+	state := ui.State()
+	if len(state.ListViews) != 1 || state.ListViews[0].GroupBy != "" || state.ListViews[0].SubtaskDisplay != "expanded" {
+		t.Fatalf("saved migrated view = %#v, want expanded subtasks without task grouping", state.ListViews)
 	}
 }
 
@@ -1223,9 +1268,12 @@ func TestUIStateNormalizesRemoteListAndRestartRefreshFindsSharedTasks(t *testing
 		ProviderID: string(providerID),
 		SpaceID:    string(space.ID),
 		ListID:     selectedRemote,
+		SubtaskOverrides: []TaskSubtaskOverride{{
+			ProviderID: string(providerID), TaskID: "child-task", Display: "expanded",
+		}},
 		ListViews: []ListViewState{
-			{ProviderID: string(providerID), ListID: string(selected.ID), Filter: "status:open", GroupBy: "status", Columns: []TaskColumnPreference{{ID: "status", Visible: true, Width: 9, Order: 2, Fixed: true}}},
-			{ProviderID: string(providerID), ListID: string(other.ID), Filter: "priority:high", GroupBy: "priority"},
+			{ProviderID: string(providerID), ListID: string(selected.ID), Filter: "status:open", GroupBy: "status", SubtaskDisplay: "expanded", Columns: []TaskColumnPreference{{ID: "status", Visible: true, Width: 9, Order: 2, Fixed: true}}},
+			{ProviderID: string(providerID), ListID: string(other.ID), Filter: "priority:high", GroupBy: "priority", SubtaskDisplay: "collapsed"},
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -1246,7 +1294,10 @@ func TestUIStateNormalizesRemoteListAndRestartRefreshFindsSharedTasks(t *testing
 	if state.ListID != string(selected.ID) || state.SpaceID != string(space.ID) {
 		t.Fatalf("normalized UI state = %#v, want local scope %s/%s", state, space.ID, selected.ID)
 	}
-	if len(state.ListViews) != 2 || state.ListViews[0].ProviderID != string(providerID) || state.ListViews[0].ListID != string(selected.ID) || state.ListViews[0].Filter != "status:open" || state.ListViews[1].ListID != string(other.ID) || state.ListViews[1].GroupBy != "priority" {
+	if len(state.SubtaskOverrides) != 1 || state.SubtaskOverrides[0].TaskID != "child-task" || state.SubtaskOverrides[0].Display != "expanded" {
+		t.Fatalf("persisted task subtask overrides = %#v", state.SubtaskOverrides)
+	}
+	if len(state.ListViews) != 2 || state.ListViews[0].ProviderID != string(providerID) || state.ListViews[0].ListID != string(selected.ID) || state.ListViews[0].Filter != "status:open" || state.ListViews[0].SubtaskDisplay != "expanded" || state.ListViews[1].ListID != string(other.ID) || state.ListViews[1].GroupBy != "priority" || state.ListViews[1].SubtaskDisplay != "collapsed" {
 		t.Fatalf("persisted per-list view state = %#v, want selected and other list preferences", state.ListViews)
 	}
 	if len(state.ListViews[0].Columns) != 1 || state.ListViews[0].Columns[0].ID != "status" || state.ListViews[0].Columns[0].Order != 2 || !state.ListViews[0].Columns[0].Fixed {

@@ -188,6 +188,7 @@ type TaskRow struct {
 	ColumnValues   map[string]string
 	SearchResult   bool
 	HierarchyDepth int
+	HasSubtasks    bool
 }
 
 // TaskGroupMode controls how visible task rows are arranged for presentation.
@@ -195,22 +196,30 @@ type TaskRow struct {
 type TaskGroupMode string
 
 const (
-	TaskGroupNone          TaskGroupMode = ""
-	TaskGroupStatus        TaskGroupMode = "status"
-	TaskGroupAssignee      TaskGroupMode = "assignee"
-	TaskGroupPriority      TaskGroupMode = "priority"
-	TaskGroupTasksSubtasks TaskGroupMode = "tasks_subtasks"
+	TaskGroupNone     TaskGroupMode = ""
+	TaskGroupStatus   TaskGroupMode = "status"
+	TaskGroupAssignee TaskGroupMode = "assignee"
+	TaskGroupPriority TaskGroupMode = "priority"
 )
 
 // GroupBy is a concise alias for callers that configure task grouping.
 type GroupBy = TaskGroupMode
 
 const (
-	GroupByNone          = TaskGroupNone
-	GroupByStatus        = TaskGroupStatus
-	GroupByAssignee      = TaskGroupAssignee
-	GroupByPriority      = TaskGroupPriority
-	GroupByTasksSubtasks = TaskGroupTasksSubtasks
+	GroupByNone     = TaskGroupNone
+	GroupByStatus   = TaskGroupStatus
+	GroupByAssignee = TaskGroupAssignee
+	GroupByPriority = TaskGroupPriority
+)
+
+// SubtaskDisplayMode controls whether child tasks are nested, hidden, or shown
+// at the same level as their parents. It is independent of task grouping.
+type SubtaskDisplayMode string
+
+const (
+	SubtaskDisplayExpanded  SubtaskDisplayMode = "expanded"
+	SubtaskDisplayCollapsed SubtaskDisplayMode = "collapsed"
+	SubtaskDisplaySeparate  SubtaskDisplayMode = "separate"
 )
 
 // TaskGroup is a presentation bucket. Rows retain their provider-scoped task
@@ -233,10 +242,11 @@ type ListViewKey struct {
 // ListViewState stores the task-view preferences used the last time a list was
 // viewed. Filter is kept in its editable form so it can be persisted directly.
 type ListViewState struct {
-	Filter  string
-	Sort    string
-	GroupBy TaskGroupMode
-	Columns []TaskColumnPreference
+	Filter         string
+	Sort           string
+	GroupBy        TaskGroupMode
+	SubtaskDisplay SubtaskDisplayMode
+	Columns        []TaskColumnPreference
 }
 
 // Panel is the focused navigation area.
@@ -300,6 +310,8 @@ type UIState struct {
 	Filter                  Filter
 	SortBy                  []SortCriterion
 	GroupBy                 TaskGroupMode
+	SubtaskDisplay          SubtaskDisplayMode
+	SubtaskOverrides        map[TaskRef]SubtaskDisplayMode
 	ListViews               map[ListViewKey]ListViewState
 	ColumnPreferences       []TaskColumnPreference
 	ColumnCursor            int
@@ -390,13 +402,15 @@ func NewWithOptions(data Snapshot, options Options) Model {
 		KeyMap:  keyMap,
 		Options: options,
 		UI: UIState{
-			Focus:           PanelHierarchy,
-			Mode:            ModeBrowse,
-			ExpandedNodes:   make(map[TreeNodeRef]bool),
-			CollapsedGroups: make(map[string]bool),
-			Width:           100,
-			Height:          24,
-			ClockNow:        time.Now().UTC(),
+			Focus:            PanelHierarchy,
+			Mode:             ModeBrowse,
+			SubtaskDisplay:   SubtaskDisplaySeparate,
+			SubtaskOverrides: make(map[TaskRef]SubtaskDisplayMode),
+			ExpandedNodes:    make(map[TreeNodeRef]bool),
+			CollapsedGroups:  make(map[string]bool),
+			Width:            100,
+			Height:           24,
+			ClockNow:         time.Now().UTC(),
 		},
 	}
 	m.initializeSelection()
@@ -548,6 +562,17 @@ func cloneCollapsed(in map[string]bool) map[string]bool {
 	out := make(map[string]bool, len(in))
 	for key, collapsed := range in {
 		out[key] = collapsed
+	}
+	return out
+}
+
+func cloneSubtaskOverrides(in map[TaskRef]SubtaskDisplayMode) map[TaskRef]SubtaskDisplayMode {
+	if len(in) == 0 {
+		return make(map[TaskRef]SubtaskDisplayMode)
+	}
+	out := make(map[TaskRef]SubtaskDisplayMode, len(in))
+	for ref, mode := range in {
+		out[ref] = mode
 	}
 	return out
 }

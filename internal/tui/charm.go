@@ -1109,7 +1109,7 @@ func newCharmHelpKeyMap() charmHelpKeyMap {
 		bind([]string{"j", "k", "up", "down"}, "j/k", "move"),
 		bind([]string{"tab", "shift+tab"}, "tab", "panel"),
 		bind([]string{"h", "l", "left", "right"}, "h/l", "scroll"),
-		bind([]string{"enter", "space"}, "enter/space", "open/toggle group"),
+		bind([]string{"enter", "space"}, "enter/space", "open/toggle subtasks/group"),
 		bind([]string{"+", "="}, "+", "expand all"),
 		bind([]string{"-"}, "-", "collapse all"),
 		bind([]string{"n", "e", "x", "d"}, "n/e/x/d", "task"),

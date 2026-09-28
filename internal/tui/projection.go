@@ -171,6 +171,15 @@ func (m Model) taskRows(aggregate bool) []TaskRow {
 	for _, values := range m.Data.TaskColumnValues {
 		columnValues[scopedID{provider: values.ProviderID, id: string(values.TaskID)}] = values.Values
 	}
+	var subtasksByParent map[TaskRef]bool
+	if m.UI.SubtaskDisplay != SubtaskDisplaySeparate || len(m.UI.SubtaskOverrides) > 0 {
+		subtasksByParent = make(map[TaskRef]bool)
+		for _, task := range m.Data.Tasks {
+			if task.ParentTaskID != nil && *task.ParentTaskID != "" {
+				subtasksByParent[TaskRef{ProviderID: task.ProviderID, TaskID: *task.ParentTaskID}] = true
+			}
+		}
+	}
 
 	rows := make([]TaskRow, 0, len(m.Data.Tasks))
 	for _, task := range m.Data.Tasks {
@@ -210,6 +219,7 @@ func (m Model) taskRows(aggregate bool) []TaskRow {
 			ListNames:    listNames,
 			ColumnValues: columnValues[scopedID{provider: task.ProviderID, id: string(task.ID)}],
 			SearchResult: m.UI.SearchActive,
+			HasSubtasks:  subtasksByParent[TaskRef{ProviderID: task.ProviderID, TaskID: task.ID}],
 		}
 		if listOK {
 			row.ListName = list.Name
@@ -242,7 +252,7 @@ func (m Model) taskRows(aggregate bool) []TaskRow {
 // simpleListTaskRows projects only a visible slice when list order needs no
 // filtering, sorting, searching, or grouping.
 func (m Model) simpleListTaskRows(offset, limit int) ([]TaskRow, int, bool) {
-	if m.UI.GroupBy != TaskGroupNone || m.UI.SearchActive || m.UI.FilterActive || len(m.UI.SortBy) > 0 || m.UI.SelectedNode.Kind != TreeNodeList {
+	if m.UI.GroupBy != TaskGroupNone || m.UI.SubtaskDisplay != SubtaskDisplaySeparate || len(m.UI.SubtaskOverrides) > 0 || m.UI.SearchActive || m.UI.FilterActive || len(m.UI.SortBy) > 0 || m.UI.SelectedNode.Kind != TreeNodeList {
 		return nil, 0, false
 	}
 	list, ok := m.selectedList()
@@ -347,10 +357,26 @@ func (m Model) simpleListTaskRow(task Task, list List, listName, spaceName, prov
 }
 
 func (m Model) visibleTaskGroups(aggregate bool) []TaskGroup {
-	groups := groupTaskRows(m.taskRows(aggregate), m.UI.GroupBy)
-	if m.UI.GroupBy == TaskGroupNone {
-		return groups
+	var allTasks map[TaskRef]Task
+	if m.UI.GroupBy != TaskGroupNone || m.UI.SubtaskDisplay != SubtaskDisplaySeparate || len(m.UI.SubtaskOverrides) > 0 {
+		allTasks = make(map[TaskRef]Task, len(m.Data.Tasks))
+		for _, task := range m.Data.Tasks {
+			allTasks[TaskRef{ProviderID: task.ProviderID, TaskID: task.ID}] = task
+		}
 	}
+	groups := groupTaskRows(m.taskRows(aggregate), m.UI.GroupBy, allTasks)
+	if m.UI.GroupBy != TaskGroupNone || m.UI.SubtaskDisplay != SubtaskDisplaySeparate || len(m.UI.SubtaskOverrides) > 0 {
+		for index := range groups {
+			groups[index].Rows = m.arrangeTaskHierarchy(groups[index].Rows, allTasks)
+		}
+	}
+	visible := groups[:0]
+	for _, group := range groups {
+		if len(group.Rows) > 0 {
+			visible = append(visible, group)
+		}
+	}
+	groups = visible
 	if m.UI.GroupBy == TaskGroupStatus {
 		sort.SliceStable(groups, func(left, right int) bool {
 			leftOrder, leftConfigured := m.statusOrder(groups[left].Key)
@@ -499,7 +525,7 @@ func (m Model) taskRowForRef(wanted TaskRef) (TaskRow, bool) {
 	return TaskRow{}, false
 }
 
-func groupTaskRows(rows []TaskRow, mode TaskGroupMode) []TaskGroup {
+func groupTaskRows(rows []TaskRow, mode TaskGroupMode, allTasks map[TaskRef]Task) []TaskGroup {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -512,7 +538,7 @@ func groupTaskRows(rows []TaskRow, mode TaskGroupMode) []TaskGroup {
 		groupsByKey := make(map[string]int, len(rows))
 		groups := make([]TaskGroup, 0, len(rows))
 		for _, row := range rows {
-			key, label := taskGroupValue(row, mode)
+			key, label := taskGroupValue(taskGroupingRow(row, allTasks), mode)
 			groupIndex, ok := groupsByKey[key]
 			if !ok {
 				groupIndex = len(groups)
@@ -528,11 +554,23 @@ func groupTaskRows(rows []TaskRow, mode TaskGroupMode) []TaskGroup {
 			return normalize(groups[left].Label) < normalize(groups[right].Label)
 		})
 		return groups
-	case TaskGroupTasksSubtasks:
-		return taskHierarchyGroups(rows)
 	default:
 		return []TaskGroup{{Rows: append([]TaskRow(nil), rows...)}}
 	}
+}
+
+func taskGroupingRow(row TaskRow, allTasks map[TaskRef]Task) TaskRow {
+	task := row.Task
+	for depth := 0; task.ParentTaskID != nil && *task.ParentTaskID != "" && depth <= len(allTasks); depth++ {
+		parent, ok := allTasks[TaskRef{ProviderID: row.ProviderID, TaskID: *task.ParentTaskID}]
+		if !ok {
+			break
+		}
+		task = parent
+	}
+	row.Task = task
+	row.Assignee = task.Assignee
+	return row
 }
 
 func taskGroupValue(row TaskRow, mode TaskGroupMode) (key, label string) {
@@ -562,7 +600,10 @@ func taskGroupValue(row TaskRow, mode TaskGroupMode) (key, label string) {
 	return normalize(value), value
 }
 
-func taskHierarchyGroups(rows []TaskRow) []TaskGroup {
+func (m Model) arrangeTaskHierarchy(rows []TaskRow, allTasks map[TaskRef]Task) []TaskRow {
+	if len(rows) == 0 {
+		return nil
+	}
 	byRef := make(map[TaskRef]int, len(rows))
 	children := make(map[TaskRef][]int, len(rows))
 	for index, row := range rows {
@@ -583,31 +624,31 @@ func taskHierarchyGroups(rows []TaskRow) []TaskGroup {
 		children[parent] = append(children[parent], index)
 	}
 
-	groups := make([]TaskGroup, 0, len(roots))
+	ordered := make([]TaskRow, 0, len(rows))
 	visited := make(map[int]bool, len(rows))
 	for _, root := range roots {
-		group := TaskGroup{
-			Key:   string(rows[root].ProviderID) + "/" + string(rows[root].Task.ID),
-			Label: taskTitle(rows[root]),
+		depth, visible := m.visibleOrphanDepth(rows[root], allTasks)
+		if !visible {
+			markTaskTree(root, rows, children, visited)
+			continue
 		}
-		appendTaskTree(&group.Rows, root, 0, rows, children, visited)
-		groups = append(groups, group)
+		m.appendTaskTree(&ordered, root, depth, rows, children, visited)
 	}
 	for index := range rows {
 		if visited[index] {
 			continue
 		}
-		group := TaskGroup{
-			Key:   string(rows[index].ProviderID) + "/" + string(rows[index].Task.ID),
-			Label: taskTitle(rows[index]),
+		depth, visible := m.visibleOrphanDepth(rows[index], allTasks)
+		if !visible {
+			markTaskTree(index, rows, children, visited)
+			continue
 		}
-		appendTaskTree(&group.Rows, index, 0, rows, children, visited)
-		groups = append(groups, group)
+		m.appendTaskTree(&ordered, index, depth, rows, children, visited)
 	}
-	return groups
+	return ordered
 }
 
-func appendTaskTree(output *[]TaskRow, index, depth int, rows []TaskRow, children map[TaskRef][]int, visited map[int]bool) {
+func (m Model) appendTaskTree(output *[]TaskRow, index, depth int, rows []TaskRow, children map[TaskRef][]int, visited map[int]bool) {
 	if visited[index] {
 		return
 	}
@@ -615,9 +656,76 @@ func appendTaskTree(output *[]TaskRow, index, depth int, rows []TaskRow, childre
 	row := rows[index]
 	row.HierarchyDepth = depth
 	*output = append(*output, row)
-	for _, child := range children[taskRef(row)] {
-		appendTaskTree(output, child, depth+1, rows, children, visited)
+	mode := m.subtaskDisplayFor(taskRef(row))
+	if mode == SubtaskDisplayCollapsed {
+		for _, child := range children[taskRef(row)] {
+			markTaskTree(child, rows, children, visited)
+		}
+		return
 	}
+	childDepth := 0
+	if mode == SubtaskDisplayExpanded {
+		childDepth = depth + 1
+	}
+	for _, child := range children[taskRef(row)] {
+		m.appendTaskTree(output, child, childDepth, rows, children, visited)
+	}
+}
+
+func markTaskTree(index int, rows []TaskRow, children map[TaskRef][]int, visited map[int]bool) {
+	if visited[index] {
+		return
+	}
+	visited[index] = true
+	for _, child := range children[taskRef(rows[index])] {
+		markTaskTree(child, rows, children, visited)
+	}
+}
+
+func (m Model) visibleOrphanDepth(row TaskRow, allTasks map[TaskRef]Task) (int, bool) {
+	ancestors := make([]TaskRef, 0)
+	parentID := row.Task.ParentTaskID
+	for steps := 0; parentID != nil && *parentID != "" && steps <= len(allTasks); steps++ {
+		parent := TaskRef{ProviderID: row.ProviderID, TaskID: *parentID}
+		duplicate := false
+		for _, ancestor := range ancestors {
+			if ancestor == parent {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			break
+		}
+		ancestors = append(ancestors, parent)
+		ancestor, ok := allTasks[parent]
+		if !ok {
+			break
+		}
+		parentID = ancestor.ParentTaskID
+	}
+	depth := 0
+	for index := len(ancestors) - 1; index >= 0; index-- {
+		switch m.subtaskDisplayFor(ancestors[index]) {
+		case SubtaskDisplayCollapsed:
+			return 0, false
+		case SubtaskDisplayExpanded:
+			depth++
+		default:
+			depth = 0
+		}
+	}
+	return depth, true
+}
+
+func (m Model) subtaskDisplayFor(parent TaskRef) SubtaskDisplayMode {
+	if mode, ok := m.UI.SubtaskOverrides[parent]; ok {
+		switch mode {
+		case SubtaskDisplayExpanded, SubtaskDisplayCollapsed:
+			return mode
+		}
+	}
+	return m.UI.SubtaskDisplay
 }
 
 func taskParentRef(row TaskRow) (TaskRef, bool) {

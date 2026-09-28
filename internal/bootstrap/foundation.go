@@ -2770,10 +2770,11 @@ func (u *foundationUIController) SetState(state UIState) {
 			ProviderID: foundationtui.ProviderID(view.ProviderID),
 			ListID:     foundationtui.ListID(view.ListID),
 		}] = foundationtui.ListViewState{
-			Filter:  view.Filter,
-			Sort:    view.Sort,
-			GroupBy: foundationtui.TaskGroupMode(view.GroupBy),
-			Columns: foundationTaskColumnPreferences(view.Columns),
+			Filter:         view.Filter,
+			Sort:           view.Sort,
+			GroupBy:        foundationTaskGroupMode(view.GroupBy),
+			SubtaskDisplay: foundationSubtaskDisplay(view.SubtaskDisplay, view.GroupBy),
+			Columns:        foundationTaskColumnPreferences(view.Columns),
 		}
 	}
 	if state.ProviderID != "" && state.ListID != "" {
@@ -2791,17 +2792,33 @@ func (u *foundationUIController) SetState(state UIState) {
 			u.model.UI.CollapsedGroups[key] = true
 		}
 	}
+	u.model.UI.SubtaskOverrides = make(map[foundationtui.TaskRef]foundationtui.SubtaskDisplayMode, len(state.SubtaskOverrides))
+	for _, override := range state.SubtaskOverrides {
+		if strings.TrimSpace(override.ProviderID) == "" || strings.TrimSpace(override.TaskID) == "" {
+			continue
+		}
+		mode, err := foundationtui.ParseSubtaskDisplayMode(override.Display)
+		if err != nil || mode == foundationtui.SubtaskDisplaySeparate {
+			continue
+		}
+		u.model.UI.SubtaskOverrides[foundationtui.TaskRef{
+			ProviderID: foundationtui.ProviderID(override.ProviderID),
+			TaskID:     foundationtui.TaskID(override.TaskID),
+		}] = mode
+	}
 	if key, ok := foundationListViewKey(state); ok {
 		if view, exists := u.model.UI.ListViews[key]; exists {
 			state.Filter = view.Filter
 			state.Sort = view.Sort
 			state.GroupBy = string(view.GroupBy)
+			state.SubtaskDisplay = string(view.SubtaskDisplay)
 			u.model.UI.ColumnPreferences = append([]foundationtui.TaskColumnPreference(nil), view.Columns...)
 		} else {
 			u.model.UI.ListViews[key] = foundationtui.ListViewState{
-				Filter:  state.Filter,
-				Sort:    state.Sort,
-				GroupBy: foundationtui.TaskGroupMode(state.GroupBy),
+				Filter:         state.Filter,
+				Sort:           state.Sort,
+				GroupBy:        foundationTaskGroupMode(state.GroupBy),
+				SubtaskDisplay: foundationSubtaskDisplay(state.SubtaskDisplay, state.GroupBy),
 			}
 			u.model.UI.ColumnPreferences = nil
 		}
@@ -2828,10 +2845,30 @@ func (u *foundationUIController) SetState(state UIState) {
 	u.model.UI.TaskHeaderTask = foundationtui.TaskRef{}
 	u.model.UI.GroupBy = foundationtui.TaskGroupNone
 	if strings.TrimSpace(state.GroupBy) != "" {
-		if group, err := foundationtui.ParseTaskGroupMode(state.GroupBy); err == nil {
-			u.model.UI.GroupBy = group
-		}
+		u.model.UI.GroupBy = foundationTaskGroupMode(state.GroupBy)
 	}
+	u.model.UI.SubtaskDisplay = foundationSubtaskDisplay(state.SubtaskDisplay, state.GroupBy)
+}
+
+func foundationTaskGroupMode(value string) foundationtui.TaskGroupMode {
+	if strings.TrimSpace(value) == "" {
+		return foundationtui.TaskGroupNone
+	}
+	mode, err := foundationtui.ParseTaskGroupMode(value)
+	if err != nil {
+		return foundationtui.TaskGroupNone
+	}
+	return mode
+}
+
+func foundationSubtaskDisplay(value, legacyGroup string) foundationtui.SubtaskDisplayMode {
+	if mode, err := foundationtui.ParseSubtaskDisplayMode(value); err == nil {
+		return mode
+	}
+	if strings.TrimSpace(value) == "" && strings.TrimSpace(legacyGroup) == "tasks_subtasks" {
+		return foundationtui.SubtaskDisplayExpanded
+	}
+	return foundationtui.SubtaskDisplaySeparate
 }
 
 func (u *foundationUIController) Render(ctx context.Context, view View) error {
@@ -2976,21 +3013,38 @@ func (u *foundationUIController) State() UIState {
 	}
 	state.Sort = foundationSortString(model.UI.SortBy)
 	state.GroupBy = string(model.UI.GroupBy)
+	state.SubtaskDisplay = string(model.UI.SubtaskDisplay)
 	for key, collapsed := range model.UI.CollapsedGroups {
 		if collapsed && strings.TrimSpace(key) != "" {
 			state.CollapsedGroups = append(state.CollapsedGroups, key)
 		}
 	}
 	sort.Strings(state.CollapsedGroups)
+	for ref, mode := range model.UI.SubtaskOverrides {
+		if (mode == foundationtui.SubtaskDisplayExpanded || mode == foundationtui.SubtaskDisplayCollapsed) && ref.ProviderID != "" && ref.TaskID != "" {
+			state.SubtaskOverrides = append(state.SubtaskOverrides, TaskSubtaskOverride{
+				ProviderID: string(ref.ProviderID),
+				TaskID:     string(ref.TaskID),
+				Display:    string(mode),
+			})
+		}
+	}
+	sort.Slice(state.SubtaskOverrides, func(left, right int) bool {
+		if state.SubtaskOverrides[left].ProviderID != state.SubtaskOverrides[right].ProviderID {
+			return state.SubtaskOverrides[left].ProviderID < state.SubtaskOverrides[right].ProviderID
+		}
+		return state.SubtaskOverrides[left].TaskID < state.SubtaskOverrides[right].TaskID
+	})
 	listViews := make(map[foundationtui.ListViewKey]foundationtui.ListViewState, len(model.UI.ListViews)+1)
 	for key, view := range model.UI.ListViews {
 		listViews[key] = view
 	}
 	if key, ok := foundationListViewKey(state); ok {
 		view := foundationtui.ListViewState{
-			Sort:    foundationSortString(model.UI.SortBy),
-			GroupBy: model.UI.GroupBy,
-			Columns: append([]foundationtui.TaskColumnPreference(nil), model.UI.ColumnPreferences...),
+			Sort:           foundationSortString(model.UI.SortBy),
+			GroupBy:        model.UI.GroupBy,
+			SubtaskDisplay: model.UI.SubtaskDisplay,
+			Columns:        append([]foundationtui.TaskColumnPreference(nil), model.UI.ColumnPreferences...),
 		}
 		if model.UI.FilterActive {
 			view.Filter = model.UI.Filter.String()
@@ -3000,12 +3054,13 @@ func (u *foundationUIController) State() UIState {
 	state.ListViews = make([]ListViewState, 0, len(listViews))
 	for key, view := range listViews {
 		state.ListViews = append(state.ListViews, ListViewState{
-			ProviderID: string(key.ProviderID),
-			ListID:     string(key.ListID),
-			Filter:     view.Filter,
-			Sort:       view.Sort,
-			GroupBy:    string(view.GroupBy),
-			Columns:    bootstrapTaskColumnPreferences(view.Columns),
+			ProviderID:     string(key.ProviderID),
+			ListID:         string(key.ListID),
+			Filter:         view.Filter,
+			Sort:           view.Sort,
+			GroupBy:        string(view.GroupBy),
+			SubtaskDisplay: string(view.SubtaskDisplay),
+			Columns:        bootstrapTaskColumnPreferences(view.Columns),
 		})
 	}
 	sort.Slice(state.ListViews, func(i, j int) bool {
@@ -3523,8 +3578,8 @@ func foundationUICommand(input foundationtui.AppCommand) (command.Command, bool,
 		return command.Command{Kind: command.KindRefresh, ProviderID: string(input.ProviderID), ListID: string(input.ListID)}, true, nil
 	case foundationtui.CommandQuit:
 		return command.Command{Kind: command.KindQuit}, true, nil
-	case foundationtui.CommandFilter, foundationtui.CommandSort, foundationtui.CommandGroup, foundationtui.CommandHelp:
-		// Filtering, sorting, grouping, and help are presentation-local operations.
+	case foundationtui.CommandFilter, foundationtui.CommandSort, foundationtui.CommandGroup, foundationtui.CommandSubtaskDisplay, foundationtui.CommandHelp:
+		// Filtering, sorting, grouping, subtask display, and help are presentation-local operations.
 		return command.Command{}, false, nil
 	default:
 		return command.Command{}, false, fmt.Errorf("translate UI command %q: unsupported command", input.Kind)
