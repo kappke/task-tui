@@ -198,7 +198,7 @@ func (m *CharmModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		coreMessage = WindowSizeMsg{Width: value.Width, Height: value.Height}
 	case tea.KeyMsg:
 		coreMessage = charmKeyMessage(value)
-	case SnapshotMsg, TasksLoadedMsg, SyncStateMsg, ErrorMsg, StatusMsg, CommandResultMsg, QuitMsg:
+	case SnapshotMsg, AuthenticatedUserMsg, TasksLoadedMsg, SyncStateMsg, ErrorMsg, StatusMsg, CommandResultMsg, QuitMsg:
 		coreMessage = value
 	default:
 		m.syncInput()

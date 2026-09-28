@@ -44,6 +44,16 @@ type teamsResponse struct {
 	Teams []wireTeam `json:"teams"`
 }
 
+type currentUserResponse struct {
+	User wireUser `json:"user"`
+}
+
+type wireUser struct {
+	ID       wireString `json:"id"`
+	Username string     `json:"username"`
+	Name     string     `json:"name"`
+}
+
 type wireTeam struct {
 	ID   wireString `json:"id"`
 	Name string     `json:"name"`

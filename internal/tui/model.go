@@ -59,6 +59,7 @@ const (
 // The TUI treats it as input state and never performs persistence itself.
 type Snapshot struct {
 	Providers          []Provider
+	AuthenticatedUsers []AuthenticatedUser
 	Workspaces         []Workspace
 	Spaces             []Space
 	Lists              []List
@@ -68,6 +69,15 @@ type Snapshot struct {
 	EditorOptions      []TaskEditorOptions
 	TaskColumns        []ListTaskColumn
 	TaskColumnValues   []TaskColumnValueSet
+}
+
+// AuthenticatedUser identifies the account associated with one provider
+// instance. It is runtime presentation data and is resolved only when needed.
+type AuthenticatedUser struct {
+	ProviderID ProviderID
+	ID         string
+	Username   string
+	Name       string
 }
 
 // TrackedTimeEntry is one completed task timer interval.
@@ -294,6 +304,8 @@ type UIState struct {
 	HideHierarchy           bool
 	Mode                    Mode
 	ActiveProviderID        ProviderID
+	MeMode                  bool
+	MeModePending           bool
 	TreeCursor              int
 	TaskCursor              int
 	TreeOffset              int
@@ -435,6 +447,7 @@ func (m Model) SnapshotData() Snapshot {
 func cloneSnapshot(in Snapshot) Snapshot {
 	out := in
 	out.Providers = append([]Provider(nil), in.Providers...)
+	out.AuthenticatedUsers = append([]AuthenticatedUser(nil), in.AuthenticatedUsers...)
 	out.Workspaces = append([]Workspace(nil), in.Workspaces...)
 	out.Spaces = append([]Space(nil), in.Spaces...)
 	out.Lists = append([]List(nil), in.Lists...)

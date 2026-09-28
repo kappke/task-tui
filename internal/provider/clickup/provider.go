@@ -250,6 +250,7 @@ func (p *Provider) Capabilities() provider.Capabilities {
 var _ provider.Provider = (*Provider)(nil)
 
 var _ provider.Authenticator = (*Provider)(nil)
+var _ provider.CurrentUserProvider = (*Provider)(nil)
 var _ provider.TaskTimeTracker = (*Provider)(nil)
 var _ provider.TaskTimeEntryLister = (*Provider)(nil)
 
@@ -268,6 +269,17 @@ func (p *Provider) Authenticate(ctx context.Context) error {
 		return ErrMissingTokenSource
 	}
 	return nil
+}
+
+func (p *Provider) CurrentUser(ctx context.Context) (provider.UserIdentity, error) {
+	if err := p.ensureReady(); err != nil {
+		return provider.UserIdentity{}, err
+	}
+	user, err := p.client.GetAuthenticatedUser(ctx)
+	if err != nil {
+		return provider.UserIdentity{}, fmt.Errorf("fetch authenticated ClickUp user: %w", err)
+	}
+	return provider.UserIdentity{ID: user.ID.String(), Username: user.Username, Name: user.Name}, nil
 }
 
 func (p *Provider) FetchSpaces(ctx context.Context) ([]domain.Space, error) {

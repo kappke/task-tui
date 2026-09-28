@@ -21,6 +21,7 @@ const (
 	KindFetchTasks          Kind = "fetch_tasks"
 	KindFetchTask           Kind = "fetch_task"
 	KindSearch              Kind = "search"
+	KindCurrentUser         Kind = "current_user"
 	KindCreateSpace         Kind = "create_space"
 	KindCreateList          Kind = "create_list"
 	KindCreateTask          Kind = "create_task"
@@ -74,13 +75,17 @@ const (
 	EventChanged       EventKind = "changed"
 	EventRefresh       EventKind = "refresh"
 	EventSearchResults EventKind = "search_results"
+	EventCurrentUser   EventKind = "current_user"
 )
 
 // Event is the small, presentation-neutral result of a command.
 type Event struct {
-	Kind  EventKind
-	Query string
-	Error error
+	Kind     EventKind
+	Query    string
+	UserID   string
+	Username string
+	Name     string
+	Error    error
 }
 
 // Handler is implemented by the application layer.
@@ -97,6 +102,10 @@ func (c Command) Validate() error {
 	switch c.Kind {
 	case KindQuit, KindRefresh:
 		return nil
+	case KindCurrentUser:
+		if strings.TrimSpace(c.ProviderID) == "" {
+			return fmt.Errorf("%w: provider is required to resolve the current user", ErrInvalid)
+		}
 	case KindFetchLists:
 		if strings.TrimSpace(c.ProviderID) == "" {
 			return fmt.Errorf("%w: provider is required to fetch lists", ErrInvalid)

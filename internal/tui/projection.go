@@ -154,6 +154,7 @@ func (m Model) GroupedTasks() []TaskGroup {
 
 func (m Model) taskRows(aggregate bool) []TaskRow {
 	providers := m.viewProviders()
+	currentUser, hasCurrentUser := m.authenticatedUser(m.UI.ActiveProviderID)
 	providerByID := make(map[ProviderID]Provider, len(providers))
 	for _, provider := range providers {
 		providerByID[provider.ID] = provider
@@ -184,6 +185,9 @@ func (m Model) taskRows(aggregate bool) []TaskRow {
 	rows := make([]TaskRow, 0, len(m.Data.Tasks))
 	for _, task := range m.Data.Tasks {
 		if m.UI.ActiveProviderID != "" && task.ProviderID != m.UI.ActiveProviderID {
+			continue
+		}
+		if m.UI.MeMode && (!hasCurrentUser || !taskAssignedTo(task.Assignee, currentUser)) {
 			continue
 		}
 		if !aggregate && !m.inSelectedScope(task, lists) {
@@ -252,7 +256,7 @@ func (m Model) taskRows(aggregate bool) []TaskRow {
 // simpleListTaskRows projects only a visible slice when list order needs no
 // filtering, sorting, searching, or grouping.
 func (m Model) simpleListTaskRows(offset, limit int) ([]TaskRow, int, bool) {
-	if m.UI.GroupBy != TaskGroupNone || m.UI.SubtaskDisplay != SubtaskDisplaySeparate || len(m.UI.SubtaskOverrides) > 0 || m.UI.SearchActive || m.UI.FilterActive || len(m.UI.SortBy) > 0 || m.UI.SelectedNode.Kind != TreeNodeList {
+	if m.UI.MeMode || m.UI.GroupBy != TaskGroupNone || m.UI.SubtaskDisplay != SubtaskDisplaySeparate || len(m.UI.SubtaskOverrides) > 0 || m.UI.SearchActive || m.UI.FilterActive || len(m.UI.SortBy) > 0 || m.UI.SelectedNode.Kind != TreeNodeList {
 		return nil, 0, false
 	}
 	list, ok := m.selectedList()
@@ -320,6 +324,22 @@ func (m Model) simpleListTaskRows(offset, limit int) ([]TaskRow, int, bool) {
 		}
 	}
 	return rows, offset, true
+}
+
+func taskAssignedTo(assignees string, user AuthenticatedUser) bool {
+	identities := []string{user.Username, user.Name, user.ID}
+	for _, assignee := range strings.Split(assignees, ",") {
+		assignee = normalize(assignee)
+		if assignee == "" {
+			continue
+		}
+		for _, identity := range identities {
+			if identity != "" && assignee == normalize(identity) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (m Model) simpleListTaskRow(task Task, list List, listName, spaceName, providerName string) TaskRow {

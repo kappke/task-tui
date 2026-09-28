@@ -1895,6 +1895,26 @@ func (h *foundationHandler) Handle(ctx context.Context, input command.Command) (
 	if input.Kind == command.KindQuit {
 		return command.Event{Kind: command.EventQuit}, nil
 	}
+	if input.Kind == command.KindCurrentUser {
+		fetcher := h.taskFetchers[ProviderID(input.ProviderID)]
+		if fetcher == nil {
+			return command.Event{}, fmt.Errorf("resolve authenticated user for provider %s: provider unavailable", input.ProviderID)
+		}
+		currentUserProvider, ok := fetcher.Provider.(providerpkg.CurrentUserProvider)
+		if !ok {
+			return command.Event{}, fmt.Errorf("resolve authenticated user for provider %s: %w", input.ProviderID, ErrUnsupported)
+		}
+		user, err := currentUserProvider.CurrentUser(ctx)
+		if err != nil {
+			return command.Event{}, fmt.Errorf("resolve authenticated user for provider %s: %w", input.ProviderID, err)
+		}
+		return command.Event{
+			Kind:     command.EventCurrentUser,
+			UserID:   user.ID,
+			Username: user.Username,
+			Name:     user.Name,
+		}, nil
+	}
 	if input.Kind == command.KindFetchLists || input.Kind == command.KindFetchTasks || input.Kind == command.KindFetchTask {
 		if h.sync != nil {
 			if err := h.sync.Fetch(ctx, input); err != nil {
@@ -3298,6 +3318,14 @@ func (u *foundationUIController) teaCommand(ctx context.Context, input foundatio
 		if err != nil {
 			return foundationtui.ErrorMsg{Err: err, Text: SafeErrorText(err)}
 		}
+		if input.Kind == foundationtui.CommandCurrentUser && event.Kind == command.EventCurrentUser {
+			return foundationtui.AuthenticatedUserMsg{
+				ProviderID: input.ProviderID,
+				ID:         event.UserID,
+				Username:   event.Username,
+				Name:       event.Name,
+			}
+		}
 		if event.Kind == command.EventChanged && u.load != nil {
 			view, err := u.load(ctx)
 			if err != nil {
@@ -3573,6 +3601,8 @@ func foundationUICommand(input foundationtui.AppCommand) (command.Command, bool,
 		}, true, nil
 	case foundationtui.CommandSearch:
 		return command.Command{Kind: command.KindSearch, Query: input.Query}, true, nil
+	case foundationtui.CommandCurrentUser:
+		return command.Command{Kind: command.KindCurrentUser, ProviderID: string(input.ProviderID)}, true, nil
 	case foundationtui.CommandFetchLists:
 		return command.Command{Kind: command.KindFetchLists, ProviderID: string(input.ProviderID), SpaceID: string(input.SpaceID)}, true, nil
 	case foundationtui.CommandFetchTasks:

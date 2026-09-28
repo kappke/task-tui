@@ -60,6 +60,8 @@ func (m Model) updateMessage(msg Message) (Model, Cmd) {
 		return m, nil
 	case SnapshotMsg:
 		return m.applySnapshot(value.Data), nil
+	case AuthenticatedUserMsg:
+		return m.applyAuthenticatedUser(value), nil
 	case TasksLoadedMsg:
 		return m.applyTasksLoaded(value), nil
 	case TrackingTickMsg:
@@ -304,7 +306,17 @@ func firstListIndex(nodes []TreeNode) int {
 func (m *Model) applySnapshot(data Snapshot) Model {
 	oldNode := m.UI.SelectedNode
 	oldTask := m.UI.SelectedTask
+	previousUsers := append([]AuthenticatedUser(nil), m.Data.AuthenticatedUsers...)
 	m.Data = cloneSnapshot(data)
+	usersByProvider := make(map[ProviderID]bool, len(m.Data.AuthenticatedUsers))
+	for _, user := range m.Data.AuthenticatedUsers {
+		usersByProvider[user.ProviderID] = true
+	}
+	for _, user := range previousUsers {
+		if !usersByProvider[user.ProviderID] {
+			m.Data.AuthenticatedUsers = append(m.Data.AuthenticatedUsers, user)
+		}
+	}
 	m.UI.ClockNow = time.Now().UTC()
 	if m.UI.Mode == ModeTrackingHistory {
 		m.UI.TrackingHistoryCursor = clamp(m.UI.TrackingHistoryCursor, 0, maxInt(len(m.Data.TrackedTimeEntries)-1, 0))
@@ -528,6 +540,7 @@ func (m Model) applySyncState(event SyncStateMsg) Model {
 }
 
 func (m Model) applyError(event ErrorMsg) Model {
+	m.UI.MeModePending = false
 	text := strings.TrimSpace(event.Text)
 	if text == "" && event.Err != nil {
 		text = event.Err.Error()
@@ -762,6 +775,8 @@ func (m Model) updateBrowse(key KeyMsg, action Action) (Model, Cmd) {
 		m.UI.TrackingHistoryCursor = 0
 		m.Status = Status{Level: StatusInfo, Text: "Loading tracked time history..."}
 		return m, m.emit(AppCommand{Kind: CommandLoadTrackingHistory})
+	case ActionToggleMeMode:
+		return m.toggleMeMode()
 	case ActionDelete:
 		command, ok := m.taskCommand(CommandDeleteTask)
 		if !ok {
@@ -1825,6 +1840,91 @@ func (m Model) applyFilter(filter Filter, command AppCommand) (Model, Cmd) {
 	return m, m.emit(command)
 }
 
+func (m Model) toggleMeMode() (Model, Cmd) {
+	if m.UI.MeMode {
+		m.UI.MeMode = false
+		m.UI.TaskCursor = 0
+		m.UI.SelectedTask = TaskRef{}
+		m.selectTaskAt(0)
+		m.keepVisible()
+		m.Status = Status{Level: StatusInfo, Text: "Me mode off"}
+		return m, nil
+	}
+	if m.UI.MeModePending {
+		return m, nil
+	}
+	if m.UI.ActiveProviderID == "" {
+		m.Status = Status{Level: StatusWarning, Text: "Select an authenticated provider to enable me mode"}
+		return m, nil
+	}
+	if user, ok := m.authenticatedUser(m.UI.ActiveProviderID); ok {
+		m.UI.MeMode = true
+		m.UI.TaskCursor = 0
+		m.UI.SelectedTask = TaskRef{}
+		m.selectTaskAt(0)
+		m.keepVisible()
+		m.Status = Status{Level: StatusInfo, Text: fmt.Sprintf("Me mode on for %s: %d task(s)", authenticatedUserLabel(user), len(m.VisibleTasks()))}
+		return m, nil
+	}
+	m.UI.MeModePending = true
+	m.Status = Status{Level: StatusInfo, Text: "Resolving authenticated user..."}
+	return m, m.emit(AppCommand{Kind: CommandCurrentUser, ProviderID: m.UI.ActiveProviderID})
+}
+
+func (m Model) applyAuthenticatedUser(event AuthenticatedUserMsg) Model {
+	m.UI.MeModePending = false
+	user := AuthenticatedUser{
+		ProviderID: event.ProviderID,
+		ID:         strings.TrimSpace(event.ID),
+		Username:   strings.TrimSpace(event.Username),
+		Name:       strings.TrimSpace(event.Name),
+	}
+	if user.ProviderID == "" || (user.ID == "" && user.Username == "" && user.Name == "") {
+		m.Status = Status{Level: StatusError, Text: "Provider returned no authenticated user identity"}
+		return m
+	}
+	updated := false
+	for index := range m.Data.AuthenticatedUsers {
+		if m.Data.AuthenticatedUsers[index].ProviderID == user.ProviderID {
+			m.Data.AuthenticatedUsers[index] = user
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		m.Data.AuthenticatedUsers = append(m.Data.AuthenticatedUsers, user)
+	}
+	if user.ProviderID != m.UI.ActiveProviderID {
+		return m
+	}
+	m.UI.MeMode = true
+	m.UI.TaskCursor = 0
+	m.UI.SelectedTask = TaskRef{}
+	m.selectTaskAt(0)
+	m.keepVisible()
+	m.Status = Status{Level: StatusInfo, Text: fmt.Sprintf("Me mode on for %s: %d task(s)", authenticatedUserLabel(user), len(m.VisibleTasks()))}
+	return m
+}
+
+func (m Model) authenticatedUser(providerID ProviderID) (AuthenticatedUser, bool) {
+	for _, user := range m.Data.AuthenticatedUsers {
+		if user.ProviderID == providerID {
+			return user, true
+		}
+	}
+	return AuthenticatedUser{}, false
+}
+
+func authenticatedUserLabel(user AuthenticatedUser) string {
+	if user.Username != "" {
+		return user.Username
+	}
+	if user.Name != "" {
+		return user.Name
+	}
+	return user.ID
+}
+
 func (m Model) applySort(criteria []SortCriterion, command AppCommand) (Model, Cmd) {
 	if _, ok := m.selectedList(); !ok {
 		m.Status = Status{Level: StatusWarning, Text: "Select a list before sorting tasks"}
@@ -1981,7 +2081,7 @@ func (m Model) submitPalette() (Model, Cmd) {
 	case CommandHelp:
 		m.UI.Mode = ModeBrowse
 		m.UI.Input = ""
-		m.Status = Status{Level: StatusInfo, Text: "Keys: j/k move, tab switch panel, h/l scroll, enter open, n/e/x/d, / search, f filter, o sort, c columns, r refresh; :sort and :filter edit task views"}
+		m.Status = Status{Level: StatusInfo, Text: "Keys: j/k move, tab switch panel, h/l scroll, enter open, n/e/x/d, M me mode, / search, f filter, o sort, c columns, r refresh; :sort and :filter edit task views"}
 		return m, nil
 	default:
 		m.Status = Status{Level: StatusError, Text: "Unsupported command"}
@@ -1996,6 +2096,8 @@ func (m Model) switchProvider(requested ProviderID) (Model, Cmd) {
 			continue
 		}
 		m.UI.ActiveProviderID = provider.ID
+		m.UI.MeMode = false
+		m.UI.MeModePending = false
 		m.UI.Mode = ModeBrowse
 		m.UI.Input = ""
 		m.UI.InputCursor = 0
@@ -2231,6 +2333,15 @@ func (m *Model) cancelBrowseView() {
 		m.UI.SelectedTask = TaskRef{}
 		m.selectTaskAt(0)
 		m.Status = Status{Level: StatusInfo, Text: "Filter cleared"}
+		return
+	}
+	if m.UI.MeMode {
+		m.UI.MeMode = false
+		m.UI.TaskCursor = 0
+		m.UI.SelectedTask = TaskRef{}
+		m.selectTaskAt(0)
+		m.keepVisible()
+		m.Status = Status{Level: StatusInfo, Text: "Me mode off"}
 	}
 }
 

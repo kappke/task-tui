@@ -21,7 +21,11 @@ func (m Model) View() string {
 		height = 24
 	}
 
-	header := fit(" TASK MANAGER | overall sync: "+string(m.overallSync()), width)
+	headerText := " TASK MANAGER | overall sync: " + string(m.overallSync())
+	if m.UI.MeMode {
+		headerText += " | ME"
+	}
+	header := fit(headerText, width)
 	trackingLine := m.trackingLine()
 	divider := fit(strings.Repeat("-", width), width)
 	modeLine := m.modeLine(width)
@@ -726,7 +730,7 @@ func (m Model) footerLine() string {
 	if m.UI.Mode == ModeTrackingHistory {
 		return "j/k navigate | g/G first/last | r refresh history | esc close"
 	}
-	return "j/k move | tab panel | b lists panel | h/l scroll | enter open | +/- expand | g/G first/last | n new | e edit | x complete | d delete | t track/switch | T stop | a tracked time | / search | f filter | o sort | c columns | : commands | r refresh | q quit"
+	return "j/k move | tab panel | b lists panel | h/l scroll | enter open | M me | +/- expand | g/G first/last | n new | e edit | x complete | d delete | t track/switch | T stop | a tracked time | / search | f filter | o sort | c columns | : commands | r refresh | q quit"
 }
 
 func (m Model) trackingLine() string {

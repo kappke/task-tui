@@ -76,6 +76,20 @@ type Authentication = Authenticator
 // AuthProvider is a concise alias for the optional authentication contract.
 type AuthProvider = Authenticator
 
+// UserIdentity is a provider-neutral representation of the authenticated
+// account used by local presentation features such as "me" filtering.
+type UserIdentity struct {
+	ID       string
+	Username string
+	Name     string
+}
+
+// CurrentUserProvider exposes the identity associated with one authenticated
+// provider instance.
+type CurrentUserProvider interface {
+	CurrentUser(ctx context.Context) (UserIdentity, error)
+}
+
 // StatusMetadataProvider exposes provider-owned editor options without adding
 // provider-specific fields to the core hierarchy models.
 type StatusMetadataProvider interface {

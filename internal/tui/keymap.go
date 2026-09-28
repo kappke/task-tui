@@ -34,6 +34,7 @@ const (
 	ActionTrackTask           Action = "track_task"
 	ActionStopTracking        Action = "stop_tracking"
 	ActionShowTrackingHistory Action = "show_tracking_history"
+	ActionToggleMeMode        Action = "toggle_me_mode"
 	ActionRefresh             Action = "refresh"
 	ActionCommand             Action = "command"
 	ActionCancel              Action = "cancel"
@@ -83,6 +84,7 @@ func DefaultKeyMap() KeyMap {
 		"t":           ActionTrackTask,
 		"T":           ActionStopTracking,
 		"a":           ActionShowTrackingHistory,
+		"M":           ActionToggleMeMode,
 		"r":           ActionRefresh,
 		":":           ActionCommand,
 		"esc":         ActionCancel,
@@ -188,7 +190,7 @@ func normalizeKey(value string) string {
 	case "\b", "\x7f":
 		return "backspace"
 	}
-	if value == "G" || value == "T" {
+	if value == "G" || value == "M" || value == "T" {
 		return value
 	}
 	return strings.TrimSpace(strings.ToLower(value))

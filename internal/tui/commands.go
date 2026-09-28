@@ -47,6 +47,7 @@ const (
 	CommandRefresh             CommandKind = "refresh"
 	CommandQuit                CommandKind = "quit"
 	CommandHelp                CommandKind = "help"
+	CommandCurrentUser         CommandKind = "current_user"
 )
 
 // Short aliases make command construction pleasant for small adapters while

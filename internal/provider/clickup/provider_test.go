@@ -13,6 +13,33 @@ import (
 	"github.com/kappke/task-tui/internal/domain"
 )
 
+func TestProviderReturnsAuthenticatedUserIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/user" {
+			t.Errorf("request = %s %s, want GET /user", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "test-token" {
+			t.Errorf("authorization = %q, want test-token", r.Header.Get("Authorization"))
+		}
+		_, _ = io.WriteString(w, `{"user":{"id":42,"username":"ada","name":"Ada Lovelace"}}`)
+	}))
+	defer server.Close()
+
+	remote := NewWithConfig(ProviderConfig{
+		ProviderID:  "work",
+		BaseURL:     server.URL,
+		HTTPClient:  server.Client(),
+		TokenSource: "test-token",
+	})
+	user, err := remote.CurrentUser(context.Background())
+	if err != nil {
+		t.Fatalf("CurrentUser() error = %v", err)
+	}
+	if user.ID != "42" || user.Username != "ada" || user.Name != "Ada Lovelace" {
+		t.Fatalf("CurrentUser() = %#v", user)
+	}
+}
+
 func TestProviderRejectsMismatchedTaskProviderBeforeHTTP(t *testing.T) {
 	var requests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

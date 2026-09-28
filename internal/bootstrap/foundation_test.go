@@ -354,6 +354,21 @@ func TestFoundationHandlerStartsAndStopsLocalTaskTracking(t *testing.T) {
 	}
 }
 
+func TestFoundationHandlerResolvesAuthenticatedProviderUser(t *testing.T) {
+	remote := &foundationTestProvider{id: "work"}
+	fetcher := newCachedProvider(remote, nil)
+	handler := newFoundationHandler(app.NewService(nil, nil), nil, nil, nil,
+		map[ProviderID]*cachedProvider{"work": fetcher}, nil, "")
+
+	event, err := handler.Handle(context.Background(), command.Command{Kind: command.KindCurrentUser, ProviderID: "work"})
+	if err != nil {
+		t.Fatalf("resolve authenticated user: %v", err)
+	}
+	if event.Kind != command.EventCurrentUser || event.UserID != "42" || event.Username != "ada" || event.Name != "Ada Lovelace" {
+		t.Fatalf("authenticated-user event = %#v", event)
+	}
+}
+
 func TestFoundationHandlerPollsAndReconcilesExternalClickUpTracking(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlite.Open(":memory:")
@@ -1516,10 +1531,15 @@ func (h *foundationCaptureHandler) Handle(_ context.Context, value command.Comma
 
 var _ providerpkg.Provider = (*foundationTestProvider)(nil)
 var _ providerpkg.TaskColumnMetadataProvider = (*foundationTestProvider)(nil)
+var _ providerpkg.CurrentUserProvider = (*foundationTestProvider)(nil)
 
 func (p *foundationTestProvider) ID() domain.ProviderID { return p.id }
 
 func (p *foundationTestProvider) Type() domain.ProviderType { return domain.ProviderTypeClickUp }
+
+func (p *foundationTestProvider) CurrentUser(context.Context) (providerpkg.UserIdentity, error) {
+	return providerpkg.UserIdentity{ID: "42", Username: "ada", Name: "Ada Lovelace"}, nil
+}
 
 func (p *foundationTestProvider) Capabilities() domain.Capabilities {
 	return domain.Capabilities{

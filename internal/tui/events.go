@@ -21,6 +21,15 @@ type SnapshotMsg struct {
 	Data Snapshot
 }
 
+// AuthenticatedUserMsg delivers an account identity resolved asynchronously
+// for the me-mode shortcut.
+type AuthenticatedUserMsg struct {
+	ProviderID ProviderID
+	ID         string
+	Username   string
+	Name       string
+}
+
 // CachedDataMsg and DataLoadedMsg are descriptive aliases for the same event.
 type CachedDataMsg = SnapshotMsg
 type DataLoadedMsg = SnapshotMsg

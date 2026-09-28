@@ -45,6 +45,7 @@ func TestDefaultKeyMap(t *testing.T) {
 		{key: "c", action: ActionConfigureColumns},
 		{key: "t", action: ActionTrackTask},
 		{key: "T", action: ActionStopTracking},
+		{key: "M", action: ActionToggleMeMode},
 		{key: "r", action: ActionRefresh},
 		{key: ":", action: ActionCommand},
 		{key: "q", action: ActionQuit},
@@ -56,6 +57,56 @@ func TestDefaultKeyMap(t *testing.T) {
 				t.Fatalf("MapKey(%q) = %q, want %q", test.key, got, test.action)
 			}
 		})
+	}
+}
+
+func TestMeModeShortcutResolvesUserAndFiltersTasks(t *testing.T) {
+	snapshot := testSnapshot()
+	snapshot.Tasks[0].Assignee = "Alice, Bob"
+	snapshot.Tasks[1].Assignee = "Carol"
+	model := New(snapshot)
+
+	model, command := model.Update(KeyMsg{Key: "M"})
+	request := commandMessage(t, command)
+	if request.Kind != CommandCurrentUser || request.ProviderID != "work" || !model.UI.MeModePending {
+		t.Fatalf("me-mode request = %#v, pending=%v", request, model.UI.MeModePending)
+	}
+
+	model, _ = model.Update(AuthenticatedUserMsg{ProviderID: "work", ID: "42", Username: "alice", Name: "Alice Smith"})
+	if !model.UI.MeMode || model.UI.MeModePending {
+		t.Fatalf("me mode state = active %v, pending %v", model.UI.MeMode, model.UI.MeModePending)
+	}
+	if got := visibleTaskIDs(model); !reflect.DeepEqual(got, []TaskID{"same"}) {
+		t.Fatalf("me-mode tasks = %v, want only Alice's task", got)
+	}
+	if view := model.View(); !strings.Contains(view, "| ME") || !strings.Contains(view, "M me") {
+		t.Fatalf("me mode is not indicated in the view:\n%s", view)
+	}
+
+	model, command = model.Update(KeyMsg{Key: "M"})
+	if command != nil || model.UI.MeMode {
+		t.Fatalf("second M should disable me mode: active=%v command=%v", model.UI.MeMode, command)
+	}
+	if got := visibleTaskIDs(model); len(got) != 2 {
+		t.Fatalf("tasks after disabling me mode = %v, want both current-list tasks", got)
+	}
+}
+
+func TestCharmAppliesResolvedUserToMeModeFilter(t *testing.T) {
+	snapshot := testSnapshot()
+	snapshot.Tasks[0].Assignee = "Alice, Bob"
+	snapshot.Tasks[1].Assignee = "Carol"
+	charm := NewCharmModel(New(snapshot), CharmOptions{})
+	updated, _ := charm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
+	charm = updated.(*CharmModel)
+
+	updated, _ = charm.Update(AuthenticatedUserMsg{ProviderID: "work", ID: "42", Username: "alice", Name: "Alice Smith"})
+	charm = updated.(*CharmModel)
+	if !charm.CoreModel().UI.MeMode {
+		t.Fatal("resolved user message did not enable me mode")
+	}
+	if got := visibleTaskIDs(charm.CoreModel()); !reflect.DeepEqual(got, []TaskID{"same"}) {
+		t.Fatalf("Charm me-mode tasks = %v, want only Alice's task", got)
 	}
 }
 

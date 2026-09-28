@@ -287,6 +287,19 @@ func (c *Client) Teams(ctx context.Context) ([]wireTeam, error) {
 	return c.GetTeams(ctx)
 }
 
+func (c *Client) GetAuthenticatedUser(ctx context.Context) (wireUser, error) {
+	const endpoint = "/user"
+	var response currentUserResponse
+	if err := c.doJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
+		return wireUser{}, err
+	}
+	user := response.User
+	if user.ID.String() == "" && strings.TrimSpace(user.Username) == "" && strings.TrimSpace(user.Name) == "" {
+		return wireUser{}, c.malformedResponse(http.MethodGet, endpoint, "authenticated user identity is missing")
+	}
+	return user, nil
+}
+
 func (c *Client) GetSpaces(ctx context.Context, teamIDs ...string) ([]wireSpace, error) {
 	teamID := c.teamID
 	if len(teamIDs) > 0 {
