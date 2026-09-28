@@ -114,7 +114,7 @@ func ParseTaskDocumentWithOptions(data string, original Task, options TaskEditor
 		if err != nil {
 			return Task{}, fmt.Errorf("status: %w", err)
 		}
-		if !containsString(options.Statuses, parsed) {
+		if !containsString(taskStatusOptionNames(options.Statuses), parsed) {
 			return Task{}, fmt.Errorf("status: unsupported value %q", parsed)
 		}
 	}

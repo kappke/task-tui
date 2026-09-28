@@ -1202,6 +1202,72 @@ func TestTaskGroupingByStatusAssigneeAndHierarchy(t *testing.T) {
 	}
 }
 
+func TestTaskStatusGroupingUsesProviderOrder(t *testing.T) {
+	snapshot := testSnapshot()
+	snapshot.Tasks = []Task{
+		{ID: "done", ProviderID: "work", ListID: "backend", Title: "Done", Status: "done"},
+		{ID: "waiting", ProviderID: "work", ListID: "backend", Title: "Waiting", Status: "waiting"},
+		{ID: "open", ProviderID: "work", ListID: "backend", Title: "Open", Status: "open"},
+	}
+	snapshot.EditorOptions = []TaskEditorOptions{{
+		ProviderID: "work",
+		SpaceID:    "engineering",
+		ListID:     "backend",
+		Statuses: []TaskStatusOption{
+			{Name: "done", Order: 2},
+			{Name: "open", Order: 0},
+		},
+	}}
+	model := New(snapshot)
+	model.UI.SelectedNode = TreeNodeRef{Kind: TreeNodeList, ProviderID: "work", SpaceID: "engineering", ListID: "backend"}
+	model.UI.GroupBy = TaskGroupStatus
+
+	groups := model.VisibleTaskGroups()
+	if len(groups) != 3 || groups[0].Label != "open" || groups[1].Label != "done" || groups[2].Label != "waiting" {
+		t.Fatalf("status groups = %#v, want provider order open/done followed by unknown statuses", groups)
+	}
+}
+
+func TestTaskStatusUsesProviderColor(t *testing.T) {
+	snapshot := testSnapshot()
+	snapshot.EditorOptions = []TaskEditorOptions{{
+		ProviderID: "work",
+		SpaceID:    "engineering",
+		ListID:     "backend",
+		Statuses:   []TaskStatusOption{{Name: "open", Order: 0, Color: "#12AB34"}},
+	}}
+	model := New(snapshot)
+	row := model.VisibleTasks()[0]
+	if color := model.taskStatusColor(row); color != "#12AB34" {
+		t.Fatalf("status color = %q, want provider color #12AB34", color)
+	}
+	if foreground := taskStatusStyle(row.Task.Status, model.taskStatusColor(row)).GetForeground(); foreground != lipgloss.Color("#12AB34") {
+		t.Fatalf("status foreground = %#v, want provider color", foreground)
+	}
+	if foreground := taskStatusStyle(row.Task.Status, "invalid").GetForeground(); foreground == lipgloss.Color("invalid") {
+		t.Fatalf("invalid provider color was used: %#v", foreground)
+	}
+}
+
+func TestTaskStatusCompletionsUseProviderOrder(t *testing.T) {
+	snapshot := testSnapshot()
+	snapshot.EditorOptions = []TaskEditorOptions{{
+		ProviderID: "work",
+		SpaceID:    "engineering",
+		ListID:     "backend",
+		Statuses: []TaskStatusOption{
+			{Name: "done", Order: 1},
+			{Name: "open", Order: 0},
+		},
+	}}
+	model := New(snapshot)
+	model.UI.SelectedNode = TreeNodeRef{Kind: TreeNodeList, ProviderID: "work", SpaceID: "engineering", ListID: "backend"}
+	got := model.filterValueCompletions("status")
+	if len(got) < 2 || got[0] != "open" || got[1] != "done" {
+		t.Fatalf("status completions = %#v, want provider order open/done first", got)
+	}
+}
+
 func TestTaskGroupingCommandPalette(t *testing.T) {
 	for input, want := range map[string]TaskGroupMode{
 		"group status":            TaskGroupStatus,

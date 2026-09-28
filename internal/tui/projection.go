@@ -351,10 +351,61 @@ func (m Model) visibleTaskGroups(aggregate bool) []TaskGroup {
 	if m.UI.GroupBy == TaskGroupNone {
 		return groups
 	}
+	if m.UI.GroupBy == TaskGroupStatus {
+		sort.SliceStable(groups, func(left, right int) bool {
+			leftOrder, leftConfigured := m.statusOrder(groups[left].Key)
+			rightOrder, rightConfigured := m.statusOrder(groups[right].Key)
+			if leftConfigured != rightConfigured {
+				return leftConfigured
+			}
+			if leftConfigured && leftOrder != rightOrder {
+				return leftOrder < rightOrder
+			}
+			return normalize(groups[left].Label) < normalize(groups[right].Label)
+		})
+	}
 	for index := range groups {
 		groups[index].Collapsed = m.UI.CollapsedGroups[taskGroupStateKey(m.UI.GroupBy, groups[index].Key)]
 	}
 	return groups
+}
+
+func (m Model) statusOrder(status string) (int, bool) {
+	selected, hasList := m.selectedList()
+	for _, options := range m.Data.EditorOptions {
+		if hasList {
+			if options.ProviderID != selected.ProviderID || options.ListID != selected.ID {
+				continue
+			}
+		} else {
+			if m.UI.ActiveProviderID != "" && options.ProviderID != m.UI.ActiveProviderID {
+				continue
+			}
+			if m.UI.SelectedNode.Kind == TreeNodeSpace && (options.ProviderID != m.UI.SelectedNode.ProviderID || options.SpaceID != m.UI.SelectedNode.SpaceID) {
+				continue
+			}
+		}
+		for order, option := range orderedTaskStatusOptions(options.Statuses) {
+			if normalize(option.Name) == status {
+				return order, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func (m Model) taskStatusColor(row TaskRow) string {
+	for _, options := range m.Data.EditorOptions {
+		if options.ProviderID != row.ProviderID || options.ListID != row.ListID {
+			continue
+		}
+		for _, option := range options.Statuses {
+			if normalize(option.Name) == normalize(row.Task.Status) {
+				return option.Color
+			}
+		}
+	}
+	return ""
 }
 
 func flattenTaskGroups(groups []TaskGroup) []TaskRow {

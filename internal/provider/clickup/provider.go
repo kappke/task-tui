@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -362,8 +363,13 @@ func (p *Provider) ListStatusMetadata(list domain.List) []domain.ProviderMetadat
 func statusMetadata(providerID domain.ProviderID, entityType domain.EntityType, entityID string, statuses []wireStatus, override bool) domain.ProviderMetadata {
 	options := make([]StatusOption, 0, len(statuses))
 	for index, status := range statuses {
-		options = append(options, StatusOption{Name: status.Status, Type: status.Type, Order: index, Color: status.Color})
+		order := index
+		if parsed, err := strconv.Atoi(strings.TrimSpace(status.OrderIndex.String())); err == nil {
+			order = parsed
+		}
+		options = append(options, StatusOption{Name: status.Status, Type: status.Type, Order: order, Color: status.Color})
 	}
+	sort.SliceStable(options, func(left, right int) bool { return options[left].Order < options[right].Order })
 	value, _ := json.Marshal(statusMetadataValue{Statuses: options, OverrideStatuses: override})
 	return domain.ProviderMetadata{ProviderID: providerID, EntityType: entityType, EntityID: entityID, Key: "clickup.statuses", Value: string(value)}
 }

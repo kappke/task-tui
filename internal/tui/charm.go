@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -365,7 +366,7 @@ func (m *CharmModel) taskEditorOptions(task Task) TaskEditorOptions {
 
 func (m *CharmModel) createTaskEditorScript(task Task) (string, error) {
 	options := m.taskEditorOptions(task)
-	values := append([]string{}, options.Statuses...)
+	values := taskStatusOptionNames(options.Statuses)
 	values = append(values, "urgent", "high", "normal", "low")
 	quoted := make([]string, 0, len(values))
 	for _, value := range values {
@@ -819,7 +820,7 @@ func (m *CharmModel) charmTaskLines(width, lineLimit int) []string {
 		visualIndex++
 		if group.Collapsed {
 			if groupIndex >= offset && len(lines) < lineLimit {
-				heading := fit(m.core.taskGroupLine(group), width)
+				heading := fit(m.charmTaskGroupLine(group), width)
 				if m.core.taskGroupSelected(group) {
 					lines = append(lines, charmSelectedStyle.Render(heading))
 				} else {
@@ -834,7 +835,7 @@ func (m *CharmModel) charmTaskLines(width, lineLimit int) []string {
 			continue
 		}
 		if groupIndex >= offset && len(lines) < lineLimit {
-			heading := fit(m.core.taskGroupLine(group), width)
+			heading := fit(m.charmTaskGroupLine(group), width)
 			if m.core.taskGroupSelected(group) {
 				lines = append(lines, charmSelectedStyle.Render(heading))
 			} else {
@@ -861,7 +862,7 @@ func (m *CharmModel) charmTaskLines(width, lineLimit int) []string {
 func (m *CharmModel) charmTaskRowLine(row TaskRow, marker string, width int, selected bool, columns []taskTableColumn) string {
 	offset := m.core.UI.TaskHorizontalOffset
 	line := m.core.taskTableLineAtOffset(row, marker, columns, width, offset)
-	line = colorTaskStatusCell(line, row.Task.Status, offset, marker, columns, m.core.fixedTaskColumnCount(columns))
+	line = colorTaskStatusCell(line, row.Task.Status, m.core.taskStatusColor(row), offset, marker, columns, m.core.fixedTaskColumnCount(columns))
 	if selected {
 		if m.core.UI.Focus == PanelTasks {
 			return charmSelectedTaskStyle.Render(line)
@@ -871,7 +872,22 @@ func (m *CharmModel) charmTaskRowLine(row TaskRow, marker string, width int, sel
 	return line
 }
 
-func colorTaskStatusCell(line, status string, offset int, marker string, columns []taskTableColumn, fixedCount int) string {
+func (m *CharmModel) charmTaskGroupLine(group TaskGroup) string {
+	line := m.core.taskGroupLine(group)
+	if m.core.UI.GroupBy != TaskGroupStatus || len(group.Rows) == 0 {
+		return line
+	}
+	label := displayTaskStatus(group.Label)
+	start := strings.Index(line, label)
+	if start < 0 {
+		return line
+	}
+	status := group.Rows[0].Task.Status
+	style := taskStatusStyle(status, m.core.taskStatusColor(group.Rows[0]))
+	return line[:start] + style.Render(line[start:start+len(label)]) + line[start+len(label):]
+}
+
+func colorTaskStatusCell(line, status, color string, offset int, marker string, columns []taskTableColumn, fixedCount int) string {
 	if line == "" {
 		return line
 	}
@@ -888,7 +904,7 @@ func colorTaskStatusCell(line, status string, offset int, marker string, columns
 	if start == end {
 		return line
 	}
-	styled := taskStatusStyle(status).Render(string(visible[start:end]))
+	styled := taskStatusStyle(status, color).Render(string(visible[start:end]))
 	return string(visible[:start]) + styled + string(visible[end:])
 }
 
@@ -950,7 +966,12 @@ func taskStatusCellRange(columns []taskTableColumn, fixedCount, offset, markerWi
 	return 0, 0, false
 }
 
-func taskStatusStyle(status string) lipgloss.Style {
+func taskStatusStyle(status, color string) lipgloss.Style {
+	if len(color) == 7 && color[0] == '#' {
+		if _, err := strconv.ParseUint(color[1:], 16, 24); err == nil {
+			return lipgloss.NewStyle().Foreground(lipgloss.Color(color))
+		}
+	}
 	switch normalize(status) {
 	case "done", "complete", "completed", "closed":
 		return charmGoodStyle

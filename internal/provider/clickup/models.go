@@ -148,9 +148,10 @@ type wireAssignee struct {
 }
 
 type wireStatus struct {
-	Status string `json:"status"`
-	Color  string `json:"color"`
-	Type   string `json:"type"`
+	Status     string     `json:"status"`
+	Color      string     `json:"color"`
+	Type       string     `json:"type"`
+	OrderIndex wireString `json:"orderindex"`
 }
 
 type wirePriority struct {

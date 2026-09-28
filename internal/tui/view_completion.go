@@ -270,26 +270,34 @@ func (m Model) filterValueCompletions(column string) []string {
 		return nil
 	}
 	values := make([]string, 0)
+	seen := make(map[string]struct{})
+	preserveStatusOrder := false
 	add := func(value string) {
 		value = strings.TrimSpace(value)
 		if value == "" {
 			return
 		}
+		key := normalize(value)
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
 		values = append(values, quoteCompletionName(value))
 	}
 	switch resolved {
 	case taskColumnStatus:
-		for _, task := range m.tasksInCompletionScope() {
-			add(task.Status)
-		}
 		if list, ok := m.selectedList(); ok {
 			for _, options := range m.Data.EditorOptions {
 				if options.ProviderID == list.ProviderID && options.ListID == list.ID {
-					for _, status := range options.Statuses {
-						add(status)
+					preserveStatusOrder = preserveStatusOrder || len(options.Statuses) > 0
+					for _, status := range orderedTaskStatusOptions(options.Statuses) {
+						add(status.Name)
 					}
 				}
 			}
+		}
+		for _, task := range m.tasksInCompletionScope() {
+			add(task.Status)
 		}
 	case taskColumnPriority:
 		for _, priority := range []Priority{PriorityNone, PriorityLow, PriorityNormal, PriorityHigh, PriorityUrgent} {
@@ -343,7 +351,7 @@ func (m Model) filterValueCompletions(column string) []string {
 		}
 	}
 	values = uniqueCompletions(values)
-	if resolved != taskColumnPriority {
+	if resolved != taskColumnPriority && !(resolved == taskColumnStatus && preserveStatusOrder) {
 		sort.SliceStable(values, func(i, j int) bool { return normalize(values[i]) < normalize(values[j]) })
 	}
 	if len(values) > 40 {

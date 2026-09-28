@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +51,53 @@ func TestBuildUsesFoundationGraphAndRendersCachedProviders(t *testing.T) {
 	}
 	if count := strings.Count(output.String(), "TASK MANAGER"); count != 1 {
 		t.Fatalf("headless render count = %d, want one frame", count)
+	}
+}
+
+func TestStatusOptionsRetainProviderOrderAndColor(t *testing.T) {
+	metadata := []domain.ProviderMetadata{{
+		Key:   "clickup.statuses",
+		Value: `{"statuses":[{"name":"Review","order":2,"color":"#123456"},{"name":"Ready","order":0,"color":"#abcdef"}]}`,
+	}}
+	got, ok := statusOptions(metadata)
+	if !ok {
+		t.Fatal("status metadata was not recognized")
+	}
+	want := []TaskStatusOption{
+		{Name: "Ready", Order: 0, Color: "#abcdef"},
+		{Name: "Review", Order: 2, Color: "#123456"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("status options = %#v, want %#v", got, want)
+	}
+}
+
+func TestProviderOrderControlsStatusGroupOrder(t *testing.T) {
+	statuses, ok := statusOptions([]domain.ProviderMetadata{{
+		Key:   "clickup.statuses",
+		Value: `{"statuses":[{"name":"Done","order":2},{"name":"Open","order":0},{"name":"Review","order":1}]}`,
+	}})
+	if !ok {
+		t.Fatal("status metadata was not recognized")
+	}
+
+	model := foundationtui.New(foundationSnapshot(View{
+		Providers: []ProviderRecord{{ID: "work", Type: ProviderTypeClickUp, Name: "Work", Enabled: true}},
+		Spaces:    []Space{{ID: "space", ProviderID: "work", Name: "Space"}},
+		Lists:     []List{{ID: "list", ProviderID: "work", SpaceID: "space", Name: "List"}},
+		Tasks: []Task{
+			{ID: "done", ProviderID: "work", ListID: "list", Status: "Done"},
+			{ID: "review", ProviderID: "work", ListID: "list", Status: "Review"},
+			{ID: "open", ProviderID: "work", ListID: "list", Status: "Open"},
+		},
+		EditorOptions: []TaskEditorOptions{{ProviderID: "work", SpaceID: "space", ListID: "list", Statuses: statuses}},
+	}))
+	model.UI.SelectedNode = foundationtui.TreeNodeRef{Kind: foundationtui.TreeNodeList, ProviderID: "work", SpaceID: "space", ListID: "list"}
+	model.UI.GroupBy = foundationtui.TaskGroupStatus
+
+	groups := model.VisibleTaskGroups()
+	if len(groups) != 3 || groups[0].Label != "Open" || groups[1].Label != "Review" || groups[2].Label != "Done" {
+		t.Fatalf("status groups = %#v, want orderindex order Open/Review/Done", groups)
 	}
 }
 

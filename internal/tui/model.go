@@ -8,6 +8,7 @@ package tui
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 	"time"
 
@@ -113,14 +114,20 @@ type TaskColumnPreference struct {
 	Fixed   bool
 }
 
-// TaskEditorOptions contains cached values used by the external editor's
-// buffer-local completion. An empty status list means no provider vocabulary is
-// available and the parser should retain offline-friendly behavior.
+// TaskStatusOption contains provider-owned status ordering and display metadata.
+type TaskStatusOption struct {
+	Name  string
+	Order int
+	Color string
+}
+
+// TaskEditorOptions contains cached values used by the external editor and task
+// presentation. An empty status list means no provider vocabulary is available.
 type TaskEditorOptions struct {
 	ProviderID ProviderID
 	SpaceID    SpaceID
 	ListID     ListID
-	Statuses   []string
+	Statuses   []TaskStatusOption
 }
 
 // Data is a readable alias for integrations that call their local cache data
@@ -429,7 +436,7 @@ func cloneSnapshot(in Snapshot) Snapshot {
 		out.TaskColumnValues[index].Values = cloneColumnValues(in.TaskColumnValues[index].Values)
 	}
 	for index := range out.EditorOptions {
-		out.EditorOptions[index].Statuses = append([]string(nil), in.EditorOptions[index].Statuses...)
+		out.EditorOptions[index].Statuses = append([]TaskStatusOption(nil), in.EditorOptions[index].Statuses...)
 	}
 
 	for i := range out.Providers {
@@ -547,6 +554,20 @@ func cloneCollapsed(in map[string]bool) map[string]bool {
 
 func normalize(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func taskStatusOptionNames(options []TaskStatusOption) []string {
+	names := make([]string, 0, len(options))
+	for _, option := range orderedTaskStatusOptions(options) {
+		names = append(names, option.Name)
+	}
+	return names
+}
+
+func orderedTaskStatusOptions(options []TaskStatusOption) []TaskStatusOption {
+	ordered := append([]TaskStatusOption(nil), options...)
+	sort.SliceStable(ordered, func(left, right int) bool { return ordered[left].Order < ordered[right].Order })
+	return ordered
 }
 
 func isTaskComplete(task Task) bool {

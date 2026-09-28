@@ -322,6 +322,48 @@ func TestProviderMapsPerListTaskColumnsAndCustomValues(t *testing.T) {
 	}
 }
 
+func TestProviderStatusMetadataPreservesOrderAndColors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/space/remote-space/list":
+			_, _ = io.WriteString(w, `{"lists":[{"id":"remote-list","name":"Roadmap"}]}`)
+		case "/space/remote-space/folder":
+			_, _ = io.WriteString(w, `{"folders":[]}`)
+		case "/list/remote-list":
+			_, _ = io.WriteString(w, `{"id":"remote-list","override_statuses":true,"statuses":[{"status":"Review","color":"#abcdef","type":"custom","orderindex":"1"},{"status":"Ready","color":"#123456","type":"open","orderindex":"0"}]}`)
+		case "/list/remote-list/field":
+			_, _ = io.WriteString(w, `{"fields":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	provider := New(newTestClient(ClientConfig{BaseURL: server.URL, HTTPClient: server.Client(), TokenSource: "token"}), ProviderConfig{
+		ProviderID:          "clickup-work",
+		RemoteSpaceResolver: func(domain.SpaceID) (string, error) { return "remote-space", nil },
+	})
+	lists, err := provider.FetchLists(context.Background(), "local-space")
+	if err != nil || len(lists) != 1 {
+		t.Fatalf("FetchLists() = %#v, %v", lists, err)
+	}
+	metadata := provider.ListStatusMetadata(lists[0])
+	if len(metadata) != 1 {
+		t.Fatalf("status metadata = %#v, want one entry", metadata)
+	}
+	var got statusMetadataValue
+	if err := json.Unmarshal([]byte(metadata[0].Value), &got); err != nil {
+		t.Fatalf("decode status metadata: %v", err)
+	}
+	want := []StatusOption{
+		{Name: "Ready", Type: "open", Order: 0, Color: "#123456"},
+		{Name: "Review", Type: "custom", Order: 1, Color: "#abcdef"},
+	}
+	if !reflect.DeepEqual(got.Statuses, want) || !got.OverrideStatuses {
+		t.Fatalf("status metadata = %#v, want ordered options %#v with overrides", got, want)
+	}
+}
+
 func TestProviderFetchTaskUsesRemoteTaskCallAndLocalListIdentity(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/task/remote-task" {

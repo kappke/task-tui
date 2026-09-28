@@ -361,13 +361,13 @@ func (s *foundationDataStore) taskColumnValues(ctx context.Context, providers []
 }
 
 func (s *foundationDataStore) editorOptions(ctx context.Context, spaces []domain.Space, lists []domain.List) ([]TaskEditorOptions, error) {
-	spaceStatuses := make(map[domain.SpaceID][]string, len(spaces))
+	spaceStatuses := make(map[domain.SpaceID][]TaskStatusOption, len(spaces))
 	for _, space := range spaces {
 		metadata, err := s.store.ListMetadata(ctx, space.ProviderID, domain.EntityTypeSpace, string(space.ID))
 		if err != nil {
 			return nil, fmt.Errorf("list editor metadata for space %s: %w", space.ID, err)
 		}
-		spaceStatuses[space.ID], _ = statusNames(metadata)
+		spaceStatuses[space.ID], _ = statusOptions(metadata)
 	}
 	options := make([]TaskEditorOptions, 0, len(lists))
 	for _, list := range lists {
@@ -375,9 +375,9 @@ func (s *foundationDataStore) editorOptions(ctx context.Context, spaces []domain
 		if err != nil {
 			return nil, fmt.Errorf("list editor metadata for list %s: %w", list.ID, err)
 		}
-		statuses, hasListMetadata := statusNames(metadata)
+		statuses, hasListMetadata := statusOptions(metadata)
 		if !hasListMetadata {
-			statuses = append([]string(nil), spaceStatuses[list.SpaceID]...)
+			statuses = append([]TaskStatusOption(nil), spaceStatuses[list.SpaceID]...)
 		}
 		options = append(options, TaskEditorOptions{
 			ProviderID: ProviderID(list.ProviderID), SpaceID: SpaceID(list.SpaceID), ListID: ListID(list.ID), Statuses: statuses,
@@ -386,25 +386,28 @@ func (s *foundationDataStore) editorOptions(ctx context.Context, spaces []domain
 	return options, nil
 }
 
-func statusNames(metadata []domain.ProviderMetadata) ([]string, bool) {
+func statusOptions(metadata []domain.ProviderMetadata) ([]TaskStatusOption, bool) {
 	for _, item := range metadata {
 		if item.Key != "clickup.statuses" {
 			continue
 		}
 		var value struct {
 			Statuses []struct {
-				Name string `json:"name"`
+				Name  string `json:"name"`
+				Order int    `json:"order"`
+				Color string `json:"color"`
 			} `json:"statuses"`
 		}
 		if err := json.Unmarshal([]byte(item.Value), &value); err != nil {
 			return nil, false
 		}
-		result := make([]string, 0, len(value.Statuses))
+		result := make([]TaskStatusOption, 0, len(value.Statuses))
 		for _, status := range value.Statuses {
 			if strings.TrimSpace(status.Name) != "" {
-				result = append(result, status.Name)
+				result = append(result, TaskStatusOption{Name: status.Name, Order: status.Order, Color: status.Color})
 			}
 		}
+		sort.SliceStable(result, func(left, right int) bool { return result[left].Order < result[right].Order })
 		return result, true
 	}
 	return nil, false
@@ -3528,6 +3531,18 @@ func foundationUICommand(input foundationtui.AppCommand) (command.Command, bool,
 	}
 }
 
+func foundationStatusOptions(options []TaskStatusOption) []foundationtui.TaskStatusOption {
+	result := make([]foundationtui.TaskStatusOption, 0, len(options))
+	for _, option := range options {
+		result = append(result, foundationtui.TaskStatusOption{
+			Name:  option.Name,
+			Order: option.Order,
+			Color: option.Color,
+		})
+	}
+	return result
+}
+
 func foundationSnapshot(view View) foundationtui.Snapshot {
 	providers := make([]domain.Provider, 0, len(view.Providers))
 	for _, value := range view.Providers {
@@ -3653,7 +3668,7 @@ func foundationSnapshot(view View) foundationtui.Snapshot {
 			ProviderID: foundationtui.ProviderID(option.ProviderID),
 			SpaceID:    foundationtui.SpaceID(option.SpaceID),
 			ListID:     foundationtui.ListID(option.ListID),
-			Statuses:   append([]string(nil), option.Statuses...),
+			Statuses:   foundationStatusOptions(option.Statuses),
 		})
 	}
 	for _, column := range view.TaskColumns {

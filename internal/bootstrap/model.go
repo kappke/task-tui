@@ -252,10 +252,17 @@ type TaskColumnValueSet struct {
 	Values     map[string]string
 }
 
-// TaskEditorOptions contains provider-owned completion values for one list.
+// TaskStatusOption contains provider-owned ordering and display metadata.
+type TaskStatusOption struct {
+	Name  string
+	Order int
+	Color string
+}
+
+// TaskEditorOptions contains provider-owned status options for one list.
 type TaskEditorOptions struct {
 	ProviderID ProviderID
 	SpaceID    SpaceID
 	ListID     ListID
-	Statuses   []string
+	Statuses   []TaskStatusOption
 }
